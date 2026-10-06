@@ -1,0 +1,324 @@
+{
+  "bug_id": "121512",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-23",
+    "resolved": "397937d812852f9bbeb671005cb399dbcb357cde"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/nll.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_hir_analysis/src/check/region.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+      "compiler/rustc_borrowck/src/nll.rs",
+      "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+      "compiler/rustc_hir_analysis/src/check/region.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/nll.rs",
+        "rank": 2
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "rank": 3
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/region.rs",
+        "rank": 4
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/121512.json",
+    "graph_cache_hit": false,
+    "graph_cache_build_mode": "skeleton",
+    "graph_cache_bug_id": "121512",
+    "graph_cache_checkout_commit": "397937d812852f9bbeb671005cb399dbcb357cde",
+    "initial_graph_node_count": 54290,
+    "initial_graph_edge_count": 54289,
+    "graph_node_count": 54290,
+    "graph_edge_count": 78779,
+    "lazy_loaded_edge_count": 24490,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FILE\", \"name\": \"region.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/check/region.rs\", \"content\": \"region.rs\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"infer_opaque_types\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/region_infer/opaque_types.rs\", \"content\": \"pub(crate) fn infer_opaque_types(\\n        &self,\\n        infcx: &InferCtxt<'tcx>,\\n        opaque_ty_decls: FxIndexMap<OpaqueTypeKey<'tcx>, OpaqueHiddenType<'tcx>>,\\n    ) -> FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>> {\\n        let mut result: FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>> = FxIndexMap::default();\\n\\n        let member_constraints: FxIndexMap<_, _> = self\\n            .member_constraints\\n            .all_indices()\\n            .map(|ci| (self.member_constraints[ci].key, ci))\\n            .collect();\\n        debug!(?member_constraints);\\n\\n        for (opaque_type_key, concrete_type) in opaque_ty_decls {\\n            let args = opaque_type_key.args;\\n            debug!(?concrete_type, ?args);\\n\\n            let mut arg_regions = vec![self.universal_regions.fr_static];\\n\\n            let to_universal_region = |vid, arg_regions: &mut Vec<_>| {\\n                trace!(?vid);\\n                let scc = self.constraint_sccs.scc(vid);\\n                trace!(?scc);\\n                match self.scc_values.universal_regions_outlived_by(scc).find_map(|lb| {\\n                    self.eval_equal(vid, lb).then_some(self.definitions[lb].external_name?)\\n                }) {\\n                    Some(region) => {\\n                        let vid = self.universal_regions.to_region_vid(region);\\n                        arg_regions.push(vid);\\n                        region\\n                    }\\n                    None => {\\n                        arg_regions.push(vid);\\n                        ty::Region::new_error_with_message(\\n                            infcx.tcx,\\n                            concrete_type.span,\\n                            \\\"opaque type with non-universal region args\\\",\\n                        )\\n                    }\\n                }\\n            };\\n\\n            // Start by inserting universal regions from the member_constraint choice regions.\\n            // This will ensure they get precedence when folding the regions in the concrete type.\\n            if let Some(&ci) = member_constraints.get(&opaque_type_key) {\\n                for &vid in self.member_constraints.choice_regions(ci) {\\n                    to_universal_region(vid, &mut arg_regions);\\n                }\\n            }\\n            debug!(?arg_regions);\\n\\n            // Next, insert universal regions from args, so we can translate regions that appear\\n            // in them but are not subject to member constraints, for instance closure args.\\n            let universal_args = infcx.tcx.fold_regions(args, |region, _| {\\n                if let ty::RePlaceholder(..) = region.kind() {\\n                    // Higher kinded regions don't need remapping, they don't refer to anything outside of this the args.\\n                    return region;\\n                }\\n                let vid = self.to_region_vid(region);\\n                to_universal_region(vid, &mut arg_regions)\\n            });\\n            debug!(?universal_args);\\n            debug!(?arg_regions);\\n\\n            // Deduplicate the set of regions while keeping the chosen order.\\n            let arg_regions = arg_regions.into_iter().collect::<FxIndexSet<_>>();\\n            debug!(?arg_regions);\\n\\n            let universal_concrete_type =\\n                infcx.tcx.fold_regions(concrete_type, |region, _| match *region {\\n                    ty::ReVar(vid) => arg_regions\\n                        .iter()\\n                        .find(|ur_vid| self.eval_equal(vid, **ur_vid))\\n                        .and_then(|ur_vid| self.definitions[*ur_vid].external_name)\\n                        .unwrap_or(infcx.tcx.lifetimes.re_erased),\\n                    _ => region,\\n                });\\n            debug!(?universal_concrete_type);\\n\\n            let opaque_type_key =\\n                OpaqueTypeKey { def_id: opaque_type_key.def_id, args: universal_args };\\n            let ty = infcx.infer_opaque_definition_from_instantiation(\\n                opaque_type_key,\\n                universal_concrete_type,\\n            );\\n            // Sometimes two opaque types are the same only after we remap the generic parameters\\n            // back to the opaque type definition. E.g. we may have `OpaqueType<X, Y>` mapped to `(X, Y)`\\n            // and `OpaqueType<Y, X>` mapped to `(Y, X)`, and those are the same, but we only know that\\n            // once we convert the generic parameters to those of the opaque type.\\n            if let Some(prev) = result.get_mut(&opaque_type_key.def_id) {\\n                if prev.ty != ty {\\n                    let guar = ty.error_reported().err().unwrap_or_else(|| {\\n                        let (Ok(e) | Err(e)) = prev\\n                            .build_mismatch_error(\\n                                &OpaqueHiddenType { ty, span: concrete_type.span },\\n                                opaque_type_key.def_id,\\n                                infcx.tcx,\\n                            )\\n                            .map(|d| d.emit());\\n                        e\\n                    });\\n                    prev.ty = Ty::new_error(infcx.tcx, guar);\\n                }\\n                // Pick a better span if there is one.\\n                // FIXME(oli-obk): collect multiple spans for better diagnostics down the road.\\n                prev.span = prev.span.substitute_dummy(concrete_type.span);\\n            } else {\\n                result.insert(\\n                    opaque_type_key.def_id,\\n                    OpaqueHiddenType { ty, span: concrete_type.span },\\n                );\\n            }\\n        }\\n        result\\n    }\"}",
+      "{\"type\": \"FILE\", \"name\": \"opaque_types.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/solve/normalizes_to/opaque_types.rs\", \"content\": \"opaque_types.rs\"}",
+      "{\"type\": \"FILE\", \"name\": \"opaque.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs\", \"content\": \"opaque.rs\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"compute_regions\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/nll.rs\", \"content\": \"pub(crate) fn compute_regions<'cx, 'tcx>(\\n    infcx: &BorrowckInferCtxt<'_, 'tcx>,\\n    universal_regions: UniversalRegions<'tcx>,\\n    body: &Body<'tcx>,\\n    promoted: &IndexSlice<Promoted, Body<'tcx>>,\\n    location_table: &LocationTable,\\n    param_env: ty::ParamEnv<'tcx>,\\n    flow_inits: &mut ResultsCursor<'cx, 'tcx, MaybeInitializedPlaces<'cx, 'tcx>>,\\n    move_data: &MoveData<'tcx>,\\n    borrow_set: &BorrowSet<'tcx>,\\n    upvars: &[&ty::CapturedPlace<'tcx>],\\n    consumer_options: Option<ConsumerOptions>,\\n) -> NllOutput<'tcx> {\\n    let is_polonius_legacy_enabled = infcx.tcx.sess.opts.unstable_opts.polonius.is_legacy_enabled();\\n    let polonius_input = consumer_options.map(|c| c.polonius_input()).unwrap_or_default()\\n        || is_polonius_legacy_enabled;\\n    let polonius_output = consumer_options.map(|c| c.polonius_output()).unwrap_or_default()\\n        || is_polonius_legacy_enabled;\\n    let mut all_facts =\\n        (polonius_input || AllFacts::enabled(infcx.tcx)).then_some(AllFacts::default());\\n\\n    let universal_regions = Rc::new(universal_regions);\\n\\n    let elements = &Rc::new(DenseLocationMap::new(body));\\n\\n    // Run the MIR type-checker.\\n    let MirTypeckResults { constraints, universal_region_relations, opaque_type_values } =\\n        type_check::type_check(\\n            infcx,\\n            param_env,\\n            body,\\n            promoted,\\n            &universal_regions,\\n            location_table,\\n            borrow_set,\\n            &mut all_facts,\\n            flow_inits,\\n            move_data,\\n            elements,\\n            upvars,\\n            polonius_input,\\n        );\\n\\n    // Create the region inference context, taking ownership of the\\n    // region inference data that was contained in `infcx`, and the\\n    // base constraints generated by the type-check.\\n    let var_origins = infcx.get_region_var_origins();\\n    let MirTypeckRegionConstraints {\\n        placeholder_indices,\\n        placeholder_index_to_region: _,\\n        liveness_constraints,\\n        outlives_constraints,\\n        member_constraints,\\n        universe_causes,\\n        type_tests,\\n    } = constraints;\\n    let placeholder_indices = Rc::new(placeholder_indices);\\n\\n    // If requested, emit legacy polonius facts.\\n    polonius::emit_facts(\\n        &mut all_facts,\\n        infcx.tcx,\\n        location_table,\\n        body,\\n        borrow_set,\\n        move_data,\\n        &universal_regions,\\n        &universal_region_relations,\\n    );\\n\\n    let mut regioncx = RegionInferenceContext::new(\\n        infcx,\\n        var_origins,\\n        universal_regions,\\n        placeholder_indices,\\n        universal_region_relations,\\n        outlives_constraints,\\n        member_constraints,\\n        universe_causes,\\n        type_tests,\\n        liveness_constraints,\\n        elements,\\n    );\\n\\n    // If requested: dump NLL facts, and run legacy polonius analysis.\\n    let polonius_output = all_facts.as_ref().and_then(|all_facts| {\\n        if infcx.tcx.sess.opts.unstable_opts.nll_facts {\\n            let def_id = body.source.def_id();\\n            let def_path = infcx.tcx.def_path(def_id);\\n            let dir_path = PathBuf::from(&infcx.tcx.sess.opts.unstable_opts.nll_facts_dir)\\n                .join(def_path.to_filename_friendly_no_crate());\\n            all_facts.write_to_dir(dir_path, location_table).unwrap();\\n        }\\n\\n        if polonius_output {\\n            let algorithm =\\n                env::var(\\\"POLONIUS_ALGORITHM\\\").unwrap_or_else(|_| String::from(\\\"Hybrid\\\"));\\n            let algorithm = Algorithm::from_str(&algorithm).unwrap();\\n            debug!(\\\"compute_regions: using polonius algorithm {:?}\\\", algorithm);\\n            let _prof_timer = infcx.tcx.prof.generic_activity(\\\"polonius_analysis\\\");\\n            Some(Rc::new(Output::compute(all_facts, algorithm, false)))\\n        } else {\\n            None\\n        }\\n    });\\n\\n    // Solve the region constraints.\\n    let (closure_region_requirements, nll_errors) =\\n        regioncx.solve(infcx, body, polonius_output.clone());\\n\\n    if !nll_errors.is_empty() {\\n        // Suppress unhelpful extra errors in `infer_opaque_types`.\\n        infcx.set_tainted_by_errors(infcx.dcx().span_delayed_bug(\\n            body.span,\\n            \\\"`compute_regions` tainted `infcx` with errors but did not emit any errors\\\",\\n        ));\\n    }\\n\\n    let remapped_opaque_tys = regioncx.infer_opaque_types(infcx, opaque_type_values);\\n\\n    NllOutput {\\n        regioncx,\\n        opaque_type_values: remapped_opaque_tys,\\n        polonius_input: all_facts.map(Box::new),\\n        polonius_output,\\n        opt_closure_req: closure_region_requirements,\\n        nll_errors,\\n    }\\n}\"}",
+      "{\"type\": \"FILE\", \"name\": \"region_kind.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_type_ir/src/region_kind.rs\", \"content\": \"region_kind.rs\"}",
+      "{\"type\": \"FILE\", \"name\": \"infer.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/infer.rs\", \"content\": \"infer.rs\"}",
+      "{\"type\": \"FILE\", \"name\": \"region.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/ty/region.rs\", \"content\": \"region.rs\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+      "compiler/rustc_borrowck/src/nll.rs",
+      "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+      "compiler/rustc_hir_analysis/src/check/region.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Failure to remap opaque type arguments to universal regions",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "infer_opaque_types",
+              "file": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+              "content": "pub(crate) fn infer_opaque_types(\n        &self,\n        infcx: &InferCtxt<'tcx>,\n        opaque_ty_decls: FxIndexMap<OpaqueTypeKey<'tcx>, OpaqueHiddenType<'tcx>>,\n    ) -> FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>> {\n        let mut result: FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>> = FxIndexMap::default();\n\n        let member_constraints: FxIndexMap<_, _> = self\n            .member_constraints\n            .all_indices()\n            .map(|ci| (self.member_constraints[ci].key, ci))\n            .collect();\n        debug!(?member_constraints);\n\n        for (opaque_type_key, concrete_type) in opaque_ty_decls {\n            let args = opaque_type_key.args;\n            debug!(?concrete_type, ?args);\n\n            let mut arg_regions = vec![self.universal_regions.fr_static];\n\n            let to_universal_region = |vid, arg_regions: &mut Vec<_>| {\n                trace!(?vid);\n                let scc = self.constraint_sccs.scc(vid);\n                trace!(?scc);\n                match self.scc_values.universal_regions_outlived_by(scc).find_map(|lb| {\n                    self.eval_equal(vid, lb).then_some(self.definitions[lb].external_name?)\n                }) {\n                    Some(region) => {\n                        let vid = self.universal_regions.to_region_vid(region);\n                        arg_regions.push(vid);\n                        region\n                    }\n                    None => {\n                        arg_regions.push(vid);\n                        ty::Region::new_error_with_message(\n                            infcx.tcx,\n                            concrete_type.span,\n                            \"opaque type with non-universal region args\",\n                        )\n                    }\n                }\n            };\n\n            // Start by inserting universal regions from the member_constraint choice regions.\n            // This will ensure they get precedence when folding the regions in the concrete type.\n            if let Some(&ci) = member_constraints.get(&opaque_type_key) {\n                for &vid in self.member_constraints.choice_regions(ci) {\n                    to_universal_region(vid, &mut arg_regions);\n                }\n            }\n            debug!(?arg_regions);\n\n            // Next, insert universal regions from args, so we can translate regions that appear\n            // in them but are not subject to member constraints, for instance closure args.\n            let universal_args = infcx.tcx.fold_regions(args, |region, _| {\n                if let ty::RePlaceholder(..) = region.kind() {\n                    // Higher kinded regions don't need remapping, they don't refer to anything outside of this the args.\n                    return region;\n                }\n                let vid = self.to_region_vid(region);\n                to_universal_region(vid, &mut arg_regions)\n            });\n            debug!(?universal_args);\n            debug!(?arg_regions);\n\n            // Deduplicate the set of regions while keeping the chosen order.\n            let arg_regions = arg_regions.into_iter().collect::<FxIndexSet<_>>();\n            debug!(?arg_regions);\n\n            let universal_concrete_type =\n                infcx.tcx.fold_regions(concrete_type, |region, _| match *region {\n                    ty::ReVar(vid) => arg_regions\n                        .iter()\n                        .find(|ur_vid| self.eval_equal(vid, **ur_vid))\n                        .and_then(|ur_vid| self.definitions[*ur_vid].external_name)\n                        .unwrap_or(infcx.tcx.lifetimes.re_erased),\n                    _ => region,\n                });\n            debug!(?universal_concrete_type);\n\n            let opaque_type_key =\n                OpaqueTypeKey { def_id: opaque_type_key.def_id, args: universal_args };\n            let ty = infcx.infer_opaque_definition_from_instantiation(\n                opaque_type_key,\n                universal_concrete_type,\n            );\n            // Sometimes two opaque types are the same only after we remap the generic parameters\n            // back to the opaque type definition. E.g. we may have `OpaqueType<X, Y>` mapped to `(X, Y)`\n            // and `OpaqueType<Y, X>` mapped to `(Y, X)`, and those are the same, but we only know that\n            // once we convert the generic parameters to those of the opaque type.\n            if let Some(prev) = result.get_mut(&opaque_type_key.def_id) {\n                if prev.ty != ty {\n                    let guar = ty.error_reported().err().unwrap_or_else(|| {\n                        let (Ok(e) | Err(e)) = prev\n                            .build_mismatch_error(\n                                &OpaqueHiddenType { ty, span: concrete_type.span },\n                                opaque_type_key.def_id,\n                                infcx.tcx,\n                            )\n                            .map(|d| d.emit());\n                        e\n                    });\n                    prev.ty = Ty::new_error(infcx.tcx, guar);\n                }\n                // Pick a better span if there is one.\n                // FIXME(oli-obk): collect multiple spans for better diagnostics down the road.\n                prev.span = prev.span.substitute_dummy(concrete_type.span);\n            } else {\n                result.insert(\n                    opaque_type_key.def_id,\n                    OpaqueHiddenType { ty, span: concrete_type.span },\n                );\n            }\n        }\n        result\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Non-universal region detected during opaque type inference, triggering delayed bug/ICE",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "infer_opaque_types",
+              "file": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+              "content": "pub(crate) fn infer_opaque_types(\n        &self,\n        infcx: &InferCtxt<'tcx>,\n        opaque_ty_decls: FxIndexMap<OpaqueTypeKey<'tcx>, OpaqueHiddenType<'tcx>>,\n    ) -> FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>> {\n        let mut result: FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>> = FxIndexMap::default();\n\n        let member_constraints: FxIndexMap<_, _> = self\n            .member_constraints\n            .all_indices()\n            .map(|ci| (self.member_constraints[ci].key, ci))\n            .collect();\n        debug!(?member_constraints);\n\n        for (opaque_type_key, concrete_type) in opaque_ty_decls {\n            let args = opaque_type_key.args;\n            debug!(?concrete_type, ?args);\n\n            let mut arg_regions = vec![self.universal_regions.fr_static];\n\n            let to_universal_region = |vid, arg_regions: &mut Vec<_>| {\n                trace!(?vid);\n                let scc = self.constraint_sccs.scc(vid);\n                trace!(?scc);\n                match self.scc_values.universal_regions_outlived_by(scc).find_map(|lb| {\n                    self.eval_equal(vid, lb).then_some(self.definitions[lb].external_name?)\n                }) {\n                    Some(region) => {\n                        let vid = self.universal_regions.to_region_vid(region);\n                        arg_regions.push(vid);\n                        region\n                    }\n                    None => {\n                        arg_regions.push(vid);\n                        ty::Region::new_error_with_message(\n                            infcx.tcx,\n                            concrete_type.span,\n                            \"opaque type with non-universal region args\",\n                        )\n                    }\n                }\n            };\n\n            // Start by inserting universal regions from the member_constraint choice regions.\n            // This will ensure they get precedence when folding the regions in the concrete type.\n            if let Some(&ci) = member_constraints.get(&opaque_type_key) {\n                for &vid in self.member_constraints.choice_regions(ci) {\n                    to_universal_region(vid, &mut arg_regions);\n                }\n            }\n            debug!(?arg_regions);\n\n            // Next, insert universal regions from args, so we can translate regions that appear\n            // in them but are not subject to member constraints, for instance closure args.\n            let universal_args = infcx.tcx.fold_regions(args, |region, _| {\n                if let ty::RePlaceholder(..) = region.kind() {\n                    // Higher kinded regions don't need remapping, they don't refer to anything outside of this the args.\n                    return region;\n                }\n                let vid = self.to_region_vid(region);\n                to_universal_region(vid, &mut arg_regions)\n            });\n            debug!(?universal_args);\n            debug!(?arg_regions);\n\n            // Deduplicate the set of regions while keeping the chosen order.\n            let arg_regions = arg_regions.into_iter().collect::<FxIndexSet<_>>();\n            debug!(?arg_regions);\n\n            let universal_concrete_type =\n                infcx.tcx.fold_regions(concrete_type, |region, _| match *region {\n                    ty::ReVar(vid) => arg_regions\n                        .iter()\n                        .find(|ur_vid| self.eval_equal(vid, **ur_vid))\n                        .and_then(|ur_vid| self.definitions[*ur_vid].external_name)\n                        .unwrap_or(infcx.tcx.lifetimes.re_erased),\n                    _ => region,\n                });\n            debug!(?universal_concrete_type);\n\n            let opaque_type_key =\n                OpaqueTypeKey { def_id: opaque_type_key.def_id, args: universal_args };\n            let ty = infcx.infer_opaque_definition_from_instantiation(\n                opaque_type_key,\n                universal_concrete_type,\n            );\n            // Sometimes two opaque types are the same only after we remap the generic parameters\n            // back to the opaque type definition. E.g. we may have `OpaqueType<X, Y>` mapped to `(X, Y)`\n            // and `OpaqueType<Y, X>` mapped to `(Y, X)`, and those are the same, but we only know that\n            // once we convert the generic parameters to those of the opaque type.\n            if let Some(prev) = result.get_mut(&opaque_type_key.def_id) {\n                if prev.ty != ty {\n                    let guar = ty.error_reported().err().unwrap_or_else(|| {\n                        let (Ok(e) | Err(e)) = prev\n                            .build_mismatch_error(\n                                &OpaqueHiddenType { ty, span: concrete_type.span },\n                                opaque_type_key.def_id,\n                                infcx.tcx,\n                            )\n                            .map(|d| d.emit());\n                        e\n                    });\n                    prev.ty = Ty::new_error(infcx.tcx, guar);\n                }\n                // Pick a better span if there is one.\n                // FIXME(oli-obk): collect multiple spans for better diagnostics down the road.\n                prev.span = prev.span.substitute_dummy(concrete_type.span);\n            } else {\n                result.insert(\n                    opaque_type_key.def_id,\n                    OpaqueHiddenType { ty, span: concrete_type.span },\n                );\n            }\n        }\n        result\n    }"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Borrow-check region solving passes problematic opaque_type_values into opaque inference",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "compute_regions",
+              "file": "compiler/rustc_borrowck/src/nll.rs",
+              "content": "pub(crate) fn compute_regions<'cx, 'tcx>(\n    infcx: &BorrowckInferCtxt<'_, 'tcx>,\n    universal_regions: UniversalRegions<'tcx>,\n    body: &Body<'tcx>,\n    promoted: &IndexSlice<Promoted, Body<'tcx>>,\n    location_table: &LocationTable,\n    param_env: ty::ParamEnv<'tcx>,\n    flow_inits: &mut ResultsCursor<'cx, 'tcx, MaybeInitializedPlaces<'cx, 'tcx>>,\n    move_data: &MoveData<'tcx>,\n    borrow_set: &BorrowSet<'tcx>,\n    upvars: &[&ty::CapturedPlace<'tcx>],\n    consumer_options: Option<ConsumerOptions>,\n) -> NllOutput<'tcx> {\n    let is_polonius_legacy_enabled = infcx.tcx.sess.opts.unstable_opts.polonius.is_legacy_enabled();\n    let polonius_input = consumer_options.map(|c| c.polonius_input()).unwrap_or_default()\n        || is_polonius_legacy_enabled;\n    let polonius_output = consumer_options.map(|c| c.polonius_output()).unwrap_or_default()\n        || is_polonius_legacy_enabled;\n    let mut all_facts =\n        (polonius_input || AllFacts::enabled(infcx.tcx)).then_some(AllFacts::default());\n\n    let universal_regions = Rc::new(universal_regions);\n\n    let elements = &Rc::new(DenseLocationMap::new(body));\n\n    // Run the MIR type-checker.\n    let MirTypeckResults { constraints, universal_region_relations, opaque_type_values } =\n        type_check::type_check(\n            infcx,\n            param_env,\n            body,\n            promoted,\n            &universal_regions,\n            location_table,\n            borrow_set,\n            &mut all_facts,\n            flow_inits,\n            move_data,\n            elements,\n            upvars,\n            polonius_input,\n        );\n\n    // Create the region inference context, taking ownership of the\n    // region inference data that was contained in `infcx`, and the\n    // base constraints generated by the type-check.\n    let var_origins = infcx.get_region_var_origins();\n    let MirTypeckRegionConstraints {\n        placeholder_indices,\n        placeholder_index_to_region: _,\n        liveness_constraints,\n        outlives_constraints,\n        member_constraints,\n        universe_causes,\n        type_tests,\n    } = constraints;\n    let placeholder_indices = Rc::new(placeholder_indices);\n\n    // If requested, emit legacy polonius facts.\n    polonius::emit_facts(\n        &mut all_facts,\n        infcx.tcx,\n        location_table,\n        body,\n        borrow_set,\n        move_data,\n        &universal_regions,\n        &universal_region_relations,\n    );\n\n    let mut regioncx = RegionInferenceContext::new(\n        infcx,\n        var_origins,\n        universal_regions,\n        placeholder_indices,\n        universal_region_relations,\n        outlives_constraints,\n        member_constraints,\n        universe_causes,\n        type_tests,\n        liveness_constraints,\n        elements,\n    );\n\n    // If requested: dump NLL facts, and run legacy polonius analysis.\n    let polonius_output = all_facts.as_ref().and_then(|all_facts| {\n        if infcx.tcx.sess.opts.unstable_opts.nll_facts {\n            let def_id = body.source.def_id();\n            let def_path = infcx.tcx.def_path(def_id);\n            let dir_path = PathBuf::from(&infcx.tcx.sess.opts.unstable_opts.nll_facts_dir)\n                .join(def_path.to_filename_friendly_no_crate());\n            all_facts.write_to_dir(dir_path, location_table).unwrap();\n        }\n\n        if polonius_output {\n            let algorithm =\n                env::var(\"POLONIUS_ALGORITHM\").unwrap_or_else(|_| String::from(\"Hybrid\"));\n            let algorithm = Algorithm::from_str(&algorithm).unwrap();\n            debug!(\"compute_regions: using polonius algorithm {:?}\", algorithm);\n            let _prof_timer = infcx.tcx.prof.generic_activity(\"polonius_analysis\");\n            Some(Rc::new(Output::compute(all_facts, algorithm, false)))\n        } else {\n            None\n        }\n    });\n\n    // Solve the region constraints.\n    let (closure_region_requirements, nll_errors) =\n        regioncx.solve(infcx, body, polonius_output.clone());\n\n    if !nll_errors.is_empty() {\n        // Suppress unhelpful extra errors in `infer_opaque_types`.\n        infcx.set_tainted_by_errors(infcx.dcx().span_delayed_bug(\n            body.span,\n            \"`compute_regions` tainted `infcx` with errors but did not emit any errors\",\n        ));\n    }\n\n    let remapped_opaque_tys = regioncx.infer_opaque_types(infcx, opaque_type_values);\n\n    NllOutput {\n        regioncx,\n        opaque_type_values: remapped_opaque_tys,\n        polonius_input: all_facts.map(Box::new),\n        polonius_output,\n        opt_closure_req: closure_region_requirements,\n        nll_errors,\n    }\n}"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Recursive impl Trait self-reference with explicit lifetime arguments creates problematic region relations",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "opaque.rs",
+              "file": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+              "content": "opaque.rs"
+            }
+          ]
+        },
+        {
+          "id": "E",
+          "name": "Multiple lifetime parameters on the opaque return type increase chance that one argument is not treated as universal",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "region.rs",
+              "file": "compiler/rustc_hir_analysis/src/check/region.rs",
+              "content": "region.rs"
+            }
+          ]
+        },
+        {
+          "id": "F",
+          "name": "Opaque type collection/type_of path depends on later borrowck remapping consistency",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "opaque.rs",
+              "file": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+              "content": "opaque.rs"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.98
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.96
+        },
+        {
+          "source": "C",
+          "target": "A",
+          "weight": 0.9
+        },
+        {
+          "source": "D",
+          "target": "C",
+          "weight": 0.9
+        },
+        {
+          "source": "E",
+          "target": "A",
+          "weight": 0.78
+        },
+        {
+          "source": "F",
+          "target": "I",
+          "weight": 0.78
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 302.278,
+    "stage_times_sec": {
+      "load_bug_context": 0.0,
+      "checkout": 1.149,
+      "load_or_build_graph": 36.212,
+      "symptom_vertices_locating": 232.214,
+      "dynamic_cig_discovering": 31.018,
+      "convert_results": 0.037
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 102821,
+      "output_tokens": 1852,
+      "total_tokens": 104673,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.318,
+          "input_tokens": 4470,
+          "output_tokens": 95,
+          "total_tokens": 4565
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.537,
+          "input_tokens": 3823,
+          "output_tokens": 18,
+          "total_tokens": 3841
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 3.538,
+          "input_tokens": 4642,
+          "output_tokens": 55,
+          "total_tokens": 4697
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.744,
+          "input_tokens": 3823,
+          "output_tokens": 18,
+          "total_tokens": 3841
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 3.168,
+          "input_tokens": 4841,
+          "output_tokens": 49,
+          "total_tokens": 4890
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.191,
+          "input_tokens": 3811,
+          "output_tokens": 18,
+          "total_tokens": 3829
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.207,
+          "input_tokens": 5142,
+          "output_tokens": 44,
+          "total_tokens": 5186
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 3.009,
+          "input_tokens": 6172,
+          "output_tokens": 78,
+          "total_tokens": 6250
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 5.535,
+          "input_tokens": 6298,
+          "output_tokens": 230,
+          "total_tokens": 6528
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 4.167,
+          "input_tokens": 11214,
+          "output_tokens": 206,
+          "total_tokens": 11420
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 4.185,
+          "input_tokens": 11219,
+          "output_tokens": 216,
+          "total_tokens": 11435
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 4.429,
+          "input_tokens": 7116,
+          "output_tokens": 207,
+          "total_tokens": 7323
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 4.318,
+          "input_tokens": 15323,
+          "output_tokens": 206,
+          "total_tokens": 15529
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 3.408,
+          "input_tokens": 7810,
+          "output_tokens": 206,
+          "total_tokens": 8016
+        },
+        {
+          "stage": "causal_update_6",
+          "latency_sec": 4.924,
+          "input_tokens": 7117,
+          "output_tokens": 206,
+          "total_tokens": 7323
+        }
+      ]
+    }
+  }
+}

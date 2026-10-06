@@ -1,0 +1,258 @@
+{
+  "bug_id": "110892",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-04-26",
+    "resolved": "458d4dae845ec155b285681a5b88305641abb868"
+  },
+  "final_top10": [
+    "compiler/rustc_transmute/src/lib.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_ty_utils/src/consts.rs",
+    "compiler/rustc_middle/src/ty/abstract_const.rs",
+    "compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs",
+    "compiler/rustc_traits/src/evaluate_obligation.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_hir_analysis/src/astconv/generics.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly `generic_const_exprs`, allowing const expressions inside generic arguments and where-clause trait bounds.",
+        "Defines `assert::is_transmutable` with type and const generics, modeling compile-time transmutability checks through trait resolution.",
+        "Uses unstable internal std items `Assume` and `BikeshedIntrinsicFrom`, exercising compiler handling of intrinsic-like transmute traits.",
+        "The where-clause computes a const generic via `from_options(...)`, forcing const-evaluation during trait obligation formation.",
+        "`from_options` is declared `const fn` with missing parameter names/types, intentionally creating malformed syntax the parser must diagnose.",
+        "`test` declares local `Context`, `Src`, and `Dst`, with `#[repr(C)]` structs to give explicit C-compatible layout for transmutation scenarios.",
+        "The call `assert::is_transmutable::<..., false, false, { true }, false>()` mixes literal and block const arguments, stressing const-generic parsing/type checking.",
+        "The bare call `false();` attempts to call a boolean as a function, adding another invalid expression for error recovery behavior."
+      ],
+      "summary": "The reproducer is a deliberately invalid nightly crate that targets parser, const-generic, and trait-obligation handling around compile-time transmutability checks. It combines `generic_const_exprs`, unstable intrinsic-like std traits, malformed `const fn` syntax, mixed const generic arguments, local `repr(C)` types, and an invalid `false()` call to stress rustc diagnostics and error recovery."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is that this is not a normal valid-program compilation path: the crate contains multiple earlier syntax/type errors, but rustc continues into type checking and trait selection for a transmutability-style obligation involving const generics. The ICE occurs while evaluating the obligation `Dst: BikeshedIntrinsicFrom<Src, Context, { from_options(...) }>` during `evaluate_obligation`, which strongly suggests a compiler defect in error recovery for malformed const arguments used inside trait bounds. The reproducer combines three stressors: (1) generic const expressions in a where-clause, (2) unstable transmutability/intrinsic-like trait machinery (`BikeshedIntrinsicFrom`, `Assume`), and (3) an invalid `const fn from_options` declaration with missing parameters, so the compiler likely constructs or propagates an erroneous/placeholder const expression and later assumes it is well-formed during trait selection or const evaluation. The stack/query information shows the crash is not primarily in parsing itself, but in later semantic processing after diagnostics were already emitted, indicating missing guards against `Err`/error types or malformed const-generic AST/HIR/Ty objects in the transmutability trait obligation path.",
+      "possible_causes": [
+        "Missing error-recovery check in trait selection for `core::mem::transmutability::BikeshedIntrinsicFrom` obligations when the const generic argument originates from an invalid or ill-formed `const fn` call expression.",
+        "A bug in generic-const-expr handling where a malformed const expression in a where-clause trait bound is lowered/interned into a broken const representation, and later `evaluate_obligation` assumes it is valid.",
+        "The transmutability/intrinsic trait code path likely does not gracefully handle `ErrorGuaranteed`/error consts produced during earlier parsing or type-checking failures, leading to an ICE instead of normal error propagation.",
+        "HIR/typeck lowering for `from_options(ASSUME_ALIGNMENT, ...)` inside a const generic may create an invalid `UnevaluatedConst`/abstract const when the referenced `const fn` signature is syntactically incomplete, and downstream code fails to reject it.",
+        "Error recovery interaction between malformed item syntax (`const fn from_options( , , , , )`) and obligation formation for const-dependent trait bounds likely leaves partially-initialized generic arguments that the compiler later pattern-matches as if complete.",
+        "A defect in the unstable transmutability feature implementation may assume the `Assume` const parameter is always derivable from a valid const fn, but this reproducer shows that invalid inputs can still reach the obligation engine during compilation recovery."
+      ],
+      "evidence": [
+        "Query stack pinpoints the panic at `evaluate_obligation` for `test::Dst: core::mem::transmutability::BikeshedIntrinsicFrom<test::Src, test::Context, { from_options(...) }>` rather than at initial parsing.",
+        "The reproducer intentionally includes malformed `const fn from_options( , , , , ) -> Assume {}` syntax, so any later attempt to evaluate or normalize `from_options(...)` must handle erroneous input robustly.",
+        "The crate also has other front-end errors (`false();`, unstable/internal items, parser/type errors), yet rustc continues into analysis, showing the ICE is triggered during recovery after prior diagnostics.",
+        "The failing bound uses `generic_const_exprs` and a computed const argument inside a where-clause, matching known fragile compiler areas: abstract const construction, const-eval in types, and obligation solving.",
+        "The compiler output explicitly says there were many previous errors, but instead of only reporting them it panicked, which is characteristic of missing `ty::Error`/error-node handling in production compiler code.",
+        "The obligation involves unstable transmutability machinery (`BikeshedIntrinsicFrom`, `Assume`), a specialized compiler path more likely to have incomplete validation for malformed const-generic inputs."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1618,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_transmute/src/lib.rs",
+        "reason": "While evaluating `BikeshedIntrinsicFrom<..., { from_options(...) }>` on the transmutability path, the compiler ICEs, and the stack points squarely at `rustc_transmute::Assume::from_const` in this crate. The suspect is the logic that decodes the `Assume` const generic: it appears to presuppose the const is well-formed and evaluable, with no tolerance for erroneous consts encountered during error recovery."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "Most directly implicated by the reproducer: the crashing obligation contains a const generic expression in a where-clause under `generic_const_exprs`, and this file is responsible for deciding whether such consts are evaluatable, expanding abstract consts, and handling erroneous/unevaluated consts. An ICE after prior diagnostics strongly suggests missing error handling here for malformed const expressions reaching trait solving."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This file builds and validates abstract consts from THIR for generic const evaluation. The malformed `from_options(...)` const expression in a trait bound could be lowered into a broken abstract const shape during recovery, and downstream code may then assume the abstract const is structurally valid."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/abstract_const.rs",
+        "reason": "Abstract const expansion is a key step in generic const evaluatability. If an invalid const fn call from error recovery is represented as `Unevaluated` or expanded improperly, bugs in this file could allow malformed abstract consts to persist into obligation evaluation and trigger the ICE."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs",
+        "reason": "The query stack explicitly points at `evaluate_obligation`. This file implements the query-side obligation evaluation path and may be failing to short-circuit when the predicate contains an error const or malformed generic argument produced by earlier compilation errors."
+      },
+      {
+        "path": "compiler/rustc_traits/src/evaluate_obligation.rs",
+        "reason": "This is the provider for the `evaluate_obligation` query in the legacy solver, reconstructing the inference context and passing the obligation into selection. Since the panic occurs in this query, this file is a plausible location for missing guards around erroneous predicates/const arguments."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Selection is where the `BikeshedIntrinsicFrom` obligation is actually processed. The reproducer targets unstable transmutability machinery plus malformed const-generic input, so builtin/specialized selection logic here may be assuming the const argument is well-formed during candidate confirmation or evaluation."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+        "reason": "`BikeshedIntrinsicFrom` is a specialized trait path likely handled during candidate assembly. If malformed const arguments from error recovery are not screened out before assembling builtin/lang-item-like candidates, this phase could create invalid assumptions that later ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Anonymous const and const-argument typing flows through this file. Because the reproducer embeds a computed const expression inside generic arguments, an error-recovery bug here could assign an inconsistent type or malformed const representation that later crashes trait evaluation."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/generics.rs",
+        "reason": "This file validates and lowers generic arguments, especially const generics. The reproducer stresses malformed const syntax and mixed const argument forms; an incorrect recovery path here could let an invalid const generic argument into later trait machinery instead of preserving a safe error placeholder."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 167.332,
+    "stage_times_sec": {
+      "checkout": 2.623,
+      "load_bug_context": 0.053,
+      "test_behavior_analysis": 6.355,
+      "test_failure_analysis": 15.451,
+      "load_file_candidates": 8.285,
+      "search_suspicious_files": 134.565
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 397011,
+      "output_tokens": 7185,
+      "total_tokens": 404196,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.355,
+          "input_tokens": 580,
+          "output_tokens": 311,
+          "total_tokens": 891
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.451,
+          "input_tokens": 2375,
+          "output_tokens": 791,
+          "total_tokens": 3166
+        },
+        {
+          "stage": "file_summary:compiler_rustc_builtin_macros_src_offset_of_rs",
+          "latency_sec": 5.236,
+          "input_tokens": 973,
+          "output_tokens": 220,
+          "total_tokens": 1193
+        },
+        {
+          "stage": "file_summary:compiler_rustc_builtin_macros_src_offset_of_rs_repair",
+          "latency_sec": 2.928,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.203,
+          "input_tokens": 27918,
+          "output_tokens": 331,
+          "total_tokens": 28249
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 10.184,
+          "input_tokens": 27968,
+          "output_tokens": 395,
+          "total_tokens": 28363
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.301,
+          "input_tokens": 27586,
+          "output_tokens": 269,
+          "total_tokens": 27855
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.908,
+          "input_tokens": 27835,
+          "output_tokens": 344,
+          "total_tokens": 28179
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.305,
+          "input_tokens": 27781,
+          "output_tokens": 356,
+          "total_tokens": 28137
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.859,
+          "input_tokens": 28217,
+          "output_tokens": 360,
+          "total_tokens": 28577
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.211,
+          "input_tokens": 28075,
+          "output_tokens": 358,
+          "total_tokens": 28433
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.1,
+          "input_tokens": 27918,
+          "output_tokens": 353,
+          "total_tokens": 28271
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.654,
+          "input_tokens": 28096,
+          "output_tokens": 425,
+          "total_tokens": 28521
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.916,
+          "input_tokens": 27850,
+          "output_tokens": 317,
+          "total_tokens": 28167
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.82,
+          "input_tokens": 28159,
+          "output_tokens": 410,
+          "total_tokens": 28569
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 10.407,
+          "input_tokens": 28118,
+          "output_tokens": 348,
+          "total_tokens": 28466
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.631,
+          "input_tokens": 28128,
+          "output_tokens": 327,
+          "total_tokens": 28455
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.388,
+          "input_tokens": 15280,
+          "output_tokens": 314,
+          "total_tokens": 15594
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.654,
+          "input_tokens": 13899,
+          "output_tokens": 739,
+          "total_tokens": 14638
+        }
+      ]
+    }
+  }
+}

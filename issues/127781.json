@@ -1,0 +1,12 @@
+{
+  "title": "Async closure argument inference is broken with functions taking `FnOnce() -> futures::TryFuture`",
+  "labels": [
+    "A-closures",
+    "A-inference",
+    "C-bug",
+    "A-async-closures",
+    "WG-async",
+    "T-types"
+  ],
+  "body": "I'm writing this as a continuation of https://github.com/rust-lang/rust/issues/127425\r\n\r\nWhile the problem from first message in issue seems to be fixed, there are still cases when this fails.\r\n\r\nOne of examples is when using `try_for_each` instead of `for_each`, when closure is expected to return `Result`:\r\n\r\n```rust\r\n#![feature(async_closure)]\r\n\r\nuse anyhow::Error;\r\nuse futures::{stream::repeat_with, StreamExt, TryStreamExt};\r\n\r\nfn accept_str(_: &str) {}\r\nfn accept_string(_: &String) {}\r\n\r\n#[tokio::main(flavor = \"current_thread\")]\r\nasync fn main() -> Result<(), Error> {\r\n\r\n    repeat_with(|| \"foo\".to_owned())\r\n        .take(1)\r\n        .map(Result::<_, Error>::Ok)\r\n        .try_for_each(async move |value| {\r\n            // error on whole closure, rust thinks that type of value is `str`\r\n            accept_str(&value);\r\n\r\n            // type annotations needed, cannot infer type\r\n            accept_str(value.as_str());\r\n\r\n            // this works\r\n            accept_string(&value); // ok\r\n            \r\n            Ok(())\r\n        })\r\n        .await?;\r\n\r\n    Ok(())\r\n}\r\n```\r\n\r\nI expected to see this happen: All options used to work in past versions of rust\r\n\r\nInstead, this happened: Without explicit type hint it fails\r\n\r\n### Version it worked on\r\nIt most recently worked on: Not 100% sure, some explanations have been made in original issue \r\n\r\n### Version with regression\r\n```\r\nrustc 1.81.0-nightly (d9284afea 2024-07-14)\r\nbinary: rustc\r\ncommit-hash: d9284afea99e0969a0e692b9e9fd61ea4ba21366\r\ncommit-date: 2024-07-14\r\nhost: x86_64-pc-windows-msvc\r\nrelease: 1.81.0-nightly\r\nLLVM version: 18.1.7\r\n```"
+}

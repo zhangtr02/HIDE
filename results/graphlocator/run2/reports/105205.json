@@ -1,0 +1,221 @@
+{
+  "bug_id": "105205",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-12-02",
+    "resolved": "c090c6880c0183ba248bde4a16e29ba29ac4fbba"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/wf.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_trait_selection/src/traits/wf.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "rank": 1
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/105205.json",
+    "graph_cache_hit": false,
+    "graph_cache_build_mode": "skeleton",
+    "graph_cache_bug_id": "105205",
+    "graph_cache_checkout_commit": "c090c6880c0183ba248bde4a16e29ba29ac4fbba",
+    "initial_graph_node_count": 48947,
+    "initial_graph_edge_count": 48946,
+    "graph_node_count": 48947,
+    "graph_edge_count": 58851,
+    "lazy_loaded_edge_count": 9905,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"compute\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/wf.rs\", \"content\": \"fn compute(&mut self, arg: GenericArg<'tcx>) {\\n        let mut walker = arg.walk();\\n        let param_env = self.param_env;\\n        let depth = self.recursion_depth;\\n        while let Some(arg) = walker.next() {\\n            debug!(?arg, ?self.out);\\n            let ty = match arg.unpack() {\\n                GenericArgKind::Type(ty) => ty,\\n\\n                // No WF constraints for lifetimes being present, any outlives\\n                // obligations are handled by the parent (e.g. `ty::Ref`).\\n                GenericArgKind::Lifetime(_) => continue,\\n\\n                GenericArgKind::Const(ct) => {\\n                    match ct.kind() {\\n                        ty::ConstKind::Unevaluated(uv) => {\\n                            let obligations = self.nominal_obligations(uv.def.did, uv.substs);\\n                            self.out.extend(obligations);\\n\\n                            let predicate =\\n                                ty::Binder::dummy(ty::PredicateKind::ConstEvaluatable(ct));\\n                            let cause = self.cause(traits::WellFormed(None));\\n                            self.out.push(traits::Obligation::with_depth(\\n                                self.tcx(),\\n                                cause,\\n                                self.recursion_depth,\\n                                self.param_env,\\n                                predicate,\\n                            ));\\n                        }\\n                        ty::ConstKind::Infer(_) => {\\n                            let cause = self.cause(traits::WellFormed(None));\\n\\n                            self.out.push(traits::Obligation::with_depth(\\n                                self.tcx(),\\n                                cause,\\n                                self.recursion_depth,\\n                                self.param_env,\\n                                ty::Binder::dummy(ty::PredicateKind::WellFormed(ct.into())),\\n                            ));\\n                        }\\n                        // FIXME(generic_const_exprs): This seems wrong but I could not find a way to get this to trigger\\n                        ty::ConstKind::Expr(_) => {\\n                            bug!(\\\"checking wfness of `ConstKind::Expr` is unsupported\\\")\\n                        }\\n\\n                        ty::ConstKind::Error(_)\\n                        | ty::ConstKind::Param(_)\\n                        | ty::ConstKind::Bound(..)\\n                        | ty::ConstKind::Placeholder(..) => {\\n                            // These variants are trivially WF, so nothing to do here.\\n                        }\\n                        ty::ConstKind::Value(..) => {\\n                            // FIXME: Enforce that values are structurally-matchable.\\n                        }\\n                    }\\n                    continue;\\n                }\\n            };\\n\\n            debug!(\\\"wf bounds for ty={:?} ty.kind={:#?}\\\", ty, ty.kind());\\n\\n            match *ty.kind() {\\n                ty::Bool\\n                | ty::Char\\n                | ty::Int(..)\\n                | ty::Uint(..)\\n                | ty::Float(..)\\n                | ty::Error(_)\\n                | ty::Str\\n                | ty::GeneratorWitness(..)\\n                | ty::Never\\n                | ty::Param(_)\\n                | ty::Bound(..)\\n                | ty::Placeholder(..)\\n                | ty::Foreign(..) => {\\n                    // WfScalar, WfParameter, etc\\n                }\\n\\n                // Can only infer to `ty::Int(_) | ty::Uint(_)`.\\n                ty::Infer(ty::IntVar(_)) => {}\\n\\n                // Can only infer to `ty::Float(_)`.\\n                ty::Infer(ty::FloatVar(_)) => {}\\n\\n                ty::Slice(subty) => {\\n                    self.require_sized(subty, traits::SliceOrArrayElem);\\n                }\\n\\n                ty::Array(subty, _) => {\\n                    self.require_sized(subty, traits::SliceOrArrayElem);\\n                    // Note that we handle the len is implicitly checked while walking `arg`.\\n                }\\n\\n                ty::Tuple(ref tys) => {\\n                    if let Some((_last, rest)) = tys.split_last() {\\n                        for &elem in rest {\\n                            self.require_sized(elem, traits::TupleElem);\\n                        }\\n                    }\\n                }\\n\\n                ty::RawPtr(_) => {\\n                    // Simple cases that are WF if their type args are WF.\\n                }\\n\\n                ty::Projection(data) => {\\n                    walker.skip_current_subtree(); // Subtree handled by compute_projection.\\n                    self.compute_projection(data);\\n                }\\n\\n                ty::Adt(def, substs) => {\\n                    // WfNominalType\\n                    let obligations = self.nominal_obligations(def.did(), substs);\\n                    self.out.extend(obligations);\\n                }\\n\\n                ty::FnDef(did, substs) => {\\n                    let obligations = self.nominal_obligations_without_const(did, substs);\\n                    self.out.extend(obligations);\\n                }\\n\\n                ty::Ref(r, rty, _) => {\\n                    // WfReference\\n                    if !r.has_escaping_bound_vars() && !rty.has_escaping_bound_vars() {\\n                        let cause = self.cause(traits::ReferenceOutlivesReferent(ty));\\n                        self.out.push(traits::Obligation::with_depth(\\n                            self.tcx(),\\n                            cause,\\n                            depth,\\n                            param_env,\\n                            ty::Binder::dummy(ty::PredicateKind::Clause(ty::Clause::TypeOutlives(\\n                                ty::OutlivesPredicate(rty, r),\\n                            ))),\\n                        ));\\n                    }\\n                }\\n\\n                ty::Generator(did, substs, ..) => {\\n                    // Walk ALL the types in the generator: this will\\n                    // include the upvar types as well as the yield\\n                    // type. Note that this is mildly distinct from\\n                    // the closure case, where we have to be careful\\n                    // about the signature of the closure. We don't\\n                    // have the problem of implied bounds here since\\n                    // generators don't take arguments.\\n                    let obligations = self.nominal_obligations(did, substs);\\n                    self.out.extend(obligations);\\n                }\\n\\n                ty::Closure(did, substs) => {\\n                    // Only check the upvar types for WF, not the rest\\n                    // of the types within. This is needed because we\\n                    // capture the signature and it may not be WF\\n                    // without the implied bounds. Consider a closure\\n                    // like `|x: &'a T|` -- it may be that `T: 'a` is\\n                    // not known to hold in the creator's context (and\\n                    // indeed the closure may not be invoked by its\\n                    // creator, but rather turned to someone who *can*\\n                    // verify that).\\n                    //\\n                    // The special treatment of closures here really\\n                    // ought not to be necessary either; the problem\\n                    // is related to #25860 -- there is no way for us\\n                    // to express a fn type complete with the implied\\n                    // bounds that it is assuming. I think in reality\\n                    // the WF rules around fn are a bit messed up, and\\n                    // that is the rot problem: `fn(&'a T)` should\\n                    // probably always be WF, because it should be\\n                    // shorthand for something like `where(T: 'a) {\\n                    // fn(&'a T) }`, as discussed in #25860.\\n                    walker.skip_current_subtree(); // subtree handled below\\n                    // FIXME(eddyb) add the type to `walker` instead of recursing.\\n                    self.compute(substs.as_closure().tupled_upvars_ty().into());\\n                    // Note that we cannot skip the generic types\\n                    // types. Normally, within the fn\\n                    // body where they are created, the generics will\\n                    // always be WF, and outside of that fn body we\\n                    // are not directly inspecting closure types\\n                    // anyway, except via auto trait matching (which\\n                    // only inspects the upvar types).\\n                    // But when a closure is part of a type-alias-impl-trait\\n                    // then the function that created the defining site may\\n                    // have had more bounds available than the type alias\\n                    // specifies. This may cause us to have a closure in the\\n                    // hidden type that is not actually well formed and\\n                    // can cause compiler crashes when the user abuses unsafe\\n                    // code to procure such a closure.\\n                    // See src/test/ui/type-alias-impl-trait/wf_check_closures.rs\\n                    let obligations = self.nominal_obligations(did, substs);\\n                    self.out.extend(obligations);\\n                }\\n\\n                ty::FnPtr(_) => {\\n                    // let the loop iterate into the argument/return\\n                    // types appearing in the fn signature\\n                }\\n\\n                ty::Opaque(did, substs) => {\\n                    // All of the requirements on type parameters\\n                    // have already been checked for `impl Trait` in\\n                    // return position. We do need to check type-alias-impl-trait though.\\n                    if ty::is_impl_trait_defn(self.tcx, did).is_none() {\\n                        let obligations = self.nominal_obligations(did, substs);\\n                        self.out.extend(obligations);\\n                    }\\n                }\\n\\n                ty::Dynamic(data, r, _) => {\\n                    // WfObject\\n                    //\\n                    // Here, we defer WF checking due to higher-ranked\\n                    // regions. This is perhaps not ideal.\\n                    self.from_object_ty(ty, data, r);\\n\\n                    // FIXME(#27579) RFC also considers adding trait\\n                    // obligations that don't refer to Self and\\n                    // checking those\\n\\n                    let defer_to_coercion = self.tcx().features().object_safe_for_dispatch;\\n\\n                    if !defer_to_coercion {\\n                        let cause = self.cause(traits::WellFormed(None));\\n                        let component_traits = data.auto_traits().chain(data.principal_def_id());\\n                        let tcx = self.tcx();\\n                        self.out.extend(component_traits.map(|did| {\\n                            traits::Obligation::with_depth(\\n                                tcx,\\n                                cause.clone(),\\n                                depth,\\n                                param_env,\\n                                ty::Binder::dummy(ty::PredicateKind::ObjectSafe(did)),\\n                            )\\n                        }));\\n                    }\\n                }\\n\\n                // Inference variables are the complicated case, since we don't\\n                // know what type they are. We do two things:\\n                //\\n                // 1. Check if they have been resolved, and if so proceed with\\n                //    THAT type.\\n                // 2. If not, we've at least simplified things (e.g., we went\\n                //    from `Vec<$0>: WF` to `$0: WF`), so we can\\n                //    register a pending obligation and keep\\n                //    moving. (Goal is that an \\\"inductive hypothesis\\\"\\n                //    is satisfied to ensure termination.)\\n                // See also the comment on `fn obligations`, describing \\\"livelock\\\"\\n                // prevention, which happens before this can be reached.\\n                ty::Infer(_) => {\\n                    let cause = self.cause(traits::WellFormed(None));\\n                    self.out.push(traits::Obligation::with_depth(\\n                        self.tcx(),\\n                        cause,\\n                        self.recursion_depth,\\n                        param_env,\\n                        ty::Binder::dummy(ty::PredicateKind::WellFormed(ty.into())),\\n                    ));\\n                }\\n            }\\n\\n            debug!(?self.out);\\n        }\\n    }\"}",
+      "{\"type\": \"FILE\", \"name\": \"wf.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/wf.rs\", \"content\": \"wf.rs\"}",
+      "{\"type\": \"STRUCTURE\", \"name\": \"WfPredicates\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/wf.rs\", \"content\": \"struct WfPredicates<'tcx> {\\n    tcx: TyCtxt<'tcx>,\\n    param_env: ty::ParamEnv<'tcx>,\\n    body_id: hir::HirId,\\n    span: Span,\\n    out: Vec<traits::PredicateObligation<'tcx>>,\\n    recursion_depth: usize,\\n    item: Option<&'tcx hir::Item<'tcx>>,\\n}\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_trait_selection/src/traits/wf.rs"
+    ],
+    "found_modules": [
+      "compiler/rustc_trait_selection/src/traits/wf.rs::WfPredicates"
+    ],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Unsupported handling of ConstKind::Expr during well-formedness computation",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "compute",
+              "file": "compiler/rustc_trait_selection/src/traits/wf.rs",
+              "content": "fn compute(&mut self, arg: GenericArg<'tcx>) {\n        let mut walker = arg.walk();\n        let param_env = self.param_env;\n        let depth = self.recursion_depth;\n        while let Some(arg) = walker.next() {\n            debug!(?arg, ?self.out);\n            let ty = match arg.unpack() {\n                GenericArgKind::Type(ty) => ty,\n\n                // No WF constraints for lifetimes being present, any outlives\n                // obligations are handled by the parent (e.g. `ty::Ref`).\n                GenericArgKind::Lifetime(_) => continue,\n\n                GenericArgKind::Const(ct) => {\n                    match ct.kind() {\n                        ty::ConstKind::Unevaluated(uv) => {\n                            let obligations = self.nominal_obligations(uv.def.did, uv.substs);\n                            self.out.extend(obligations);\n\n                            let predicate =\n                                ty::Binder::dummy(ty::PredicateKind::ConstEvaluatable(ct));\n                            let cause = self.cause(traits::WellFormed(None));\n                            self.out.push(traits::Obligation::with_depth(\n                                self.tcx(),\n                                cause,\n                                self.recursion_depth,\n                                self.param_env,\n                                predicate,\n                            ));\n                        }\n                        ty::ConstKind::Infer(_) => {\n                            let cause = self.cause(traits::WellFormed(None));\n\n                            self.out.push(traits::Obligation::with_depth(\n                                self.tcx(),\n                                cause,\n                                self.recursion_depth,\n                                self.param_env,\n                                ty::Binder::dummy(ty::PredicateKind::WellFormed(ct.into())),\n                            ));\n                        }\n                        // FIXME(generic_const_exprs): This seems wrong but I could not find a way to get this to trigger\n                        ty::ConstKind::Expr(_) => {\n                            bug!(\"checking wfness of `ConstKind::Expr` is unsupported\")\n                        }\n\n                        ty::ConstKind::Error(_)\n                        | ty::ConstKind::Param(_)\n                        | ty::ConstKind::Bound(..)\n                        | ty::ConstKind::Placeholder(..) => {\n                            // These variants are trivially WF, so nothing to do here.\n                        }\n                        ty::ConstKind::Value(..) => {\n                            // FIXME: Enforce that values are structurally-matchable.\n                        }\n                    }\n                    continue;\n                }\n            };\n\n            debug!(\"wf bounds for ty={:?} ty.kind={:#?}\", ty, ty.kind());\n\n            match *ty.kind() {\n                ty::Bool\n                | ty::Char\n                | ty::Int(..)\n                | ty::Uint(..)\n                | ty::Float(..)\n                | ty::Error(_)\n                | ty::Str\n                | ty::GeneratorWitness(..)\n                | ty::Never\n                | ty::Param(_)\n                | ty::Bound(..)\n                | ty::Placeholder(..)\n                | ty::Foreign(..) => {\n                    // WfScalar, WfParameter, etc\n                }\n\n                // Can only infer to `ty::Int(_) | ty::Uint(_)`.\n                ty::Infer(ty::IntVar(_)) => {}\n\n                // Can only infer to `ty::Float(_)`.\n                ty::Infer(ty::FloatVar(_)) => {}\n\n                ty::Slice(subty) => {\n                    self.require_sized(subty, traits::SliceOrArrayElem);\n                }\n\n                ty::Array(subty, _) => {\n                    self.require_sized(subty, traits::SliceOrArrayElem);\n                    // Note that we handle the len is implicitly checked while walking `arg`.\n                }\n\n                ty::Tuple(ref tys) => {\n                    if let Some((_last, rest)) = tys.split_last() {\n                        for &elem in rest {\n                            self.require_sized(elem, traits::TupleElem);\n                        }\n                    }\n                }\n\n                ty::RawPtr(_) => {\n                    // Simple cases that are WF if their type args are WF.\n                }\n\n                ty::Projection(data) => {\n                    walker.skip_current_subtree(); // Subtree handled by compute_projection.\n                    self.compute_projection(data);\n                }\n\n                ty::Adt(def, substs) => {\n                    // WfNominalType\n                    let obligations = self.nominal_obligations(def.did(), substs);\n                    self.out.extend(obligations);\n                }\n\n                ty::FnDef(did, substs) => {\n                    let obligations = self.nominal_obligations_without_const(did, substs);\n                    self.out.extend(obligations);\n                }\n\n                ty::Ref(r, rty, _) => {\n                    // WfReference\n                    if !r.has_escaping_bound_vars() && !rty.has_escaping_bound_vars() {\n                        let cause = self.cause(traits::ReferenceOutlivesReferent(ty));\n                        self.out.push(traits::Obligation::with_depth(\n                            self.tcx(),\n                            cause,\n                            depth,\n                            param_env,\n                            ty::Binder::dummy(ty::PredicateKind::Clause(ty::Clause::TypeOutlives(\n                                ty::OutlivesPredicate(rty, r),\n                            ))),\n                        ));\n                    }\n                }\n\n                ty::Generator(did, substs, ..) => {\n                    // Walk ALL the types in the generator: this will\n                    // include the upvar types as well as the yield\n                    // type. Note that this is mildly distinct from\n                    // the closure case, where we have to be careful\n                    // about the signature of the closure. We don't\n                    // have the problem of implied bounds here since\n                    // generators don't take arguments.\n                    let obligations = self.nominal_obligations(did, substs);\n                    self.out.extend(obligations);\n                }\n\n                ty::Closure(did, substs) => {\n                    // Only check the upvar types for WF, not the rest\n                    // of the types within. This is needed because we\n                    // capture the signature and it may not be WF\n                    // without the implied bounds. Consider a closure\n                    // like `|x: &'a T|` -- it may be that `T: 'a` is\n                    // not known to hold in the creator's context (and\n                    // indeed the closure may not be invoked by its\n                    // creator, but rather turned to someone who *can*\n                    // verify that).\n                    //\n                    // The special treatment of closures here really\n                    // ought not to be necessary either; the problem\n                    // is related to #25860 -- there is no way for us\n                    // to express a fn type complete with the implied\n                    // bounds that it is assuming. I think in reality\n                    // the WF rules around fn are a bit messed up, and\n                    // that is the rot problem: `fn(&'a T)` should\n                    // probably always be WF, because it should be\n                    // shorthand for something like `where(T: 'a) {\n                    // fn(&'a T) }`, as discussed in #25860.\n                    walker.skip_current_subtree(); // subtree handled below\n                    // FIXME(eddyb) add the type to `walker` instead of recursing.\n                    self.compute(substs.as_closure().tupled_upvars_ty().into());\n                    // Note that we cannot skip the generic types\n                    // types. Normally, within the fn\n                    // body where they are created, the generics will\n                    // always be WF, and outside of that fn body we\n                    // are not directly inspecting closure types\n                    // anyway, except via auto trait matching (which\n                    // only inspects the upvar types).\n                    // But when a closure is part of a type-alias-impl-trait\n                    // then the function that created the defining site may\n                    // have had more bounds available than the type alias\n                    // specifies. This may cause us to have a closure in the\n                    // hidden type that is not actually well formed and\n                    // can cause compiler crashes when the user abuses unsafe\n                    // code to procure such a closure.\n                    // See src/test/ui/type-alias-impl-trait/wf_check_closures.rs\n                    let obligations = self.nominal_obligations(did, substs);\n                    self.out.extend(obligations);\n                }\n\n                ty::FnPtr(_) => {\n                    // let the loop iterate into the argument/return\n                    // types appearing in the fn signature\n                }\n\n                ty::Opaque(did, substs) => {\n                    // All of the requirements on type parameters\n                    // have already been checked for `impl Trait` in\n                    // return position. We do need to check type-alias-impl-trait though.\n                    if ty::is_impl_trait_defn(self.tcx, did).is_none() {\n                        let obligations = self.nominal_obligations(did, substs);\n                        self.out.extend(obligations);\n                    }\n                }\n\n                ty::Dynamic(data, r, _) => {\n                    // WfObject\n                    //\n                    // Here, we defer WF checking due to higher-ranked\n                    // regions. This is perhaps not ideal.\n                    self.from_object_ty(ty, data, r);\n\n                    // FIXME(#27579) RFC also considers adding trait\n                    // obligations that don't refer to Self and\n                    // checking those\n\n                    let defer_to_coercion = self.tcx().features().object_safe_for_dispatch;\n\n                    if !defer_to_coercion {\n                        let cause = self.cause(traits::WellFormed(None));\n                        let component_traits = data.auto_traits().chain(data.principal_def_id());\n                        let tcx = self.tcx();\n                        self.out.extend(component_traits.map(|did| {\n                            traits::Obligation::with_depth(\n                                tcx,\n                                cause.clone(),\n                                depth,\n                                param_env,\n                                ty::Binder::dummy(ty::PredicateKind::ObjectSafe(did)),\n                            )\n                        }));\n                    }\n                }\n\n                // Inference variables are the complicated case, since we don't\n                // know what type they are. We do two things:\n                //\n                // 1. Check if they have been resolved, and if so proceed with\n                //    THAT type.\n                // 2. If not, we've at least simplified things (e.g., we went\n                //    from `Vec<$0>: WF` to `$0: WF`), so we can\n                //    register a pending obligation and keep\n                //    moving. (Goal is that an \"inductive hypothesis\"\n                //    is satisfied to ensure termination.)\n                // See also the comment on `fn obligations`, describing \"livelock\"\n                // prevention, which happens before this can be reached.\n                ty::Infer(_) => {\n                    let cause = self.cause(traits::WellFormed(None));\n                    self.out.push(traits::Obligation::with_depth(\n                        self.tcx(),\n                        cause,\n                        self.recursion_depth,\n                        param_env,\n                        ty::Binder::dummy(ty::PredicateKind::WellFormed(ty.into())),\n                    ));\n                }\n            }\n\n            debug!(?self.out);\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "WfPredicates workflow reaches const-argument WF checking without a supported Expr branch",
+          "code_elements": [
+            {
+              "type": "STRUCTURE",
+              "name": "WfPredicates",
+              "file": "compiler/rustc_trait_selection/src/traits/wf.rs",
+              "content": "struct WfPredicates<'tcx> {\n    tcx: TyCtxt<'tcx>,\n    param_env: ty::ParamEnv<'tcx>,\n    body_id: hir::HirId,\n    span: Span,\n    out: Vec<traits::PredicateObligation<'tcx>>,\n    recursion_depth: usize,\n    item: Option<&'tcx hir::Item<'tcx>>,\n}"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Well-formedness logic centralized in wf.rs lacks complete support for generic const expression cases",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "wf.rs",
+              "file": "compiler/rustc_trait_selection/src/traits/wf.rs",
+              "content": "wf.rs"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.99
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.94
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.78
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 106.166,
+    "stage_times_sec": {
+      "load_bug_context": 0.013,
+      "checkout": 1.874,
+      "load_or_build_graph": 31.035,
+      "symptom_vertices_locating": 59.243,
+      "dynamic_cig_discovering": 12.457,
+      "convert_results": 0.003
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 11,
+      "input_tokens": 124447,
+      "output_tokens": 866,
+      "total_tokens": 125313,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.256,
+          "input_tokens": 9206,
+          "output_tokens": 113,
+          "total_tokens": 9319
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.494,
+          "input_tokens": 8545,
+          "output_tokens": 17,
+          "total_tokens": 8562
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.383,
+          "input_tokens": 9393,
+          "output_tokens": 72,
+          "total_tokens": 9465
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 1.795,
+          "input_tokens": 9479,
+          "output_tokens": 41,
+          "total_tokens": 9520
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 1.943,
+          "input_tokens": 9691,
+          "output_tokens": 72,
+          "total_tokens": 9763
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 1.77,
+          "input_tokens": 9777,
+          "output_tokens": 37,
+          "total_tokens": 9814
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.252,
+          "input_tokens": 12150,
+          "output_tokens": 26,
+          "total_tokens": 12176
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 3.047,
+          "input_tokens": 9485,
+          "output_tokens": 117,
+          "total_tokens": 9602
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 3.597,
+          "input_tokens": 24439,
+          "output_tokens": 138,
+          "total_tokens": 24577
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 2.847,
+          "input_tokens": 11301,
+          "output_tokens": 116,
+          "total_tokens": 11417
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 2.956,
+          "input_tokens": 10981,
+          "output_tokens": 117,
+          "total_tokens": 11098
+        }
+      ]
+    }
+  }
+}

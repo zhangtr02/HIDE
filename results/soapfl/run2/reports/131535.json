@@ -1,0 +1,832 @@
+{
+  "bug_id": "131535",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-10-11",
+    "resolved": "52fd9983996d9fcfb719749838336be66dee68f9"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/hir_wf_check.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/dyn_compatibility.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+    "compiler/rustc_ast_lowering/src/path.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_parse/src/parser/ty.rs",
+    "compiler/rustc_parse/src/parser/diagnostics.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_trait_selection/src/error_reporting/traits/fulfillment_errors.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables the unstable `non_lifetime_binders` feature, exercising nightly-only parsing and lowering for `for<...>` binders that are not ordinary lifetime binders.",
+        "Declares a malformed generic trait `trait v0<> {}`, stressing parser recovery around empty generic parameter lists and unusual trait item syntax.",
+        "Defines a function using `:` instead of a normal parameter list/body separator, probing parser error handling in function signatures.",
+        "Uses `impl Trait` in argument position, triggering parsing and semantic checks for anonymous parameter types inside an already-invalid signature.",
+        "Places `for<v4>` before a trait bound, exercising higher-ranked binder parsing with a non-lifetime generic name under the experimental feature.",
+        "Introduces placeholder lifetime syntax `'_` inside trait arguments, testing elided/inferred lifetime parsing in trait object or bound contexts.",
+        "Adds an associated type equality-like constraint `v2 = impl v0<v4> + '_`, stressing parsing of associated bindings combined with nested `impl Trait` and lifetime bounds.",
+        "Combines multiple invalid and unstable constructs in one signature, exercising compiler recovery paths, diagnostics, and potential ICE-prone AST/HIR lowering behavior."
+      ],
+      "summary": "The reproducer is a tiny crate whose only purpose is to feed rustc a highly malformed function signature mixing unstable non-lifetime binders, `impl Trait`, placeholder lifetimes, and associated-type-style constraints. It primarily stresses parser recovery, feature gating, name/binder resolution, and AST-to-HIR lowering for invalid syntax that could trigger a compiler crash instead of a normal diagnostic."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in the HIR well-formedness/diagnostic path after rustc has already emitted normal parse/type diagnostics for an obviously malformed function signature. The query stack shows the panic occurs in `diagnostic_hir_wf_check` while checking a synthesized predicate involving `TraitPredicate(<dyn v0 as core::marker::Sized>, ...)` for function parameter 0 of `kind`. This suggests parser recovery and later lowering/checking produced an inconsistent or partially-invalid HIR/type representation for the parameter, especially around a recovered trait-object-like type `v0<'_>` combined with unstable `for<...>` non-lifetime binders, `impl Trait`, placeholder lifetimes, and associated type bindings. The common pattern is that multiple invalid constructs are combined in one signature, rustc still attempts to build predicates and run WF checks on the recovered item, and some compiler path assumes invariants that do not hold for error-recovered HIR/types. In particular, the appearance of a `dyn v0` sizedness predicate despite the source lacking an explicit valid trait object suggests recovery converted malformed syntax into a trait object or trait bound form, then WF/diagnostic code processed it without guarding against `TyKind::Error`/recovered generic arguments/binder state. The most likely compiler defect is therefore in parser recovery to AST/HIR lowering or in HIR WF diagnostic code for trait-object / binder predicates under error recovery, not in the user code itself.",
+      "possible_causes": [
+        "Missing validation/guard in `diagnostic_hir_wf_check` or related WF-checking code when handling error-recovered trait-object predicates, causing a panic on malformed recovered HIR for a function parameter.",
+        "AST-to-HIR lowering bug for malformed function signatures using `:` instead of a parameter list, which may synthesize an invalid parameter type/predicate and later trigger ICE during well-formedness checking.",
+        "Incorrect recovery/lowering of unstable `for<...>` non-lifetime binders in trait bounds or `impl Trait`, leaving inconsistent `Binder`/bound-variable state that WF diagnostics are not prepared to process.",
+        "Bug in trait-object recovery for invalid `v0<'_>` syntax that constructs a `dyn v0`-like predicate and then applies normal sizedness checks even though the underlying type contains parse/type errors.",
+        "Failure to short-circuit WF/diagnostic predicate generation when associated type bindings with nested `impl Trait` and placeholder lifetime `'_` occur inside already-invalid generic arguments/bounds.",
+        "Invariant violation in generic-argument or associated-binding handling after parser recovery from empty generic parameter lists (`trait v0<> {}`) combined with malformed uses of that trait in type position."
+      ],
+      "evidence": [
+        "Query stack pinpoints the panic in `diagnostic_hir_wf_check`, not in codegen or borrow checking: `performing HIR wf-checking for predicate Binder { value: TraitPredicate(<dyn v0 as core::marker::Sized>, ...) }`.",
+        "The compiler simultaneously emits ordinary user-facing errors (E0782 and others), proving rustc recognized invalid syntax/type usage but still later panicked instead of cleanly aborting analysis.",
+        "The panic is associated with `item Param { function: DefId(...::kind), param_idx: 0 }`, matching the single malformed function signature that combines all unusual constructs.",
+        "The predicate shown in the query stack references `<dyn v0 as core::marker::Sized>`, indicating error recovery likely transformed invalid source into a trait-object-like internal form before the crash.",
+        "The reproducer specifically stresses recovery-sensitive features together: non-lifetime binders, `impl Trait`, placeholder lifetime `'_`, associated type equality syntax, and malformed function syntax, all of which can produce partially-invalid AST/HIR.",
+        "The test summary explicitly describes the case as targeting parser recovery, feature gating, name/binder resolution, and AST/HIR lowering on invalid syntax, aligning with the observed ICE location in HIR WF diagnostics."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1847,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_wf_check.rs",
+        "reason": "The query stack pinpoints the panic in `diagnostic_hir_wf_check` during HIR well-formedness diagnostics for parameter 0 of `kind`. This file is the most direct match for the ICE location and likely lacks guards for error-recovered or malformed HIR/types, especially around a recovered `dyn v0`-like predicate."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/dyn_compatibility.rs",
+        "reason": "The failing predicate shown in the query stack is `TraitPredicate(<dyn v0 as core::marker::Sized>, ...)`, indicating the malformed source was lowered into a trait-object-like form. This file specifically lowers `dyn Trait` HIR and handles malformed generic arguments/associated bindings in trait objects, making it highly suspicious under parser recovery."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+        "reason": "This is the central HIR-to-ty lowering entry point for types, bounds, `impl Trait`, lifetimes, and binders. The reproducer combines invalid `impl Trait`, placeholder lifetimes, associated bindings, and `for<...>` non-lifetime binders, so an inconsistent lowered type or binder state could originate here and later crash WF diagnostics."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "The malformed signature stresses path lowering with generic arguments, associated item projections/bindings, and restricted `impl Trait` placement inside paths. If parser recovery produced unusual path forms like `v0<'_, v2 = ...>`, this file could incorrectly lower them into HIR consumed later by WF checking."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "The reproducer explicitly uses the unstable `non_lifetime_binders` feature via `for<v4>`, and the bug may involve inconsistent bound-variable resolution after recovery. This file resolves late-bound variables and object lifetime/default semantics, so it is a plausible source of invalid binder state that later panics in HIR WF checks."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/ty.rs",
+        "reason": "The input is dominated by malformed type syntax in a function signature, including trait-object-like syntax, `impl Trait`, placeholder lifetimes, and recovery from invalid separators. This parser file performs exactly that parsing and recovery, so it may be constructing an AST shape that downstream lowering/checking mishandles."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/diagnostics.rs",
+        "reason": "The reproducer appears to rely on parser recovery rather than successful parsing, and this file contains recovery helpers like dummy parameter/type synthesis used after malformed function parameters. A bad recovery node here could explain why later phases see a bogus parameter type and ICE instead of cleanly stopping."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "Since the source mixes obviously invalid and unstable constructs, AST validation is a plausible place where malformed shapes should have been rejected earlier. If this pass lets an invalid recovered AST through without marking or normalizing it properly, later lowering/WF diagnostics may hit broken invariants."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/error_reporting/traits/fulfillment_errors.rs",
+        "reason": "`diagnostic_hir_wf_check` is invoked from trait error reporting to refine spans for WF failures. If the diagnostic reporting path incorrectly requests HIR WF checks on an already error-recovered malformed predicate, this file could be part of the bad control flow exposing the ICE."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "The crash occurs while reasoning about a WF predicate involving a synthesized `dyn v0: Sized` obligation. This file generates WF obligations and may be creating or propagating obligations for malformed recovered types without short-circuiting on `Error` states, feeding invalid predicates into the diagnostic HIR WF query."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 525.98,
+    "stage_times_sec": {
+      "checkout": 2.221,
+      "load_bug_context": 0.356,
+      "test_behavior_analysis": 6.702,
+      "test_failure_analysis": 14.435,
+      "load_file_candidates": 362.999,
+      "search_suspicious_files": 139.266
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 101,
+      "input_tokens": 498336,
+      "output_tokens": 25558,
+      "total_tokens": 523894,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.702,
+          "input_tokens": 344,
+          "output_tokens": 320,
+          "total_tokens": 664
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.435,
+          "input_tokens": 2188,
+          "output_tokens": 811,
+          "total_tokens": 2999
+        },
+        {
+          "stage": "file_summary:compiler_rustc_ast_lowering_src_lifetime_collector_rs",
+          "latency_sec": 4.78,
+          "input_tokens": 1242,
+          "output_tokens": 220,
+          "total_tokens": 1462
+        },
+        {
+          "stage": "file_summary:compiler_rustc_ast_lowering_src_lifetime_collector_rs_repair",
+          "latency_sec": 3.7,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_ast_passes_src_node_count_rs",
+          "latency_sec": 4.458,
+          "input_tokens": 1369,
+          "output_tokens": 220,
+          "total_tokens": 1589
+        },
+        {
+          "stage": "file_summary:compiler_rustc_ast_passes_src_node_count_rs_repair",
+          "latency_sec": 3.67,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_builtin_macros_src_deriving_smart_ptr_rs",
+          "latency_sec": 4.847,
+          "input_tokens": 1345,
+          "output_tokens": 220,
+          "total_tokens": 1565
+        },
+        {
+          "stage": "file_summary:compiler_rustc_builtin_macros_src_deriving_smart_ptr_rs_repair",
+          "latency_sec": 3.31,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_src_archive_rs",
+          "latency_sec": 4.282,
+          "input_tokens": 329,
+          "output_tokens": 215,
+          "total_tokens": 544
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_gcc_src_archive_rs",
+          "latency_sec": 4.587,
+          "input_tokens": 420,
+          "output_tokens": 220,
+          "total_tokens": 640
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_gcc_src_archive_rs_repair",
+          "latency_sec": 3.661,
+          "input_tokens": 255,
+          "output_tokens": 225,
+          "total_tokens": 480
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_errs_rs",
+          "latency_sec": 4.964,
+          "input_tokens": 1048,
+          "output_tokens": 220,
+          "total_tokens": 1268
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_errs_rs_repair",
+          "latency_sec": 3.94,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_lint_src_methods_rs",
+          "latency_sec": 4.33,
+          "input_tokens": 949,
+          "output_tokens": 220,
+          "total_tokens": 1169
+        },
+        {
+          "stage": "file_summary:compiler_rustc_lint_src_methods_rs_repair",
+          "latency_sec": 3.52,
+          "input_tokens": 255,
+          "output_tokens": 225,
+          "total_tokens": 480
+        },
+        {
+          "stage": "file_summary:compiler_rustc_lint_src_tail_expr_drop_order_rs",
+          "latency_sec": 4.882,
+          "input_tokens": 1313,
+          "output_tokens": 220,
+          "total_tokens": 1533
+        },
+        {
+          "stage": "file_summary:compiler_rustc_lint_src_tail_expr_drop_order_rs_repair",
+          "latency_sec": 3.224,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_dataflow_src_framework_engine_rs",
+          "latency_sec": 4.508,
+          "input_tokens": 1439,
+          "output_tokens": 220,
+          "total_tokens": 1659
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_dataflow_src_framework_engine_rs_repair",
+          "latency_sec": 4.748,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_monomorphize_src_collector_move_check_rs",
+          "latency_sec": 5.224,
+          "input_tokens": 1287,
+          "output_tokens": 220,
+          "total_tokens": 1507
+        },
+        {
+          "stage": "file_summary:compiler_rustc_monomorphize_src_collector_move_check_rs_repair",
+          "latency_sec": 3.165,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_passes_src_hir_stats_rs",
+          "latency_sec": 3.828,
+          "input_tokens": 1443,
+          "output_tokens": 220,
+          "total_tokens": 1663
+        },
+        {
+          "stage": "file_summary:compiler_rustc_passes_src_hir_stats_rs_repair",
+          "latency_sec": 7.536,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_aarch64_rs",
+          "latency_sec": 4.066,
+          "input_tokens": 1460,
+          "output_tokens": 220,
+          "total_tokens": 1680
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_aarch64_rs_repair",
+          "latency_sec": 3.14,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_amdgpu_rs",
+          "latency_sec": 4.277,
+          "input_tokens": 516,
+          "output_tokens": 220,
+          "total_tokens": 736
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_amdgpu_rs_repair",
+          "latency_sec": 4.118,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_arm_rs",
+          "latency_sec": 4.653,
+          "input_tokens": 1147,
+          "output_tokens": 220,
+          "total_tokens": 1367
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_arm_rs_repair",
+          "latency_sec": 2.991,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_avr_rs",
+          "latency_sec": 4.566,
+          "input_tokens": 756,
+          "output_tokens": 220,
+          "total_tokens": 976
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_avr_rs_repair",
+          "latency_sec": 2.863,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_bpf_rs",
+          "latency_sec": 4.583,
+          "input_tokens": 481,
+          "output_tokens": 220,
+          "total_tokens": 701
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_bpf_rs_repair",
+          "latency_sec": 3.008,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_csky_rs",
+          "latency_sec": 5.377,
+          "input_tokens": 806,
+          "output_tokens": 220,
+          "total_tokens": 1026
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_csky_rs_repair",
+          "latency_sec": 3.849,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_hexagon_rs",
+          "latency_sec": 4.807,
+          "input_tokens": 456,
+          "output_tokens": 220,
+          "total_tokens": 676
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_hexagon_rs_repair",
+          "latency_sec": 3.735,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_loongarch_rs",
+          "latency_sec": 4.82,
+          "input_tokens": 1202,
+          "output_tokens": 220,
+          "total_tokens": 1422
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_loongarch_rs_repair",
+          "latency_sec": 2.748,
+          "input_tokens": 255,
+          "output_tokens": 226,
+          "total_tokens": 481
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_m68k_rs",
+          "latency_sec": 4.45,
+          "input_tokens": 464,
+          "output_tokens": 220,
+          "total_tokens": 684
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_m68k_rs_repair",
+          "latency_sec": 3.128,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_mips_rs",
+          "latency_sec": 4.165,
+          "input_tokens": 672,
+          "output_tokens": 220,
+          "total_tokens": 892
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_mips_rs_repair",
+          "latency_sec": 3.268,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_mips64_rs",
+          "latency_sec": 4.035,
+          "input_tokens": 1328,
+          "output_tokens": 220,
+          "total_tokens": 1548
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_mips64_rs_repair",
+          "latency_sec": 3.202,
+          "input_tokens": 255,
+          "output_tokens": 203,
+          "total_tokens": 458
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_mod_rs",
+          "latency_sec": 5.648,
+          "input_tokens": 1427,
+          "output_tokens": 220,
+          "total_tokens": 1647
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_mod_rs_repair",
+          "latency_sec": 4.213,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_msp430_rs",
+          "latency_sec": 4.813,
+          "input_tokens": 575,
+          "output_tokens": 220,
+          "total_tokens": 795
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_msp430_rs_repair",
+          "latency_sec": 3.283,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_nvptx64_rs",
+          "latency_sec": 4.486,
+          "input_tokens": 1233,
+          "output_tokens": 220,
+          "total_tokens": 1453
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_nvptx64_rs_repair",
+          "latency_sec": 3.828,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_powerpc_rs",
+          "latency_sec": 4.317,
+          "input_tokens": 555,
+          "output_tokens": 220,
+          "total_tokens": 775
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_powerpc_rs_repair",
+          "latency_sec": 3.762,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_powerpc64_rs",
+          "latency_sec": 4.814,
+          "input_tokens": 1246,
+          "output_tokens": 220,
+          "total_tokens": 1466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_powerpc64_rs_repair",
+          "latency_sec": 3.652,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_riscv_rs",
+          "latency_sec": 5.643,
+          "input_tokens": 1251,
+          "output_tokens": 220,
+          "total_tokens": 1471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_riscv_rs_repair",
+          "latency_sec": 3.608,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_s390x_rs",
+          "latency_sec": 4.99,
+          "input_tokens": 858,
+          "output_tokens": 220,
+          "total_tokens": 1078
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_s390x_rs_repair",
+          "latency_sec": 4.232,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_sparc_rs",
+          "latency_sec": 5.619,
+          "input_tokens": 674,
+          "output_tokens": 220,
+          "total_tokens": 894
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_sparc_rs_repair",
+          "latency_sec": 3.235,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_sparc64_rs",
+          "latency_sec": 5.973,
+          "input_tokens": 1460,
+          "output_tokens": 220,
+          "total_tokens": 1680
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_sparc64_rs_repair",
+          "latency_sec": 4.837,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_wasm_rs",
+          "latency_sec": 4.856,
+          "input_tokens": 1170,
+          "output_tokens": 220,
+          "total_tokens": 1390
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_wasm_rs_repair",
+          "latency_sec": 4.115,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_x86_rs",
+          "latency_sec": 5.739,
+          "input_tokens": 1248,
+          "output_tokens": 220,
+          "total_tokens": 1468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_x86_rs_repair",
+          "latency_sec": 3.519,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_x86_64_rs",
+          "latency_sec": 4.731,
+          "input_tokens": 1422,
+          "output_tokens": 220,
+          "total_tokens": 1642
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_x86_64_rs_repair",
+          "latency_sec": 4.119,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_x86_win64_rs",
+          "latency_sec": 4.546,
+          "input_tokens": 740,
+          "output_tokens": 220,
+          "total_tokens": 960
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_x86_win64_rs_repair",
+          "latency_sec": 3.162,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_xtensa_rs",
+          "latency_sec": 4.535,
+          "input_tokens": 1436,
+          "output_tokens": 220,
+          "total_tokens": 1656
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_call_xtensa_rs_repair",
+          "latency_sec": 4.488,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_mod_rs",
+          "latency_sec": 4.498,
+          "input_tokens": 1466,
+          "output_tokens": 220,
+          "total_tokens": 1686
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_abi_mod_rs_repair",
+          "latency_sec": 4.101,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_abi_mod_rs",
+          "latency_sec": 5.252,
+          "input_tokens": 1455,
+          "output_tokens": 220,
+          "total_tokens": 1675
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_abi_mod_rs_repair",
+          "latency_sec": 3.775,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_abi_tests_rs",
+          "latency_sec": 5.359,
+          "input_tokens": 418,
+          "output_tokens": 220,
+          "total_tokens": 638
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_abi_tests_rs_repair",
+          "latency_sec": 3.535,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_targets_wasm32_wasi_rs",
+          "latency_sec": 3.809,
+          "input_tokens": 324,
+          "output_tokens": 187,
+          "total_tokens": 511
+        },
+        {
+          "stage": "file_summary:compiler_rustc_ty_utils_src_layout_sanity_check_rs",
+          "latency_sec": 4.707,
+          "input_tokens": 1292,
+          "output_tokens": 220,
+          "total_tokens": 1512
+        },
+        {
+          "stage": "file_summary:compiler_rustc_ty_utils_src_layout_sanity_check_rs_repair",
+          "latency_sec": 3.289,
+          "input_tokens": 255,
+          "output_tokens": 200,
+          "total_tokens": 455
+        },
+        {
+          "stage": "file_summary:compiler_rustc_type_ir_src_effects_rs",
+          "latency_sec": 5.026,
+          "input_tokens": 777,
+          "output_tokens": 220,
+          "total_tokens": 997
+        },
+        {
+          "stage": "file_summary:compiler_rustc_type_ir_src_effects_rs_repair",
+          "latency_sec": 3.34,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.699,
+          "input_tokens": 27979,
+          "output_tokens": 293,
+          "total_tokens": 28272
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.205,
+          "input_tokens": 27995,
+          "output_tokens": 355,
+          "total_tokens": 28350
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.919,
+          "input_tokens": 27356,
+          "output_tokens": 356,
+          "total_tokens": 27712
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.77,
+          "input_tokens": 27779,
+          "output_tokens": 302,
+          "total_tokens": 28081
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.715,
+          "input_tokens": 27703,
+          "output_tokens": 384,
+          "total_tokens": 28087
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.282,
+          "input_tokens": 28059,
+          "output_tokens": 434,
+          "total_tokens": 28493
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.275,
+          "input_tokens": 27909,
+          "output_tokens": 348,
+          "total_tokens": 28257
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.356,
+          "input_tokens": 27826,
+          "output_tokens": 366,
+          "total_tokens": 28192
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.029,
+          "input_tokens": 27919,
+          "output_tokens": 345,
+          "total_tokens": 28264
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.223,
+          "input_tokens": 27798,
+          "output_tokens": 329,
+          "total_tokens": 28127
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.972,
+          "input_tokens": 27831,
+          "output_tokens": 356,
+          "total_tokens": 28187
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.918,
+          "input_tokens": 27962,
+          "output_tokens": 328,
+          "total_tokens": 28290
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.363,
+          "input_tokens": 28103,
+          "output_tokens": 317,
+          "total_tokens": 28420
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.099,
+          "input_tokens": 28109,
+          "output_tokens": 293,
+          "total_tokens": 28402
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.538,
+          "input_tokens": 27874,
+          "output_tokens": 405,
+          "total_tokens": 28279
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 7.587,
+          "input_tokens": 12843,
+          "output_tokens": 440,
+          "total_tokens": 13283
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.28,
+          "input_tokens": 12060,
+          "output_tokens": 828,
+          "total_tokens": 12888
+        }
+      ]
+    }
+  }
+}

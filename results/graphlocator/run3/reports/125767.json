@@ -1,0 +1,244 @@
+{
+  "bug_id": "125767",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-05-30",
+    "resolved": "debd22da66cfa97c74040ebf68e420672ac8560e"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs",
+    "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs",
+      "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+        "rank": 2
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/125767.json",
+    "graph_cache_hit": true,
+    "graph_cache_build_mode": "bug_cache",
+    "graph_cache_bug_id": "125767",
+    "graph_cache_checkout_commit": "debd22da66cfa97c74040ebf68e420672ac8560e",
+    "initial_graph_node_count": 56018,
+    "initial_graph_edge_count": 56017,
+    "graph_node_count": 56018,
+    "graph_edge_count": 57089,
+    "lazy_loaded_edge_count": 1072,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"assemble_candidates_for_unsizing\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs\", \"content\": \"fn assemble_candidates_for_unsizing(\\n        &mut self,\\n        obligation: &PolyTraitObligation<'tcx>,\\n        candidates: &mut SelectionCandidateSet<'tcx>,\\n    ) {\\n        // We currently never consider higher-ranked obligations e.g.\\n        // `for<'a> &'a T: Unsize<Trait+'a>` to be implemented. This is not\\n        // because they are a priori invalid, and we could potentially add support\\n        // for them later, it's just that there isn't really a strong need for it.\\n        // A `T: Unsize<U>` obligation is always used as part of a `T: CoerceUnsize<U>`\\n        // impl, and those are generally applied to concrete types.\\n        //\\n        // That said, one might try to write a fn with a where clause like\\n        //     for<'a> Foo<'a, T>: Unsize<Foo<'a, Trait>>\\n        // where the `'a` is kind of orthogonal to the relevant part of the `Unsize`.\\n        // Still, you'd be more likely to write that where clause as\\n        //     T: Trait\\n        // so it seems ok if we (conservatively) fail to accept that `Unsize`\\n        // obligation above. Should be possible to extend this in the future.\\n        let Some(source) = obligation.self_ty().no_bound_vars() else {\\n            // Don't add any candidates if there are bound regions.\\n            return;\\n        };\\n        let target = obligation.predicate.skip_binder().trait_ref.args.type_at(1);\\n\\n        debug!(?source, ?target, \\\"assemble_candidates_for_unsizing\\\");\\n\\n        match (source.kind(), target.kind()) {\\n            // Trait+Kx+'a -> Trait+Ky+'b (upcasts).\\n            (&ty::Dynamic(a_data, a_region, ty::Dyn), &ty::Dynamic(b_data, b_region, ty::Dyn)) => {\\n                // Upcast coercions permit several things:\\n                //\\n                // 1. Dropping auto traits, e.g., `Foo + Send` to `Foo`\\n                // 2. Tightening the region bound, e.g., `Foo + 'a` to `Foo + 'b` if `'a: 'b`\\n                // 3. Tightening trait to its super traits, eg. `Foo` to `Bar` if `Foo: Bar`\\n                //\\n                // Note that neither of the first two of these changes requires any\\n                // change at runtime. The third needs to change pointer metadata at runtime.\\n                //\\n                // We always perform upcasting coercions when we can because of reason\\n                // #2 (region bounds).\\n                let principal_def_id_a = a_data.principal_def_id();\\n                let principal_def_id_b = b_data.principal_def_id();\\n                if principal_def_id_a == principal_def_id_b {\\n                    // We may upcast to auto traits that are either explicitly listed in\\n                    // the object type's bounds, or implied by the principal trait ref's\\n                    // supertraits.\\n                    let a_auto_traits: FxIndexSet<DefId> = a_data\\n                        .auto_traits()\\n                        .chain(principal_def_id_a.into_iter().flat_map(|principal_def_id| {\\n                            util::supertrait_def_ids(self.tcx(), principal_def_id)\\n                                .filter(|def_id| self.tcx().trait_is_auto(*def_id))\\n                        }))\\n                        .collect();\\n                    let auto_traits_compatible = b_data\\n                        .auto_traits()\\n                        // All of a's auto traits need to be in b's auto traits.\\n                        .all(|b| a_auto_traits.contains(&b));\\n                    if auto_traits_compatible {\\n                        candidates.vec.push(BuiltinUnsizeCandidate);\\n                    }\\n                } else if principal_def_id_a.is_some() && principal_def_id_b.is_some() {\\n                    // not casual unsizing, now check whether this is trait upcasting coercion.\\n                    let principal_a = a_data.principal().unwrap();\\n                    let target_trait_did = principal_def_id_b.unwrap();\\n                    let source_trait_ref = principal_a.with_self_ty(self.tcx(), source);\\n                    if let Some(deref_trait_ref) = self.need_migrate_deref_output_trait_object(\\n                        source,\\n                        obligation.param_env,\\n                        &obligation.cause,\\n                    ) {\\n                        if deref_trait_ref.def_id() == target_trait_did {\\n                            return;\\n                        }\\n                    }\\n\\n                    for (idx, upcast_trait_ref) in\\n                        util::supertraits(self.tcx(), source_trait_ref).enumerate()\\n                    {\\n                        self.infcx.probe(|_| {\\n                            if upcast_trait_ref.def_id() == target_trait_did\\n                                && let Ok(nested) = self.match_upcast_principal(\\n                                    obligation,\\n                                    upcast_trait_ref,\\n                                    a_data,\\n                                    b_data,\\n                                    a_region,\\n                                    b_region,\\n                                )\\n                            {\\n                                if nested.is_none() {\\n                                    candidates.ambiguous = true;\\n                                }\\n                                candidates.vec.push(TraitUpcastingUnsizeCandidate(idx));\\n                            }\\n                        })\\n                    }\\n                }\\n            }\\n\\n            // `T` -> `Trait`\\n            (_, &ty::Dynamic(_, _, ty::Dyn)) => {\\n                candidates.vec.push(BuiltinUnsizeCandidate);\\n            }\\n\\n            // Ambiguous handling is below `T` -> `Trait`, because inference\\n            // variables can still implement `Unsize<Trait>` and nested\\n            // obligations will have the final say (likely deferred).\\n            (&ty::Infer(ty::TyVar(_)), _) | (_, &ty::Infer(ty::TyVar(_))) => {\\n                debug!(\\\"assemble_candidates_for_unsizing: ambiguous\\\");\\n                candidates.ambiguous = true;\\n            }\\n\\n            // `[T; n]` -> `[T]`\\n            (&ty::Array(..), &ty::Slice(_)) => {\\n                candidates.vec.push(BuiltinUnsizeCandidate);\\n            }\\n\\n            // `Struct<T>` -> `Struct<U>`\\n            (&ty::Adt(def_id_a, _), &ty::Adt(def_id_b, _)) if def_id_a.is_struct() => {\\n                if def_id_a == def_id_b {\\n                    candidates.vec.push(BuiltinUnsizeCandidate);\\n                }\\n            }\\n\\n            // `(.., T)` -> `(.., U)`\\n            (&ty::Tuple(tys_a), &ty::Tuple(tys_b)) => {\\n                if tys_a.len() == tys_b.len() {\\n                    candidates.vec.push(BuiltinUnsizeCandidate);\\n                }\\n            }\\n\\n            _ => {}\\n        };\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"need_migrate_deref_output_trait_object\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs\", \"content\": \"fn need_migrate_deref_output_trait_object(\\n        &mut self,\\n        ty: Ty<'tcx>,\\n        param_env: ty::ParamEnv<'tcx>,\\n        cause: &ObligationCause<'tcx>,\\n    ) -> Option<ty::PolyExistentialTraitRef<'tcx>> {\\n        let tcx = self.tcx();\\n        if tcx.features().trait_upcasting {\\n            return None;\\n        }\\n\\n        // <ty as Deref>\\n        let trait_ref = ty::TraitRef::new(tcx, tcx.lang_items().deref_trait()?, [ty]);\\n\\n        let obligation =\\n            traits::Obligation::new(tcx, cause.clone(), param_env, ty::Binder::dummy(trait_ref));\\n        if !self.infcx.predicate_may_hold(&obligation) {\\n            return None;\\n        }\\n\\n        self.infcx.probe(|_| {\\n            let ty = traits::normalize_projection_ty(\\n                self,\\n                param_env,\\n                ty::AliasTy::new(tcx, tcx.lang_items().deref_target()?, trait_ref.args),\\n                cause.clone(),\\n                0,\\n                // We're *intentionally* throwing these away,\\n                // since we don't actually use them.\\n                &mut vec![],\\n            )\\n            .ty()\\n            .unwrap();\\n\\n            if let ty::Dynamic(data, ..) = ty.kind() { data.principal() } else { None }\\n        })\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"evaluate_obligation_no_overflow\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs\", \"content\": \"fn evaluate_obligation_no_overflow(\\n        &self,\\n        obligation: &PredicateObligation<'tcx>,\\n    ) -> EvaluationResult {\\n        // Run canonical query. If overflow occurs, rerun from scratch but this time\\n        // in standard trait query mode so that overflow is handled appropriately\\n        // within `SelectionContext`.\\n        match self.evaluate_obligation(obligation) {\\n            Ok(result) => result,\\n            Err(OverflowError::Canonical) => {\\n                let mut selcx = SelectionContext::new(self);\\n                selcx.evaluate_root_obligation(obligation).unwrap_or_else(|r| match r {\\n                    OverflowError::Canonical => {\\n                        span_bug!(\\n                            obligation.cause.span,\\n                            \\\"Overflow should be caught earlier in standard query mode: {:?}, {:?}\\\",\\n                            obligation,\\n                            r,\\n                        )\\n                    }\\n                    OverflowError::Error(_) => EvaluationResult::EvaluatedToErr,\\n                })\\n            }\\n            Err(OverflowError::Error(_)) => EvaluationResult::EvaluatedToErr,\\n        }\\n    }\"}",
+      "{\"type\": \"FILE\", \"name\": \"evaluate_obligation.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs\", \"content\": \"evaluate_obligation.rs\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs",
+      "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Intercrate query assertion violated during obligation evaluation",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "evaluate_obligation_no_overflow",
+              "file": "compiler/rustc_trait_selection/src/traits/query/evaluate_obligation.rs",
+              "content": "fn evaluate_obligation_no_overflow(\n        &self,\n        obligation: &PredicateObligation<'tcx>,\n    ) -> EvaluationResult {\n        // Run canonical query. If overflow occurs, rerun from scratch but this time\n        // in standard trait query mode so that overflow is handled appropriately\n        // within `SelectionContext`.\n        match self.evaluate_obligation(obligation) {\n            Ok(result) => result,\n            Err(OverflowError::Canonical) => {\n                let mut selcx = SelectionContext::new(self);\n                selcx.evaluate_root_obligation(obligation).unwrap_or_else(|r| match r {\n                    OverflowError::Canonical => {\n                        span_bug!(\n                            obligation.cause.span,\n                            \"Overflow should be caught earlier in standard query mode: {:?}, {:?}\",\n                            obligation,\n                            r,\n                        )\n                    }\n                    OverflowError::Error(_) => EvaluationResult::EvaluatedToErr,\n                })\n            }\n            Err(OverflowError::Error(_)) => EvaluationResult::EvaluatedToErr,\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Unsizing candidate assembly triggers obligation checks in coherence/specialization context",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "assemble_candidates_for_unsizing",
+              "file": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+              "content": "fn assemble_candidates_for_unsizing(\n        &mut self,\n        obligation: &PolyTraitObligation<'tcx>,\n        candidates: &mut SelectionCandidateSet<'tcx>,\n    ) {\n        // We currently never consider higher-ranked obligations e.g.\n        // `for<'a> &'a T: Unsize<Trait+'a>` to be implemented. This is not\n        // because they are a priori invalid, and we could potentially add support\n        // for them later, it's just that there isn't really a strong need for it.\n        // A `T: Unsize<U>` obligation is always used as part of a `T: CoerceUnsize<U>`\n        // impl, and those are generally applied to concrete types.\n        //\n        // That said, one might try to write a fn with a where clause like\n        //     for<'a> Foo<'a, T>: Unsize<Foo<'a, Trait>>\n        // where the `'a` is kind of orthogonal to the relevant part of the `Unsize`.\n        // Still, you'd be more likely to write that where clause as\n        //     T: Trait\n        // so it seems ok if we (conservatively) fail to accept that `Unsize`\n        // obligation above. Should be possible to extend this in the future.\n        let Some(source) = obligation.self_ty().no_bound_vars() else {\n            // Don't add any candidates if there are bound regions.\n            return;\n        };\n        let target = obligation.predicate.skip_binder().trait_ref.args.type_at(1);\n\n        debug!(?source, ?target, \"assemble_candidates_for_unsizing\");\n\n        match (source.kind(), target.kind()) {\n            // Trait+Kx+'a -> Trait+Ky+'b (upcasts).\n            (&ty::Dynamic(a_data, a_region, ty::Dyn), &ty::Dynamic(b_data, b_region, ty::Dyn)) => {\n                // Upcast coercions permit several things:\n                //\n                // 1. Dropping auto traits, e.g., `Foo + Send` to `Foo`\n                // 2. Tightening the region bound, e.g., `Foo + 'a` to `Foo + 'b` if `'a: 'b`\n                // 3. Tightening trait to its super traits, eg. `Foo` to `Bar` if `Foo: Bar`\n                //\n                // Note that neither of the first two of these changes requires any\n                // change at runtime. The third needs to change pointer metadata at runtime.\n                //\n                // We always perform upcasting coercions when we can because of reason\n                // #2 (region bounds).\n                let principal_def_id_a = a_data.principal_def_id();\n                let principal_def_id_b = b_data.principal_def_id();\n                if principal_def_id_a == principal_def_id_b {\n                    // We may upcast to auto traits that are either explicitly listed in\n                    // the object type's bounds, or implied by the principal trait ref's\n                    // supertraits.\n                    let a_auto_traits: FxIndexSet<DefId> = a_data\n                        .auto_traits()\n                        .chain(principal_def_id_a.into_iter().flat_map(|principal_def_id| {\n                            util::supertrait_def_ids(self.tcx(), principal_def_id)\n                                .filter(|def_id| self.tcx().trait_is_auto(*def_id))\n                        }))\n                        .collect();\n                    let auto_traits_compatible = b_data\n                        .auto_traits()\n                        // All of a's auto traits need to be in b's auto traits.\n                        .all(|b| a_auto_traits.contains(&b));\n                    if auto_traits_compatible {\n                        candidates.vec.push(BuiltinUnsizeCandidate);\n                    }\n                } else if principal_def_id_a.is_some() && principal_def_id_b.is_some() {\n                    // not casual unsizing, now check whether this is trait upcasting coercion.\n                    let principal_a = a_data.principal().unwrap();\n                    let target_trait_did = principal_def_id_b.unwrap();\n                    let source_trait_ref = principal_a.with_self_ty(self.tcx(), source);\n                    if let Some(deref_trait_ref) = self.need_migrate_deref_output_trait_object(\n                        source,\n                        obligation.param_env,\n                        &obligation.cause,\n                    ) {\n                        if deref_trait_ref.def_id() == target_trait_did {\n                            return;\n                        }\n                    }\n\n                    for (idx, upcast_trait_ref) in\n                        util::supertraits(self.tcx(), source_trait_ref).enumerate()\n                    {\n                        self.infcx.probe(|_| {\n                            if upcast_trait_ref.def_id() == target_trait_did\n                                && let Ok(nested) = self.match_upcast_principal(\n                                    obligation,\n                                    upcast_trait_ref,\n                                    a_data,\n                                    b_data,\n                                    a_region,\n                                    b_region,\n                                )\n                            {\n                                if nested.is_none() {\n                                    candidates.ambiguous = true;\n                                }\n                                candidates.vec.push(TraitUpcastingUnsizeCandidate(idx));\n                            }\n                        })\n                    }\n                }\n            }\n\n            // `T` -> `Trait`\n            (_, &ty::Dynamic(_, _, ty::Dyn)) => {\n                candidates.vec.push(BuiltinUnsizeCandidate);\n            }\n\n            // Ambiguous handling is below `T` -> `Trait`, because inference\n            // variables can still implement `Unsize<Trait>` and nested\n            // obligations will have the final say (likely deferred).\n            (&ty::Infer(ty::TyVar(_)), _) | (_, &ty::Infer(ty::TyVar(_))) => {\n                debug!(\"assemble_candidates_for_unsizing: ambiguous\");\n                candidates.ambiguous = true;\n            }\n\n            // `[T; n]` -> `[T]`\n            (&ty::Array(..), &ty::Slice(_)) => {\n                candidates.vec.push(BuiltinUnsizeCandidate);\n            }\n\n            // `Struct<T>` -> `Struct<U>`\n            (&ty::Adt(def_id_a, _), &ty::Adt(def_id_b, _)) if def_id_a.is_struct() => {\n                if def_id_a == def_id_b {\n                    candidates.vec.push(BuiltinUnsizeCandidate);\n                }\n            }\n\n            // `(.., T)` -> `(.., U)`\n            (&ty::Tuple(tys_a), &ty::Tuple(tys_b)) => {\n                if tys_a.len() == tys_b.len() {\n                    candidates.vec.push(BuiltinUnsizeCandidate);\n                }\n            }\n\n            _ => {}\n        };\n    }"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Deref-output trait-object migration path invokes predicate probing/evaluation during candidate selection",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "need_migrate_deref_output_trait_object",
+              "file": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+              "content": "fn need_migrate_deref_output_trait_object(\n        &mut self,\n        ty: Ty<'tcx>,\n        param_env: ty::ParamEnv<'tcx>,\n        cause: &ObligationCause<'tcx>,\n    ) -> Option<ty::PolyExistentialTraitRef<'tcx>> {\n        let tcx = self.tcx();\n        if tcx.features().trait_upcasting {\n            return None;\n        }\n\n        // <ty as Deref>\n        let trait_ref = ty::TraitRef::new(tcx, tcx.lang_items().deref_trait()?, [ty]);\n\n        let obligation =\n            traits::Obligation::new(tcx, cause.clone(), param_env, ty::Binder::dummy(trait_ref));\n        if !self.infcx.predicate_may_hold(&obligation) {\n            return None;\n        }\n\n        self.infcx.probe(|_| {\n            let ty = traits::normalize_projection_ty(\n                self,\n                param_env,\n                ty::AliasTy::new(tcx, tcx.lang_items().deref_target()?, trait_ref.args),\n                cause.clone(),\n                0,\n                // We're *intentionally* throwing these away,\n                // since we don't actually use them.\n                &mut vec![],\n            )\n            .ty()\n            .unwrap();\n\n            if let ty::Dynamic(data, ..) = ty.kind() { data.principal() } else { None }\n        })\n    }"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "CoerceUnsized/Unsize impl overlap with dyn-trait unsizing creates problematic recursive trait evaluation path",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "assemble_candidates_for_unsizing",
+              "file": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+              "content": "fn assemble_candidates_for_unsizing(\n        &mut self,\n        obligation: &PolyTraitObligation<'tcx>,\n        candidates: &mut SelectionCandidateSet<'tcx>,\n    ) {\n        // We currently never consider higher-ranked obligations e.g.\n        // `for<'a> &'a T: Unsize<Trait+'a>` to be implemented. This is not\n        // because they are a priori invalid, and we could potentially add support\n        // for them later, it's just that there isn't really a strong need for it.\n        // A `T: Unsize<U>` obligation is always used as part of a `T: CoerceUnsize<U>`\n        // impl, and those are generally applied to concrete types.\n        //\n        // That said, one might try to write a fn with a where clause like\n        //     for<'a> Foo<'a, T>: Unsize<Foo<'a, Trait>>\n        // where the `'a` is kind of orthogonal to the relevant part of the `Unsize`.\n        // Still, you'd be more likely to write that where clause as\n        //     T: Trait\n        // so it seems ok if we (conservatively) fail to accept that `Unsize`\n        // obligation above. Should be possible to extend this in the future.\n        let Some(source) = obligation.self_ty().no_bound_vars() else {\n            // Don't add any candidates if there are bound regions.\n            return;\n        };\n        let target = obligation.predicate.skip_binder().trait_ref.args.type_at(1);\n\n        debug!(?source, ?target, \"assemble_candidates_for_unsizing\");\n\n        match (source.kind(), target.kind()) {\n            // Trait+Kx+'a -> Trait+Ky+'b (upcasts).\n            (&ty::Dynamic(a_data, a_region, ty::Dyn), &ty::Dynamic(b_data, b_region, ty::Dyn)) => {\n                // Upcast coercions permit several things:\n                //\n                // 1. Dropping auto traits, e.g., `Foo + Send` to `Foo`\n                // 2. Tightening the region bound, e.g., `Foo + 'a` to `Foo + 'b` if `'a: 'b`\n                // 3. Tightening trait to its super traits, eg. `Foo` to `Bar` if `Foo: Bar`\n                //\n                // Note that neither of the first two of these changes requires any\n                // change at runtime. The third needs to change pointer metadata at runtime.\n                //\n                // We always perform upcasting coercions when we can because of reason\n                // #2 (region bounds).\n                let principal_def_id_a = a_data.principal_def_id();\n                let principal_def_id_b = b_data.principal_def_id();\n                if principal_def_id_a == principal_def_id_b {\n                    // We may upcast to auto traits that are either explicitly listed in\n                    // the object type's bounds, or implied by the principal trait ref's\n                    // supertraits.\n                    let a_auto_traits: FxIndexSet<DefId> = a_data\n                        .auto_traits()\n                        .chain(principal_def_id_a.into_iter().flat_map(|principal_def_id| {\n                            util::supertrait_def_ids(self.tcx(), principal_def_id)\n                                .filter(|def_id| self.tcx().trait_is_auto(*def_id))\n                        }))\n                        .collect();\n                    let auto_traits_compatible = b_data\n                        .auto_traits()\n                        // All of a's auto traits need to be in b's auto traits.\n                        .all(|b| a_auto_traits.contains(&b));\n                    if auto_traits_compatible {\n                        candidates.vec.push(BuiltinUnsizeCandidate);\n                    }\n                } else if principal_def_id_a.is_some() && principal_def_id_b.is_some() {\n                    // not casual unsizing, now check whether this is trait upcasting coercion.\n                    let principal_a = a_data.principal().unwrap();\n                    let target_trait_did = principal_def_id_b.unwrap();\n                    let source_trait_ref = principal_a.with_self_ty(self.tcx(), source);\n                    if let Some(deref_trait_ref) = self.need_migrate_deref_output_trait_object(\n                        source,\n                        obligation.param_env,\n                        &obligation.cause,\n                    ) {\n                        if deref_trait_ref.def_id() == target_trait_did {\n                            return;\n                        }\n                    }\n\n                    for (idx, upcast_trait_ref) in\n                        util::supertraits(self.tcx(), source_trait_ref).enumerate()\n                    {\n                        self.infcx.probe(|_| {\n                            if upcast_trait_ref.def_id() == target_trait_did\n                                && let Ok(nested) = self.match_upcast_principal(\n                                    obligation,\n                                    upcast_trait_ref,\n                                    a_data,\n                                    b_data,\n                                    a_region,\n                                    b_region,\n                                )\n                            {\n                                if nested.is_none() {\n                                    candidates.ambiguous = true;\n                                }\n                                candidates.vec.push(TraitUpcastingUnsizeCandidate(idx));\n                            }\n                        })\n                    }\n                }\n            }\n\n            // `T` -> `Trait`\n            (_, &ty::Dynamic(_, _, ty::Dyn)) => {\n                candidates.vec.push(BuiltinUnsizeCandidate);\n            }\n\n            // Ambiguous handling is below `T` -> `Trait`, because inference\n            // variables can still implement `Unsize<Trait>` and nested\n            // obligations will have the final say (likely deferred).\n            (&ty::Infer(ty::TyVar(_)), _) | (_, &ty::Infer(ty::TyVar(_))) => {\n                debug!(\"assemble_candidates_for_unsizing: ambiguous\");\n                candidates.ambiguous = true;\n            }\n\n            // `[T; n]` -> `[T]`\n            (&ty::Array(..), &ty::Slice(_)) => {\n                candidates.vec.push(BuiltinUnsizeCandidate);\n            }\n\n            // `Struct<T>` -> `Struct<U>`\n            (&ty::Adt(def_id_a, _), &ty::Adt(def_id_b, _)) if def_id_a.is_struct() => {\n                if def_id_a == def_id_b {\n                    candidates.vec.push(BuiltinUnsizeCandidate);\n                }\n            }\n\n            // `(.., T)` -> `(.., U)`\n            (&ty::Tuple(tys_a), &ty::Tuple(tys_b)) => {\n                if tys_a.len() == tys_b.len() {\n                    candidates.vec.push(BuiltinUnsizeCandidate);\n                }\n            }\n\n            _ => {}\n        };\n    }"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.995
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.95
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.66
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.88
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 240.176,
+    "stage_times_sec": {
+      "load_bug_context": 0.015,
+      "checkout": 2.0,
+      "load_or_build_graph": 33.948,
+      "symptom_vertices_locating": 182.263,
+      "dynamic_cig_discovering": 19.901,
+      "convert_results": 0.005
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 11,
+      "input_tokens": 116408,
+      "output_tokens": 1083,
+      "total_tokens": 117491,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.422,
+          "input_tokens": 8249,
+          "output_tokens": 126,
+          "total_tokens": 8375
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.9,
+          "input_tokens": 7626,
+          "output_tokens": 18,
+          "total_tokens": 7644
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.871,
+          "input_tokens": 8456,
+          "output_tokens": 52,
+          "total_tokens": 8508
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 3.13,
+          "input_tokens": 8827,
+          "output_tokens": 64,
+          "total_tokens": 8891
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.506,
+          "input_tokens": 8905,
+          "output_tokens": 52,
+          "total_tokens": 8957
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.535,
+          "input_tokens": 10015,
+          "output_tokens": 49,
+          "total_tokens": 10064
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 4.257,
+          "input_tokens": 9350,
+          "output_tokens": 146,
+          "total_tokens": 9496
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 3.632,
+          "input_tokens": 11406,
+          "output_tokens": 143,
+          "total_tokens": 11549
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 4.238,
+          "input_tokens": 14428,
+          "output_tokens": 144,
+          "total_tokens": 14572
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.468,
+          "input_tokens": 14436,
+          "output_tokens": 145,
+          "total_tokens": 14581
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 4.297,
+          "input_tokens": 14710,
+          "output_tokens": 144,
+          "total_tokens": 14854
+        }
+      ]
+    }
+  }
+}

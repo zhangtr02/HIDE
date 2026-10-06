@@ -1,0 +1,250 @@
+{
+  "bug_id": "123906",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-04-13",
+    "resolved": "79424056b05eaa9563d16dfab9b9a0c8f033f220"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_typeck/src/coercion.rs",
+    "compiler/rustc_hir_typeck/src/demand.rs",
+    "compiler/rustc_infer/src/infer/freshen.rs",
+    "compiler/rustc_middle/src/query/erase.rs",
+    "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+    "compiler/rustc_infer/src/infer/error_reporting/mod.rs",
+    "compiler/rustc_infer/src/infer/error_reporting/suggest.rs",
+    "compiler/rustc_query_system/src/query/caches.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a const-generic function returning `[u8; N]`, exercising monomorphization and type-checking of generic array return types.",
+        "The body contains an infinite `loop` with an immediate `break;`, testing loop expression typing and control-flow analysis.",
+        "A bare `break;` yields unit `()`, so the loop expression has type `()`, not `[u8; N]`.",
+        "Because the function body ends with the loop expression, rustc must diagnose a return type mismatch between `()` and the declared array type.",
+        "The unconstrained const parameter `N` forces rustc to reason about an arbitrary array length without any concrete instantiation.",
+        "No call to `as_chunks` exists, so the reproducer checks whether rustc reports the error during item checking, not only after use.",
+        "The code exercises divergence-related typing edge cases: `loop` can be `!`, but the reachable `break` prevents the loop from being treated as diverging.",
+        "Using nightly via `rust-toolchain.toml` pins the compiler version, indicating the bug is version-specific in type-checking or diagnostics."
+      ],
+      "summary": "This reproducer is a minimal compile-fail case for a const-generic function whose declared return type is `[u8; N]` but whose body evaluates to `()`. It stresses rustc’s handling of loop typing, `break` semantics, divergence analysis, and early item type-checking on nightly, even when the generic function is never called."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer is a minimal type-checking case centered on a const-generic function with an array return type `[u8; N]` whose body is a `loop { break; }`. Semantically, the reachable `break;` gives the loop expression type `()`, so rustc should emit an ordinary mismatched-types error during item type checking of `as_chunks`, even though the function is never called. Instead, the compiler ICEs during the `typeck` query for `as_chunks`, and the stack mentions a query cache instantiated with an erased value of type `[u8; 1usize]`. The common pattern is therefore an interaction between const generics, array types, and loop/break expression typing where an unconstrained const parameter `N` is apparently being normalized, erased, or cached as a concrete length (`1usize`) during type checking or diagnostics. This suggests a compiler defect in the type-checking / coercion / error-reporting path for function bodies returning const-generic arrays, especially when the body type is `()` from a non-diverging loop. The bug is likely not in borrow checking or codegen, since the panic occurs in the `typeck` phase before use sites or monomorphization matter.",
+      "possible_causes": [
+        "A defect in `rustc_hir_typeck` when computing the type of a `loop` expression with reachable `break` inside a function whose declared return type is a const-generic array, causing ICE instead of emitting a mismatched-types error.",
+        "Incorrect handling of unconstrained const-generic array lengths during type mismatch reporting or coercion, where `[u8; N]` is erroneously erased/normalized to a concrete cached form like `[u8; 1usize]`.",
+        "A bug in query-key/value caching or type erasure for const-generic array types during the `typeck` query, leading to an invalid assumption that the generic array length is concrete.",
+        "Faulty fallback logic in divergence analysis / never-type handling for `loop` expressions, where the compiler may start from a diverging-loop path and then mishandle the reachable `break` case when reconciling the final type with `[u8; N]`.",
+        "A compiler diagnostics bug in the expected-vs-found type construction for function return checking, specifically for generic array return types involving const parameters, triggering ICE while preparing the error rather than in the core type relation itself."
+      ],
+      "evidence": [
+        "Query stack shows the panic occurs in `#0 [typeck] type-checking as_chunks`, so the failure is in item body type checking, exactly where the return type mismatch should be diagnosed.",
+        "The function body `loop { break; }` has type `()` because `break;` is reachable and yields unit, so the expected compiler behavior is a normal `()` vs `[u8; N]` mismatch error, not an ICE.",
+        "The function is never called, which rules out use-site monomorphization as the trigger and points to early checking of the generic item itself.",
+        "The backtrace includes `SingleCache<...Erased<[u8; 1usize]>>`, indicating suspicious concretization/erasure of a const-generic array type that should remain `[u8; N]` during generic item checking.",
+        "The reproducer combines three stressors called out by the behavior summary: const-generic arrays, loop/break control-flow typing, and divergence analysis; the ICE happens exactly where those mechanisms meet.",
+        "Nightly-specific failure suggests a regression in compiler internals for type checking or diagnostics rather than any issue in the source program."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1775,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "Most likely location because the ICE happens in the `typeck` query while type-checking the function body of `as_chunks`. This file drives function body checking, sets up the expected return type, and reconciles the final body expression against the declared return type `[u8; N]`. A bug here could mishandle the mismatch between the loop body type `()` and the const-generic array return type."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "Highly suspicious because the reproducer centers on expression typing for `loop { break; }`. This file contains the logic for typing loop expressions, break semantics, divergence/never handling, and expected-type propagation, which are exactly the mechanisms stressed by the testcase."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/coercion.rs",
+        "reason": "A plausible failure point if rustc tries to coerce the loop expression result `()` into the function’s declared return type `[u8; N]`. Coercion logic involving `!`, control-flow joins, and expected return types can be fragile in the presence of const-generic array types."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/demand.rs",
+        "reason": "The compiler should emit a normal mismatched-types diagnostic here, so an ICE may arise while constructing the expected-vs-found error for `()` versus `[u8; N]`. This file handles mismatch diagnostics and may be incorrectly processing const-generic array types during reporting."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/freshen.rs",
+        "reason": "The backtrace/query text mentions an erased cached type resembling `[u8; 1usize]`, suggesting unresolved const-generic information may be getting freshened or canonicalized incorrectly into a concrete placeholder. This file is directly involved in making partially inferred types/consts cacheable."
+      },
+      {
+        "path": "compiler/rustc_middle/src/query/erase.rs",
+        "reason": "The explicit mention of `Erased<[u8; 1usize]>` in the stack trace makes the query erasure layer suspicious. If const-generic array lengths are being erased/restored incorrectly, that could explain why a generic `[u8; N]` appears as a concrete `[u8; 1usize]` during type checking or diagnostics."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+        "reason": "Type relation logic is relevant because the compiler must compare the body type `()` against the declared return type `[u8; N]`. If const-generic array types are mishandled during equality/subtyping checks, especially with unresolved const params, it could trigger an ICE instead of a clean error."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/error_reporting/mod.rs",
+        "reason": "If the core type relation fails normally but the ICE occurs while building the diagnostic, this central inference error-reporting entry point is a plausible source. It coordinates expected/found reporting and may mishandle const-generic array types in delayed inference errors."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/error_reporting/suggest.rs",
+        "reason": "This testcase is exactly the sort of body/return mismatch where rustc often tries block or semicolon related suggestions. Suggestion code that inspects expression shapes and expected return types could ICE when the expected type is a const-generic array `[u8; N]`."
+      },
+      {
+        "path": "compiler/rustc_query_system/src/query/caches.rs",
+        "reason": "Less likely than typeck itself, but still relevant because the stack explicitly references `SingleCache<...Erased<[u8; 1usize]>>`. If query caching is making an invalid assumption about an erased const-generic type result, it could surface as a typeck ICE."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 159.856,
+    "stage_times_sec": {
+      "checkout": 1.518,
+      "load_bug_context": 0.04,
+      "test_behavior_analysis": 6.353,
+      "test_failure_analysis": 12.583,
+      "load_file_candidates": 0.111,
+      "search_suspicious_files": 139.251
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 424590,
+      "output_tokens": 7241,
+      "total_tokens": 431831,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.352,
+          "input_tokens": 326,
+          "output_tokens": 310,
+          "total_tokens": 636
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.583,
+          "input_tokens": 2137,
+          "output_tokens": 740,
+          "total_tokens": 2877
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.366,
+          "input_tokens": 27889,
+          "output_tokens": 342,
+          "total_tokens": 28231
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.754,
+          "input_tokens": 27760,
+          "output_tokens": 344,
+          "total_tokens": 28104
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.525,
+          "input_tokens": 27369,
+          "output_tokens": 385,
+          "total_tokens": 27754
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.093,
+          "input_tokens": 27568,
+          "output_tokens": 338,
+          "total_tokens": 27906
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.623,
+          "input_tokens": 27587,
+          "output_tokens": 411,
+          "total_tokens": 27998
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.159,
+          "input_tokens": 27876,
+          "output_tokens": 418,
+          "total_tokens": 28294
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.226,
+          "input_tokens": 27727,
+          "output_tokens": 392,
+          "total_tokens": 28119
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.517,
+          "input_tokens": 27723,
+          "output_tokens": 359,
+          "total_tokens": 28082
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.309,
+          "input_tokens": 27780,
+          "output_tokens": 331,
+          "total_tokens": 28111
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 11.555,
+          "input_tokens": 27650,
+          "output_tokens": 406,
+          "total_tokens": 28056
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.455,
+          "input_tokens": 27763,
+          "output_tokens": 313,
+          "total_tokens": 28076
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.234,
+          "input_tokens": 27759,
+          "output_tokens": 319,
+          "total_tokens": 28078
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.25,
+          "input_tokens": 28015,
+          "output_tokens": 322,
+          "total_tokens": 28337
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.499,
+          "input_tokens": 27825,
+          "output_tokens": 309,
+          "total_tokens": 28134
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.521,
+          "input_tokens": 22675,
+          "output_tokens": 406,
+          "total_tokens": 23081
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.134,
+          "input_tokens": 11161,
+          "output_tokens": 796,
+          "total_tokens": 11957
+        }
+      ]
+    }
+  }
+}

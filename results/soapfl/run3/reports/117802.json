@@ -1,0 +1,249 @@
+{
+  "bug_id": "117802",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-08",
+    "resolved": "7adc89b69b941afceadcf8609dd6b2999353e550"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_ast_lowering/src/path.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+    "compiler/rustc_mir_build/src/build/mod.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines an empty trait `T` and uses it only as a bound on an anonymous function parameter type.",
+        "Declares `f` returning `impl Fn(impl T)`, combining opaque `impl Trait` in both return position and `Fn` argument position.",
+        "The returned closure captures local variable `p`, exercising closure environment capture and inferred closure output type.",
+        "The closure parameter is ignored (`|_| p`), so type checking focuses on matching the closure with the opaque `Fn(impl T)` signature.",
+        "Exercises unstable/nightly handling of anonymous existential-like types nested inside trait object-style callable syntax.",
+        "Forces rustc to reason about higher-level lowering between closure types, `Fn` trait implementation, and opaque type inference.",
+        "Tests whether `impl Trait` is accepted or rejected in nested generic argument position inside `Fn(...)` notation.",
+        "Likely targets a compiler ICE or incorrect diagnostic during HIR/type-checking of nested `impl Trait` with closures."
+      ],
+      "summary": "The reproducer is a minimal nightly Rust program that defines a function returning a closure while using `impl Trait` both as the return type and as the closure’s argument type inside `Fn(...)`. It stresses parsing, lowering, and type checking for nested opaque types, closure capture, and callable trait matching, likely to trigger an internal compiler error or bad diagnostic."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on nested `impl Trait` inside callable trait notation: `fn f() -> impl Fn(impl T)`. This mixes two sensitive compiler features at once: an RPIT/opaque return type (`impl Fn(...)`) and an anonymous parameter type placed inside `Fn(...)` notation, which is not a normal supported position for `impl Trait` and is expected to produce user-facing errors (E0562/E0666). Despite those errors, rustc continues far enough into MIR construction for the returned closure `f::{closure#0}` and then panics while computing the opaque type for `f::{opaque#0}`. The query stack shows interaction between closure MIR building/borrowck and opaque type computation, which strongly suggests that invalid nested `impl Trait` syntax was not fully rejected or normalized before later phases. The common pattern is therefore an invalid `impl Trait` in nested callable argument position combined with closure inference and opaque return type inference, causing inconsistent internal state between type checking and MIR/opaque-type lowering.",
+      "possible_causes": [
+        "A defect in `impl Trait` validation/lowering where `impl Trait` appearing inside `Fn(...)` argument position is diagnosed but still represented as if it were a valid anonymous type, allowing later MIR/type-of-opaque queries to see malformed types.",
+        "Incorrect HIR-to-ty lowering for parenthesized `Fn(impl T)` syntax nested under an RPIT return type, especially in the code path that desugars callable trait notation into tupled generic arguments for `Fn` traits.",
+        "A bug in opaque type (`type_of_opaque`) computation for return-position `impl Trait` when the hidden type is a closure whose signature depends on an invalid or error-type anonymous parameter introduced by nested `impl Trait`.",
+        "Failure to properly propagate or short-circuit on `ErrorGuaranteed`/error types after emitting E0562/E0666, causing MIR building or unsafety checking for `f::{closure#0}` to assume a well-formed closure signature and panic.",
+        "A mismatch between closure signature inference and `Fn` trait obligation construction when the closure ignores its argument (`|_| p`) and the expected argument type comes from an illegal `impl Trait` placeholder, leading to an ICE during closure MIR construction or borrow checking."
+      ],
+      "evidence": [
+        "Compiler output explicitly mentions E0562 and E0666, confirming the source uses unsupported/illegal `impl Trait` forms that should be handled gracefully rather than ICE.",
+        "The query stack shows `mir_built` for `f::{closure#0}` followed by borrowck and then `type_of_opaque` for `f::{opaque#0}`, indicating the crash happens after diagnostics, during deeper compilation of the closure/opaque return type interaction.",
+        "The reproducer combines `impl Trait` in return position with another `impl Trait` inside `Fn(...)` argument position, a strong commonality with known fragile lowering/inference paths.",
+        "The closure captures local `p` and returns it while ignoring its parameter, so the hidden type of the RPIT is a closure whose argument type must be inferred from the malformed `Fn(impl T)` expectation.",
+        "The panic occurs while building MIR for the closure rather than during parsing, suggesting the parser accepted the syntax and later compiler stages mishandled an invalid lowered type instead of stopping cleanly."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1699,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "Most suspicious because the ICE occurs while building MIR for `f::{closure#0}` after type errors on `impl Trait` inside `Fn(...)`. This file derives closure signatures from contextual expectations, and here the expected type comes from `impl Fn(impl T)`, an invalid nested `impl Trait` form. A bug here could let an errored/illegal expected closure signature survive into later phases instead of degrading cleanly to an error type."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "This is a prime candidate for lowering/converting the `Fn(impl T)` type syntax into internal `ty` form. The reproducer specifically stresses nested `impl Trait` in callable trait notation, and this module is where invalid `impl Trait` placement may be diagnosed yet still incorrectly represented, leading to inconsistent downstream type information."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "The query stack explicitly includes `type_of_opaque` for `f::{opaque#0}`. Since the returned type is RPIT (`impl Fn(...)`) whose hidden type is a closure, this file is highly relevant to computing/collecting the hidden type for the opaque return. A failure to reject or sanitize the malformed expected signature before opaque hidden-type collection could explain the ICE."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Opaque type remapping is directly involved when translating the hidden closure type of the RPIT into the opaque's generics. If the invalid anonymous `impl T` inside `Fn(...)` is still present in the closure signature, this remapping logic can encounter malformed arguments/regions and panic instead of treating them as error types."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "The bug may come from inference support for replacing/defining opaque types when type checking the closure against the RPIT expectation. The reproducer mixes closure inference with opaque return inference and an illegal nested `impl Trait`, making this a plausible place where erroneous opaque state is still registered and later crashes consumers."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "`Fn(impl T)` uses path/trait notation with special lowering rules, and this file explicitly handles path lowering plus `impl Trait` placement restrictions. A bug here could incorrectly allow `impl Trait` in non-final/nested positions under callable trait syntax, producing malformed HIR that later type checking and MIR building cannot robustly handle."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "The code should produce user-facing errors (E0562/E0666) but not ICE. Since AST validation tracks `impl Trait` context and placement, an incomplete validation here could permit an invalid AST shape to proceed too far, causing later closure/opaque pipelines to see illegal nested `impl Trait` constructs."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+        "reason": "The panic happens at `mir_built` for the closure body. THIR construction is the bridge from typeck results to MIR building, so if type checking left behind an inconsistent closure signature due to the invalid `Fn(impl T)` expectation, this module is a plausible crash site when materializing the closure body for MIR."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/mod.rs",
+        "reason": "Also relevant because the query stack begins with MIR construction for the closure. Even if the root cause is earlier, this file may contain the immediate panic path when MIR build assumes a well-formed closure signature or body type despite earlier reported errors from nested `impl Trait`."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Less likely than the HIR/typeck files, but still plausible because borrow checking and opaque type inference appear in the query stack before `type_of_opaque`. If malformed hidden-type information for the RPIT closure survives into region/opaque resolution, this file could be where invalid opaque type data is mishandled instead of short-circuited after errors."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 145.615,
+    "stage_times_sec": {
+      "checkout": 0.849,
+      "load_bug_context": 0.073,
+      "test_behavior_analysis": 6.096,
+      "test_failure_analysis": 11.511,
+      "load_file_candidates": 0.103,
+      "search_suspicious_files": 126.983
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 410350,
+      "output_tokens": 7279,
+      "total_tokens": 417629,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.096,
+          "input_tokens": 349,
+          "output_tokens": 277,
+          "total_tokens": 626
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.511,
+          "input_tokens": 2138,
+          "output_tokens": 680,
+          "total_tokens": 2818
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.879,
+          "input_tokens": 27521,
+          "output_tokens": 425,
+          "total_tokens": 27946
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.476,
+          "input_tokens": 27751,
+          "output_tokens": 346,
+          "total_tokens": 28097
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.815,
+          "input_tokens": 27286,
+          "output_tokens": 365,
+          "total_tokens": 27651
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.879,
+          "input_tokens": 27559,
+          "output_tokens": 327,
+          "total_tokens": 27886
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.937,
+          "input_tokens": 27489,
+          "output_tokens": 366,
+          "total_tokens": 27855
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 6.949,
+          "input_tokens": 27907,
+          "output_tokens": 351,
+          "total_tokens": 28258
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.299,
+          "input_tokens": 27703,
+          "output_tokens": 389,
+          "total_tokens": 28092
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.893,
+          "input_tokens": 27693,
+          "output_tokens": 335,
+          "total_tokens": 28028
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.846,
+          "input_tokens": 27703,
+          "output_tokens": 409,
+          "total_tokens": 28112
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.3,
+          "input_tokens": 27550,
+          "output_tokens": 363,
+          "total_tokens": 27913
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.637,
+          "input_tokens": 27899,
+          "output_tokens": 339,
+          "total_tokens": 28238
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.614,
+          "input_tokens": 27639,
+          "output_tokens": 310,
+          "total_tokens": 27949
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.954,
+          "input_tokens": 27924,
+          "output_tokens": 307,
+          "total_tokens": 28231
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.571,
+          "input_tokens": 27769,
+          "output_tokens": 378,
+          "total_tokens": 28147
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.379,
+          "input_tokens": 6834,
+          "output_tokens": 432,
+          "total_tokens": 7266
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.525,
+          "input_tokens": 13636,
+          "output_tokens": 880,
+          "total_tokens": 14516
+        }
+      ]
+    }
+  }
+}

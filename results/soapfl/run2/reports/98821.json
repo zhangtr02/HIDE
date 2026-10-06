@@ -1,0 +1,237 @@
+{
+  "bug_id": "98821",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-07-03",
+    "resolved": "f2d93935ffba3ab9d7ccb5300771a2d29b4c8bf3"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/inline.rs",
+    "compiler/rustc_target/src/abi/call/mod.rs",
+    "compiler/rustc_middle/src/ty/layout.rs",
+    "compiler/rustc_codegen_llvm/src/abi.rs",
+    "compiler/rustc_monomorphize/src/collector.rs",
+    "compiler/rustc_middle/src/ty/instance.rs",
+    "compiler/rustc_mir_transform/src/shim.rs",
+    "compiler/rustc_codegen_ssa/src/mir/block.rs",
+    "compiler/rustc_typeck/src/check/check.rs",
+    "compiler/rustc_ast_passes/src/feature_gate.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `unboxed_closures`, permitting explicit use of the `extern \"rust-call\"` ABI.",
+        "Declares generic function `foo<T>` with `extern \"rust-call\"`, a special ABI used for tuple-style call arguments.",
+        "Calls `foo(())`, exercising how the rust-call ABI handles an empty tuple argument.",
+        "Calls `foo((1, 2))`, exercising rust-call ABI lowering for a multi-element tuple argument.",
+        "Uses a generic parameter `T`, so monomorphization occurs for distinct tuple shapes `()` and `(i32, i32)`.",
+        "Relies on tuple arguments being passed as the single parameter under the rust-call convention, not normal Rust ABI lowering.",
+        "`// check-pass` indicates the reproducer mainly tests successful compilation rather than runtime behavior.",
+        "Exercises compiler validation/codegen around unstable call ABI handling on free functions, not only closure traits."
+      ],
+      "summary": "This reproducer checks that nightly Rust accepts and compiles a generic free function using the unstable `extern \"rust-call\"` ABI. It instantiates that function with both empty and two-element tuple arguments, stressing tuple-based argument lowering, monomorphization, and compiler handling of `rust-call` outside closure trait implementations."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a compiler-side ICE triggered during MIR optimization/monomorphization for a free function using the special `extern \"rust-call\"` ABI. The reproducer is small and type-correct under the enabled feature, but it combines several unusual properties: a generic function, the `rust-call` ABI, and instantiations with two different tuple shapes including the zero-length tuple `()`. The common theme is that the compiler must lower and validate `rust-call` arguments as a single tuple parameter, then monomorphize/codegen specialized instances for `T = ()` and `T = (i32, i32)`. Since the panic occurs in `optimized_mir` while collecting mono items for `main`, the likely defect is not parsing or type checking, but an internal assumption in MIR transformation or ABI lowering that `rust-call` only appears on closures/trait shims or that the tuple argument has a non-empty/ordinary shape. A production bug likely exists where MIR/codegen handling of `extern \"rust-call\"` on free generic functions mishandles tuple argument decomposition/recomposition, especially for the empty tuple case, leading to an unexpected panic instead of successful compilation or a normal diagnostic.",
+      "possible_causes": [
+        "Bug in MIR optimization or ABI lowering for `extern \"rust-call\"` free functions: compiler assumes `rust-call` is only used for closure/`Fn*` shims and panics when optimizing a normal generic function with that ABI.",
+        "Incorrect handling of monomorphized tuple arguments under the `rust-call` ABI, where the compiler special-cases tuple unpacking and fails for distinct instantiations such as `()` and `(i32, i32)`.",
+        "Missing or invalid invariant for zero-length tuple `()` in `rust-call` argument lowering, causing an internal panic when MIR/codegen expects at least one tuple field or a non-empty argument list.",
+        "Defect in instance collection / mono item partitioning interacting with optimized MIR for `rust-call` ABI functions, likely due to improper construction of ABI-specific call shims or function signatures after substitution of generic `T`.",
+        "Compiler validation bug for unstable call ABI on non-closure items: rustc may accept the item during earlier phases but later MIR/codegen code lacks support for this form and hits an `unwrap`/`bug!` on an unexpected signature shape."
+      ],
+      "evidence": [
+        "Reproducer uses `#![feature(unboxed_closures)]` and explicitly declares a free function with `extern \"rust-call\"`, an uncommon ABI path likely to have incomplete compiler support.",
+        "The same generic function is instantiated with `T = ()` and `T = (i32, i32)`, stressing tuple-shape-dependent lowering and monomorphization.",
+        "Behavior summary explicitly centers on tuple-based argument lowering under `rust-call`, not normal ABI passing.",
+        "The panic occurs in query `optimized_mir` for `main`, indicating the crash happens after type checking, during MIR optimization / codegen preparation rather than in user code semantics.",
+        "Query stack includes `collect_and_partition_mono_items`, matching a monomorphization-related failure for specialized instances of `foo<T>`.",
+        "`// check-pass` plus the simplicity of the source suggest the reproducer is expected to compile cleanly, so the ICE indicates an internal compiler invariant violation rather than an intended rejection.",
+        "No user-facing type error is reported; instead rustc emits `internal compiler error: unexpected panic`, which is consistent with an unhandled compiler case in production code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1448,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_transform/src/inline.rs",
+        "reason": "The panic is pinpointed by the stack in `rustc_mir_transform::inline::Inliner::try_inlining` while `optimized_mir` runs for `main`. Because the reproducer exercises a generic free function with `extern \"rust-call\"`, the likeliest defect is the inliner mishandling RustCall-ABI argument mapping - or tacitly assuming that ABI only ever appears in compiler-generated closure/Fn shims."
+      },
+      {
+        "path": "compiler/rustc_target/src/abi/call/mod.rs",
+        "reason": "Most suspicious because the reproducer centers on `extern \"rust-call\"` argument lowering, especially treating the function’s single parameter as a tuple and handling the zero-tuple `()`. A bug here could produce an invalid `FnAbi` or hidden invariant violation that only surfaces later during optimized MIR/mono item collection."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/layout.rs",
+        "reason": "`rust-call` ultimately depends on computing correct ABI/layout information for tuple-shaped arguments. The crash pattern with `T = ()` and `T = (i32, i32)` suggests a layout/ABI computation path may mishandle empty tuples or generic tuple instantiations for this special ABI."
+      },
+      {
+        "path": "compiler/rustc_codegen_llvm/src/abi.rs",
+        "reason": "LLVM ABI lowering is a likely place for unsupported assumptions about `extern \"rust-call\"` on ordinary free functions. Even though the query stack mentions optimized MIR, ABI lowering metadata is often computed during monomorphization/codegen preparation and could panic on unexpected tuple signatures."
+      },
+      {
+        "path": "compiler/rustc_monomorphize/src/collector.rs",
+        "reason": "The query stack explicitly includes `collect_and_partition_mono_items`, so mono collection is directly involved. If collector logic inspects call targets, instances, or ABI-specific shims and assumes `rust-call` only appears for closure adapters, it could ICE while discovering monomorphized items for `foo<()>` and `foo<(i32, i32)>`."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/instance.rs",
+        "reason": "`rust-call` frequently interacts with synthesized call shims and special instance kinds. If free functions with this ABI are misclassified or an expected shim/instance invariant is violated, later MIR optimization or mono collection could panic here."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/shim.rs",
+        "reason": "This file builds MIR shims for call-related instance kinds, including closure/Fn* adapters. The reproducer stresses a path that looks similar to closure-call ABI handling but on a plain generic function, so a missing or incorrect shim assumption is plausible."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/block.rs",
+        "reason": "Call terminator lowering must respect ABI-specific argument passing conventions. If `rust-call` free functions are lowered using closure-oriented tuple unpacking assumptions, especially for empty tuples, this backend-shared MIR codegen path could be the source of the ICE."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/check.rs",
+        "reason": "This file enforces ABI restrictions and validation. A likely class of bug is that `extern \"rust-call\"` on free functions is accepted too permissively here, allowing an unsupported form to reach MIR/codegen where it later panics instead of being rejected or handled correctly."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/feature_gate.rs",
+        "reason": "Feature gating and ABI checking are less likely than MIR/ABI lowering, but this file contains `check_abi` and could be implicated if `rust-call` is admitted in syntactic contexts that later compiler stages do not actually support, causing the eventual ICE."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 141.437,
+    "stage_times_sec": {
+      "checkout": 3.422,
+      "load_bug_context": 0.066,
+      "test_behavior_analysis": 6.307,
+      "test_failure_analysis": 13.041,
+      "load_file_candidates": 0.085,
+      "search_suspicious_files": 118.516
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 348662,
+      "output_tokens": 5842,
+      "total_tokens": 354504,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.307,
+          "input_tokens": 366,
+          "output_tokens": 260,
+          "total_tokens": 626
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.041,
+          "input_tokens": 2136,
+          "output_tokens": 726,
+          "total_tokens": 2862
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.842,
+          "input_tokens": 27865,
+          "output_tokens": 358,
+          "total_tokens": 28223
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.205,
+          "input_tokens": 27435,
+          "output_tokens": 386,
+          "total_tokens": 27821
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.399,
+          "input_tokens": 27464,
+          "output_tokens": 376,
+          "total_tokens": 27840
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.578,
+          "input_tokens": 27704,
+          "output_tokens": 349,
+          "total_tokens": 28053
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.857,
+          "input_tokens": 27609,
+          "output_tokens": 396,
+          "total_tokens": 28005
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.369,
+          "input_tokens": 27683,
+          "output_tokens": 346,
+          "total_tokens": 28029
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.553,
+          "input_tokens": 27712,
+          "output_tokens": 313,
+          "total_tokens": 28025
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.04,
+          "input_tokens": 27427,
+          "output_tokens": 356,
+          "total_tokens": 27783
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.803,
+          "input_tokens": 26559,
+          "output_tokens": 348,
+          "total_tokens": 26907
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.93,
+          "input_tokens": 27471,
+          "output_tokens": 164,
+          "total_tokens": 27635
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.663,
+          "input_tokens": 27577,
+          "output_tokens": 367,
+          "total_tokens": 27944
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.455,
+          "input_tokens": 27597,
+          "output_tokens": 342,
+          "total_tokens": 27939
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 2.854,
+          "input_tokens": 4588,
+          "output_tokens": 11,
+          "total_tokens": 4599
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.944,
+          "input_tokens": 11469,
+          "output_tokens": 744,
+          "total_tokens": 12213
+        }
+      ]
+    }
+  }
+}

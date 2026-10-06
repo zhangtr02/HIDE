@@ -1,0 +1,243 @@
+{
+  "bug_id": "108271",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-02-19",
+    "resolved": "4507fdaaa27ea2fb59a41df2ce7d1f290da53dae"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_hir_analysis/src/bounds.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_ast_lowering/src/path.rs",
+    "compiler/rustc_ast_passes/src/feature_gate.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_middle/src/ty/abstract_const.rs",
+    "compiler/rustc_ty_utils/src/consts.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Declares a trait with a generic type parameter and an associated constant: `TraitWAssocConst<T> { const A: T; }`.",
+        "Defines `main` as a generic function, which is unusual but valid for type checking even though monomorphization for entry points is restricted.",
+        "Adds a trait bound on type parameter `B`: `B: TraitWAssocConst<T, A = { 1 }>` using associated-const equality syntax.",
+        "Uses an inline const block `{ 1 }` inside the associated-const binding, exercising const expression parsing in generic bounds.",
+        "Forces rustc to compare the trait’s associated const type `T` with the inferred type of integer literal `1`, stressing type inference.",
+        "Exercises normalization and well-formedness checking of associated const constraints during generic predicate evaluation.",
+        "Targets nightly-only compiler behavior around const generics / associated-const equality handling in trait bounds.",
+        "The reproducer mainly checks compilation, not runtime behavior; failure indicates an internal type-checking or const-evaluation compiler bug."
+      ],
+      "summary": "The reproducer defines a trait with an associated constant, then places an associated-const equality constraint on a generic parameter in `main`. It specifically uses an inline const block `{ 1 }` as the required value for `A`. This stresses nightly rustc’s parsing, type inference, const expression handling, and predicate checking for associated-const equality in trait bounds, with no runtime execution involved."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during predicate collection for a function signature, not during code generation or runtime-related phases. The reproducer combines three stressors in one bound: a trait with an associated const whose type depends on a generic parameter (`const A: T`), an associated-const equality constraint in a trait bound (`A = ...`), and an inline const expression (`{ 1 }`) used as the equality value. The query stack shows the panic happens while computing `explicit_predicates_of` / `predicates_of` for `main`, which strongly suggests the compiler crashes when lowering or validating this associated-const binding into generic predicates. A likely commonality is that the compiler expects associated-const equality terms to already have a resolved/known type, but here the const expression literal must be typed against the generic associated const type `T`. That interaction can expose a missing validation path, bad assumption, or unimplemented case in HIR lowering / predicate construction for associated const equality constraints involving anonymous consts and inference-dependent types.",
+      "possible_causes": [
+        "Bug in predicate collection/lowering for associated-const equality bounds: rustc likely mishandles `TraitWAssocConst<T, A = { 1 }>` when building the `main` item's explicit predicates, especially for associated consts whose declared type depends on a generic parameter.",
+        "Missing type-checking or well-formedness handling for anonymous const expressions inside associated-const bindings in trait bounds, causing the compiler to construct an invalid predicate or hit an internal `bug!`/unreachable case before emitting a user-facing error.",
+        "Incorrect assumption in associated item binding code that the const equality term has a concrete known type; here `{ 1 }` must be inferred against generic `T`, which may leave the compiler with an underconstrained const/type relation during `explicit_predicates_of`.",
+        "Defect in normalization or conversion of associated-const equality syntax into internal projection/predicate form for traits with generic associated-const types, especially when the RHS is an inline const block rather than a plain literal/path.",
+        "Incomplete feature-gating or error-recovery path for nightly associated-const equality / const-expression-in-bounds handling, where unsupported syntax should yield a diagnostic (for example E0658-related) but instead triggers an ICE during predicate computation."
+      ],
+      "evidence": [
+        "Query stack pinpoints the crash in `explicit_predicates_of`, `predicates_defined_on`, and `predicates_of` for `main`, indicating the bug is in signature predicate construction/validation rather than later analysis stages.",
+        "The reproducer's only unusual semantic feature is the bound `B: TraitWAssocConst<T, A = { 1 }>`, so the crash is tightly correlated with associated-const equality inside a generic trait bound.",
+        "The trait defines `const A: T`, meaning the associated const type depends on generic parameter `T`; the RHS `{ 1 }` has integer-literal typing that must be inferred/coerced, increasing likelihood of a compiler-side type-resolution mismatch.",
+        "Use of an inline const block `{ 1 }` in a bound exercises anonymous const lowering; this is a distinct path from ordinary literal handling and likely interacts poorly with associated-const equality processing.",
+        "Compiler output references `rustc --explain E0658`, suggesting this area is feature-sensitive/unstable; instead of gracefully rejecting or diagnosing the construct, rustc panics, implying a missing defensive check in production compiler code.",
+        "No runtime execution is involved, and analysis stops before normal semantic completion, reinforcing that this is an ICE in front-end type/predicate handling for generic associated const constraints."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1588,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The query stack pinpoints the ICE in `explicit_predicates_of` / `predicates_of` for `main`. This file is the most direct implementation site for building generic predicates from the function signature, including trait bounds like `B: TraitWAssocConst<T, A = { 1 }>`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "Associated-item bindings in trait bounds are lowered here from HIR syntax into internal `ty` predicates. The buggy case involves an associated const equality with a generic-dependent const type and an inline const RHS, which strongly suggests a missing or invalid conversion path in AST/HIR-to-ty lowering."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/bounds.rs",
+        "reason": "This file is responsible for accumulating lowered bound clauses and already has dedicated logic for projection/equality-style bounds. An ICE from malformed associated-const equality lowering could easily originate from analogous bound construction here, especially if const-associated bindings were incompletely handled."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "The reproducer uses an inline const block `{ 1 }`, producing an anonymous const whose type must be computed relative to the associated const type `T`. This file contains `anon_const_type_of` and related anonymous-const typing logic that may fail when the anon const appears inside an associated-const equality bound."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "The problematic syntax is embedded in a trait bound path with an associated item binding (`TraitWAssocConst<T, A = { 1 }>`). This file lowers such paths and associated bindings into HIR, so a malformed HIR representation for const equality bindings could later crash predicate collection."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/feature_gate.rs",
+        "reason": "Compiler output references `rustc --explain E0658`, suggesting unstable or partially gated syntax. If associated-const equality with inline const blocks should have been rejected earlier, a missing feature gate here could allow unsupported syntax to reach predicate collection and ICE instead of producing a diagnostic."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The reproducer stresses well-formedness of a trait bound where the associated const type depends on generic `T`. Even though the panic appears during predicate collection, WF-related normalization assumptions from this area are closely coupled to bound validation and may expose the bad internal state."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "Associated item equality constraints are often normalized through projection-like machinery. If predicate collection constructs a projection/term obligation for the associated const binding, this file is a plausible downstream source of a bad assumption about const terms or their types."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/abstract_const.rs",
+        "reason": "The RHS uses an inline anonymous const expression. If predicate construction or validation tries to expand or reason about that const abstractly before its type is fully known, this representation layer for abstract consts is a plausible source of unsupported-case ICE behavior."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This file builds abstract const representations from THIR for anonymous consts and other compile-time expressions. Because the bug specifically combines anon consts with generic associated-const equality, an incomplete abstract-const construction path could contribute to the crash."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 143.032,
+    "stage_times_sec": {
+      "checkout": 0.398,
+      "load_bug_context": 0.073,
+      "test_behavior_analysis": 6.471,
+      "test_failure_analysis": 12.849,
+      "load_file_candidates": 0.094,
+      "search_suspicious_files": 123.146
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 384339,
+      "output_tokens": 6519,
+      "total_tokens": 390858,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.47,
+          "input_tokens": 354,
+          "output_tokens": 302,
+          "total_tokens": 656
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.849,
+          "input_tokens": 2188,
+          "output_tokens": 740,
+          "total_tokens": 2928
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.236,
+          "input_tokens": 27678,
+          "output_tokens": 368,
+          "total_tokens": 28046
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.419,
+          "input_tokens": 27781,
+          "output_tokens": 323,
+          "total_tokens": 28104
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.219,
+          "input_tokens": 27272,
+          "output_tokens": 361,
+          "total_tokens": 27633
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.577,
+          "input_tokens": 27708,
+          "output_tokens": 319,
+          "total_tokens": 28027
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.472,
+          "input_tokens": 27655,
+          "output_tokens": 398,
+          "total_tokens": 28053
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.149,
+          "input_tokens": 27977,
+          "output_tokens": 370,
+          "total_tokens": 28347
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.501,
+          "input_tokens": 27821,
+          "output_tokens": 335,
+          "total_tokens": 28156
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.608,
+          "input_tokens": 27696,
+          "output_tokens": 348,
+          "total_tokens": 28044
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.975,
+          "input_tokens": 27865,
+          "output_tokens": 374,
+          "total_tokens": 28239
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.707,
+          "input_tokens": 27014,
+          "output_tokens": 402,
+          "total_tokens": 27416
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.791,
+          "input_tokens": 27951,
+          "output_tokens": 308,
+          "total_tokens": 28259
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.356,
+          "input_tokens": 27954,
+          "output_tokens": 189,
+          "total_tokens": 28143
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.846,
+          "input_tokens": 27818,
+          "output_tokens": 323,
+          "total_tokens": 28141
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.088,
+          "input_tokens": 8791,
+          "output_tokens": 327,
+          "total_tokens": 9118
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.174,
+          "input_tokens": 12816,
+          "output_tokens": 732,
+          "total_tokens": 13548
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,278 @@
+{
+  "bug_id": "92893",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-01-13",
+    "resolved": "1bd4fdc943513e1004f498bbf289279c9784fc6f"
+  },
+  "final_top10": [
+    "compiler/rustc_middle/src/middle/region.rs",
+    "compiler/rustc_passes/src/region.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_middle/src/middle/region.rs",
+      "compiler/rustc_passes/src/region.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_middle/src/middle/region.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_passes/src/region.rs",
+        "rank": 2
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/92893.json",
+    "graph_cache_hit": false,
+    "graph_cache_build_mode": "skeleton",
+    "graph_cache_bug_id": "92893",
+    "graph_cache_checkout_commit": "1bd4fdc943513e1004f498bbf289279c9784fc6f",
+    "initial_graph_node_count": 44806,
+    "initial_graph_edge_count": 44805,
+    "graph_node_count": 44806,
+    "graph_edge_count": 55017,
+    "lazy_loaded_edge_count": 10212,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FILE\", \"name\": \"region.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/middle/region.rs\", \"content\": \"region.rs\"}",
+      "{\"type\": \"CLASS\", \"name\": \"var_scope\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/middle/region.rs\", \"content\": \"\"}",
+      "{\"type\": \"STRUCTURE\", \"name\": \"ScopeTree\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/middle/region.rs\", \"content\": \"pub struct ScopeTree {\\n    /// If not empty, this body is the root of this region hierarchy.\\n    pub root_body: Option<hir::HirId>,\\n\\n    /// Maps from a scope ID to the enclosing scope id;\\n    /// this is usually corresponding to the lexical nesting, though\\n    /// in the case of closures the parent scope is the innermost\\n    /// conditional expression or repeating block. (Note that the\\n    /// enclosing scope ID for the block associated with a closure is\\n    /// the closure itself.)\\n    pub parent_map: FxHashMap<Scope, (Scope, ScopeDepth)>,\\n\\n    /// Maps from a variable or binding ID to the block in which that\\n    /// variable is declared.\\n    var_map: FxHashMap<hir::ItemLocalId, Scope>,\\n\\n    /// Maps from a `NodeId` to the associated destruction scope (if any).\\n    destruction_scopes: FxHashMap<hir::ItemLocalId, Scope>,\\n\\n    /// `rvalue_scopes` includes entries for those expressions whose\\n    /// cleanup scope is larger than the default. The map goes from the\\n    /// expression ID to the cleanup scope id. For rvalues not present in\\n    /// this table, the appropriate cleanup scope is the innermost\\n    /// enclosing statement, conditional expression, or repeating\\n    /// block (see `terminating_scopes`).\\n    /// In constants, None is used to indicate that certain expressions\\n    /// escape into 'static and should have no local cleanup scope.\\n    rvalue_scopes: FxHashMap<hir::ItemLocalId, Option<Scope>>,\\n\\n    /// If there are any `yield` nested within a scope, this map\\n    /// stores the `Span` of the last one and its index in the\\n    /// postorder of the Visitor traversal on the HIR.\\n    ///\\n    /// HIR Visitor postorder indexes might seem like a peculiar\\n    /// thing to care about. but it turns out that HIR bindings\\n    /// and the temporary results of HIR expressions are never\\n    /// storage-live at the end of HIR nodes with postorder indexes\\n    /// lower than theirs, and therefore don't need to be suspended\\n    /// at yield-points at these indexes.\\n    ///\\n    /// For an example, suppose we have some code such as:\\n    /// ```rust,ignore (example)\\n    ///     foo(f(), yield y, bar(g()))\\n    /// ```\\n    ///\\n    /// With the HIR tree (calls numbered for expository purposes)\\n    ///\\n    /// ```text\\n    ///     Call#0(foo, [Call#1(f), Yield(y), Call#2(bar, Call#3(g))])\\n    /// ```\\n    ///\\n    /// Obviously, the result of `f()` was created before the yield\\n    /// (and therefore needs to be kept valid over the yield) while\\n    /// the result of `g()` occurs after the yield (and therefore\\n    /// doesn't). If we want to infer that, we can look at the\\n    /// postorder traversal:\\n    /// ```plain,ignore\\n    ///     `foo` `f` Call#1 `y` Yield `bar` `g` Call#3 Call#2 Call#0\\n    /// ```\\n    ///\\n    /// In which we can easily see that `Call#1` occurs before the yield,\\n    /// and `Call#3` after it.\\n    ///\\n    /// To see that this method works, consider:\\n    ///\\n    /// Let `D` be our binding/temporary and `U` be our other HIR node, with\\n    /// `HIR-postorder(U) < HIR-postorder(D)`. Suppose, as in our example,\\n    /// U is the yield and D is one of the calls.\\n    /// Let's show that `D` is storage-dead at `U`.\\n    ///\\n    /// Remember that storage-live/storage-dead refers to the state of\\n    /// the *storage*, and does not consider moves/drop flags.\\n    ///\\n    /// Then:\\n    ///\\n    ///   1. From the ordering guarantee of HIR visitors (see\\n    ///   `rustc_hir::intravisit`), `D` does not dominate `U`.\\n    ///\\n    ///   2. Therefore, `D` is *potentially* storage-dead at `U` (because\\n    ///   we might visit `U` without ever getting to `D`).\\n    ///\\n    ///   3. However, we guarantee that at each HIR point, each\\n    ///   binding/temporary is always either always storage-live\\n    ///   or always storage-dead. This is what is being guaranteed\\n    ///   by `terminating_scopes` including all blocks where the\\n    ///   count of executions is not guaranteed.\\n    ///\\n    ///   4. By `2.` and `3.`, `D` is *statically* storage-dead at `U`,\\n    ///   QED.\\n    ///\\n    /// This property ought to not on (3) in an essential way -- it\\n    /// is probably still correct even if we have \\\"unrestricted\\\" terminating\\n    /// scopes. However, why use the complicated proof when a simple one\\n    /// works?\\n    ///\\n    /// A subtle thing: `box` expressions, such as `box (&x, yield 2, &y)`. It\\n    /// might seem that a `box` expression creates a `Box<T>` temporary\\n    /// when it *starts* executing, at `HIR-preorder(BOX-EXPR)`. That might\\n    /// be true in the MIR desugaring, but it is not important in the semantics.\\n    ///\\n    /// The reason is that semantically, until the `box` expression returns,\\n    /// the values are still owned by their containing expressions. So\\n    /// we'll see that `&x`.\\n    pub yield_in_scope: FxHashMap<Scope, YieldData>,\\n\\n    /// The number of visit_expr and visit_pat calls done in the body.\\n    /// Used to sanity check visit_expr/visit_pat call count when\\n    /// calculating generator interiors.\\n    pub body_expr_count: FxHashMap<hir::BodyId, usize>,\\n}\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"var_scope\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/middle/region.rs\", \"content\": \"pub fn var_scope(&self, var_id: hir::ItemLocalId) -> Scope {\\n        self.var_map\\n            .get(&var_id)\\n            .cloned()\\n            .unwrap_or_else(|| bug!(\\\"no enclosing scope for id {:?}\\\", var_id))\\n    }\"}",
+      "{\"type\": \"FILE\", \"name\": \"region.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_passes/src/region.rs\", \"content\": \"region.rs\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_middle/src/middle/region.rs",
+      "compiler/rustc_passes/src/region.rs"
+    ],
+    "found_modules": [
+      "compiler/rustc_middle/src/middle/region.rs::ScopeTree"
+    ],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Missing scope entry for let-binding inside const generic default expression",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "var_scope",
+              "file": "compiler/rustc_middle/src/middle/region.rs",
+              "content": "pub fn var_scope(&self, var_id: hir::ItemLocalId) -> Scope {\n        self.var_map\n            .get(&var_id)\n            .cloned()\n            .unwrap_or_else(|| bug!(\"no enclosing scope for id {:?}\", var_id))\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "ScopeTree var_map not populated for this unusual HIR/MIR pattern",
+          "code_elements": [
+            {
+              "type": "STRUCTURE",
+              "name": "ScopeTree",
+              "file": "compiler/rustc_middle/src/middle/region.rs",
+              "content": "pub struct ScopeTree {\n    /// If not empty, this body is the root of this region hierarchy.\n    pub root_body: Option<hir::HirId>,\n\n    /// Maps from a scope ID to the enclosing scope id;\n    /// this is usually corresponding to the lexical nesting, though\n    /// in the case of closures the parent scope is the innermost\n    /// conditional expression or repeating block. (Note that the\n    /// enclosing scope ID for the block associated with a closure is\n    /// the closure itself.)\n    pub parent_map: FxHashMap<Scope, (Scope, ScopeDepth)>,\n\n    /// Maps from a variable or binding ID to the block in which that\n    /// variable is declared.\n    var_map: FxHashMap<hir::ItemLocalId, Scope>,\n\n    /// Maps from a `NodeId` to the associated destruction scope (if any).\n    destruction_scopes: FxHashMap<hir::ItemLocalId, Scope>,\n\n    /// `rvalue_scopes` includes entries for those expressions whose\n    /// cleanup scope is larger than the default. The map goes from the\n    /// expression ID to the cleanup scope id. For rvalues not present in\n    /// this table, the appropriate cleanup scope is the innermost\n    /// enclosing statement, conditional expression, or repeating\n    /// block (see `terminating_scopes`).\n    /// In constants, None is used to indicate that certain expressions\n    /// escape into 'static and should have no local cleanup scope.\n    rvalue_scopes: FxHashMap<hir::ItemLocalId, Option<Scope>>,\n\n    /// If there are any `yield` nested within a scope, this map\n    /// stores the `Span` of the last one and its index in the\n    /// postorder of the Visitor traversal on the HIR.\n    ///\n    /// HIR Visitor postorder indexes might seem like a peculiar\n    /// thing to care about. but it turns out that HIR bindings\n    /// and the temporary results of HIR expressions are never\n    /// storage-live at the end of HIR nodes with postorder indexes\n    /// lower than theirs, and therefore don't need to be suspended\n    /// at yield-points at these indexes.\n    ///\n    /// For an example, suppose we have some code such as:\n    /// ```rust,ignore (example)\n    ///     foo(f(), yield y, bar(g()))\n    /// ```\n    ///\n    /// With the HIR tree (calls numbered for expository purposes)\n    ///\n    /// ```text\n    ///     Call#0(foo, [Call#1(f), Yield(y), Call#2(bar, Call#3(g))])\n    /// ```\n    ///\n    /// Obviously, the result of `f()` was created before the yield\n    /// (and therefore needs to be kept valid over the yield) while\n    /// the result of `g()` occurs after the yield (and therefore\n    /// doesn't). If we want to infer that, we can look at the\n    /// postorder traversal:\n    /// ```plain,ignore\n    ///     `foo` `f` Call#1 `y` Yield `bar` `g` Call#3 Call#2 Call#0\n    /// ```\n    ///\n    /// In which we can easily see that `Call#1` occurs before the yield,\n    /// and `Call#3` after it.\n    ///\n    /// To see that this method works, consider:\n    ///\n    /// Let `D` be our binding/temporary and `U` be our other HIR node, with\n    /// `HIR-postorder(U) < HIR-postorder(D)`. Suppose, as in our example,\n    /// U is the yield and D is one of the calls.\n    /// Let's show that `D` is storage-dead at `U`.\n    ///\n    /// Remember that storage-live/storage-dead refers to the state of\n    /// the *storage*, and does not consider moves/drop flags.\n    ///\n    /// Then:\n    ///\n    ///   1. From the ordering guarantee of HIR visitors (see\n    ///   `rustc_hir::intravisit`), `D` does not dominate `U`.\n    ///\n    ///   2. Therefore, `D` is *potentially* storage-dead at `U` (because\n    ///   we might visit `U` without ever getting to `D`).\n    ///\n    ///   3. However, we guarantee that at each HIR point, each\n    ///   binding/temporary is always either always storage-live\n    ///   or always storage-dead. This is what is being guaranteed\n    ///   by `terminating_scopes` including all blocks where the\n    ///   count of executions is not guaranteed.\n    ///\n    ///   4. By `2.` and `3.`, `D` is *statically* storage-dead at `U`,\n    ///   QED.\n    ///\n    /// This property ought to not on (3) in an essential way -- it\n    /// is probably still correct even if we have \"unrestricted\" terminating\n    /// scopes. However, why use the complicated proof when a simple one\n    /// works?\n    ///\n    /// A subtle thing: `box` expressions, such as `box (&x, yield 2, &y)`. It\n    /// might seem that a `box` expression creates a `Box<T>` temporary\n    /// when it *starts* executing, at `HIR-preorder(BOX-EXPR)`. That might\n    /// be true in the MIR desugaring, but it is not important in the semantics.\n    ///\n    /// The reason is that semantically, until the `box` expression returns,\n    /// the values are still owned by their containing expressions. So\n    /// we'll see that `&x`.\n    pub yield_in_scope: FxHashMap<Scope, YieldData>,\n\n    /// The number of visit_expr and visit_pat calls done in the body.\n    /// Used to sanity check visit_expr/visit_pat call count when\n    /// calculating generator interiors.\n    pub body_expr_count: FxHashMap<hir::BodyId, usize>,\n}"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Unhandled interaction between MIR let-expression lowering and region scope lookup during const-eval",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "region.rs",
+              "file": "compiler/rustc_passes/src/region.rs",
+              "content": "region.rs"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Bug-triggering fail-fast behavior in var_scope when enclosing scope is absent",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "var_scope",
+              "file": "compiler/rustc_middle/src/middle/region.rs",
+              "content": "pub fn var_scope(&self, var_id: hir::ItemLocalId) -> Scope {\n        self.var_map\n            .get(&var_id)\n            .cloned()\n            .unwrap_or_else(|| bug!(\"no enclosing scope for id {:?}\", var_id))\n    }"
+            }
+          ]
+        },
+        {
+          "id": "E",
+          "name": "Region analysis mismatch across region handling implementation files",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "region.rs",
+              "file": "compiler/rustc_middle/src/middle/region.rs",
+              "content": "region.rs"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.98
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.96
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.94
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.84
+        },
+        {
+          "source": "E",
+          "target": "I",
+          "weight": 0.18
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 132.325,
+    "stage_times_sec": {
+      "load_bug_context": 0.018,
+      "checkout": 2.808,
+      "load_or_build_graph": 27.256,
+      "symptom_vertices_locating": 81.895,
+      "dynamic_cig_discovering": 18.833,
+      "convert_results": 0.038
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 13,
+      "input_tokens": 80795,
+      "output_tokens": 1370,
+      "total_tokens": 82165,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.278,
+          "input_tokens": 4955,
+          "output_tokens": 118,
+          "total_tokens": 5073
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.888,
+          "input_tokens": 4305,
+          "output_tokens": 18,
+          "total_tokens": 4323
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.337,
+          "input_tokens": 5204,
+          "output_tokens": 53,
+          "total_tokens": 5257
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.072,
+          "input_tokens": 6404,
+          "output_tokens": 49,
+          "total_tokens": 6453
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.192,
+          "input_tokens": 6467,
+          "output_tokens": 45,
+          "total_tokens": 6512
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.12,
+          "input_tokens": 6702,
+          "output_tokens": 53,
+          "total_tokens": 6755
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.832,
+          "input_tokens": 4301,
+          "output_tokens": 17,
+          "total_tokens": 4318
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 3.663,
+          "input_tokens": 5582,
+          "output_tokens": 171,
+          "total_tokens": 5753
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 2.908,
+          "input_tokens": 6341,
+          "output_tokens": 168,
+          "total_tokens": 6509
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 2.958,
+          "input_tokens": 8030,
+          "output_tokens": 169,
+          "total_tokens": 8199
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.286,
+          "input_tokens": 8101,
+          "output_tokens": 171,
+          "total_tokens": 8272
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 3.223,
+          "input_tokens": 6344,
+          "output_tokens": 169,
+          "total_tokens": 6513
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 2.732,
+          "input_tokens": 8059,
+          "output_tokens": 169,
+          "total_tokens": 8228
+        }
+      ]
+    }
+  }
+}

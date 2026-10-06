@@ -1,0 +1,236 @@
+{
+  "bug_id": "103599",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-10-25",
+    "resolved": "758f19645b8ebce61ea52d1f6672fd057bc8dbee"
+  },
+  "final_top10": [
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_hir_typeck/src/writeback.rs",
+    "compiler/rustc_hir_analysis/src/collect.rs",
+    "compiler/rustc_middle/src/values.rs",
+    "compiler/rustc_query_system/src/values.rs",
+    "compiler/rustc_query_system/src/query/job.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines an empty trait `T`, creating a trait-bound-only type abstraction with no methods or concrete implementors.",
+        "Uses argument-position `impl Trait` in `wrap(x: impl T)`, exercising anonymous generic parameter desugaring under a trait bound.",
+        "Uses return-position `impl Trait` in `-> impl T`, exercising opaque return types whose concrete type must be inferred consistently.",
+        "The function body recursively calls `wrap(wrap(x))`, creating immediate unconditional recursion with no base case.",
+        "The inner call returns an opaque `impl T`, which is then passed to the outer `wrap`, testing compatibility between opaque returns and `impl Trait` parameters.",
+        "Type checking must determine a concrete hidden type for the returned opaque type despite the body only referring to recursive self-calls.",
+        "The compiler is forced to analyze recursive opaque type inference and may hit cycle detection or overflow in trait/type resolution.",
+        "`main` is empty, so the reproducer isolates compile-time behavior rather than runtime execution."
+      ],
+      "summary": "This reproducer minimizes a compiler-only case around `impl Trait`. It defines a recursive function whose parameter and return types are both expressed via trait-bound `impl T`. Because the body is only `wrap(wrap(x))`, rustc must infer an opaque return type through self-recursion, exercising recursion analysis, opaque type inference, and cycle handling during type checking."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is a self-recursive function that combines argument-position `impl Trait` and return-position `impl Trait` under the same trait bound, with the function body consisting only of nested calls to itself. This forces rustc to infer the hidden concrete type of an opaque return type from a body that never produces a non-recursive base expression. The reproducer therefore stresses opaque type inference, desugaring of argument-position `impl Trait` to an anonymous generic, and cycle detection in type/typeck queries. Because the compiler aborts with `thread panicked while panicking` instead of emitting a normal type error such as recursion limit, cycle, or unconstrained opaque type diagnostics, the likely defect is in compiler handling of recursive opaque type inference/cycle reporting rather than in user code. The nested `wrap(wrap(x))` pattern is especially suggestive of a query cycle or normalization/fulfillment loop involving the opaque return type being re-used as input to the same function, and the double panic indicates buggy error recovery or diagnostic emission when that cycle/overflow is encountered.",
+      "possible_causes": [
+        "Bug in type checking / opaque type inference for return-position `impl Trait` where the hidden type of the opaque is inferred from a recursively self-referential body, causing an unhandled query cycle or infinite recursion instead of a proper diagnostic.",
+        "Defect in the interaction between argument-position `impl Trait` desugaring and return-position opaque types: the compiler may incorrectly treat the opaque result of the inner `wrap(x)` as valid input to the outer `wrap` without breaking the recursive inference cycle.",
+        "Missing or incorrect cycle detection in query evaluation related to `type_of_opaque`, borrowck/typeck writeback, or normalization of opaque types appearing in recursive function bodies.",
+        "Overflow/stack recursion bug in trait/type normalization or fulfillment when trying to prove that the recursively inferred hidden type satisfies trait bound `T` for both nested calls.",
+        "ICE-level defect in diagnostic/error recovery code: after encountering the recursive opaque-type/cycle condition, rustc panics again while reporting the first panic, leading to `thread panicked while panicking. aborting.` instead of graceful failure."
+      ],
+      "evidence": [
+        "The reproducer uses both argument-position `impl T` and return-position `impl T` in the same function, which is a known stress point for type inference and opaque type handling.",
+        "The function body is only `wrap(wrap(x))`, so there is no concrete non-recursive expression from which to infer the hidden type of the returned opaque `impl T`.",
+        "The inner `wrap(x)` returns an opaque type that is immediately fed back into `wrap`, creating a self-referential inference pattern across the same function signature.",
+        "The behavior summary explicitly highlights recursive opaque type inference and possible cycle/overflow in trait/type resolution.",
+        "The compiler aborts with SIGABRT and `thread panicked while panicking`, indicating an internal compiler bug during panic handling or diagnostic reporting rather than an expected user-facing type error.",
+        "`main` is empty, so failure occurs entirely at compile time during analysis of the recursive `impl Trait` function."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1519,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Most directly implicated by this reproducer: the crash is centered on inferring a hidden type for return-position `impl T` from a purely self-recursive body. This file contains the inference-context machinery that replaces and tracks opaque types during type inference, so a missing recursion/cycle guard here could easily cause recursive opaque inference to spiral into an ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "The failing program is a function body type-checking case involving nested self-calls `wrap(wrap(x))` with both argument-position and return-position `impl Trait`. This file drives function body checking, sets up opaque return type inference, and is a likely place where recursive use of an opaque return type as an input is mishandled."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/writeback.rs",
+        "reason": "After body checking, writeback resolves and records body-local opaque type information. Recursive opaque inference often surfaces again during writeback/fixup; if unresolved or cyclic opaque results are not handled defensively here, that could explain a second panic during error recovery."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect.rs",
+        "reason": "The analysis strongly suggests a query-cycle problem around `type_of_opaque` or related item queries. This file wires providers for `type_of`, `type_of_opaque`, and related opaque-type queries, making it a prime suspect for incorrect cycle handling or provider selection in recursive opaque cases."
+      },
+      {
+        "path": "compiler/rustc_middle/src/values.rs",
+        "reason": "The abort message `thread panicked while panicking` is consistent with broken query-cycle recovery: this file defines fallback values for middle-layer queries when cycles occur. If the recursive opaque case hits a `type_of`/`fn_sig`/opaque-related cycle and recovery here is incomplete, it can trigger a secondary panic instead of a clean diagnostic."
+      },
+      {
+        "path": "compiler/rustc_query_system/src/values.rs",
+        "reason": "This file provides the generic default cycle-recovery behavior for queries and explicitly panics when no proper error was emitted. Given the double-panic symptom, it is highly suspicious as the place where a query cycle from recursive opaque inference turns into an abort rather than a graceful compiler error."
+      },
+      {
+        "path": "compiler/rustc_query_system/src/query/job.rs",
+        "reason": "If the nested self-recursive `impl Trait` body forms a dependency cycle in the query stack, this file is responsible for reconstructing and reporting that cycle. A bug in cycle reconstruction or propagation could explain why the compiler panics again while handling the initial failure."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Opaque return type computation ultimately depends on item/type collection logic. Even though the bug is body-driven, this file is still suspicious because recursive `impl Trait` cases can surface through `type_of`-style queries and hidden-type validation paths managed during collection."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "This file contains the `ty`-level remapping logic for opaque types. The reproducer mixes argument-position `impl Trait` with return-position opaque types in a recursive call pattern, so a bad generic-argument remap or opaque-key construction here could contribute to self-referential hidden-type inference cycles."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "The recursive body may force repeated obligations proving the inferred hidden type satisfies trait bound `T`, potentially creating an overflow or non-terminating fulfillment loop. While less direct than the opaque/query files, the old fulfillment engine is still a plausible source of the failure or its bad recovery path."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 164.878,
+    "stage_times_sec": {
+      "checkout": 9.547,
+      "load_bug_context": 0.165,
+      "test_behavior_analysis": 8.033,
+      "test_failure_analysis": 10.414,
+      "load_file_candidates": 19.93,
+      "search_suspicious_files": 116.789
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 363593,
+      "output_tokens": 6001,
+      "total_tokens": 369594,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 8.032,
+          "input_tokens": 346,
+          "output_tokens": 281,
+          "total_tokens": 627
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.414,
+          "input_tokens": 2143,
+          "output_tokens": 638,
+          "total_tokens": 2781
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.33,
+          "input_tokens": 27820,
+          "output_tokens": 336,
+          "total_tokens": 28156
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.92,
+          "input_tokens": 27351,
+          "output_tokens": 309,
+          "total_tokens": 27660
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 11.532,
+          "input_tokens": 27400,
+          "output_tokens": 424,
+          "total_tokens": 27824
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.17,
+          "input_tokens": 27591,
+          "output_tokens": 403,
+          "total_tokens": 27994
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.258,
+          "input_tokens": 27666,
+          "output_tokens": 361,
+          "total_tokens": 28027
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.728,
+          "input_tokens": 27746,
+          "output_tokens": 336,
+          "total_tokens": 28082
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.268,
+          "input_tokens": 27711,
+          "output_tokens": 340,
+          "total_tokens": 28051
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.958,
+          "input_tokens": 27643,
+          "output_tokens": 259,
+          "total_tokens": 27902
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.882,
+          "input_tokens": 27315,
+          "output_tokens": 274,
+          "total_tokens": 27589
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.662,
+          "input_tokens": 26356,
+          "output_tokens": 314,
+          "total_tokens": 26670
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.925,
+          "input_tokens": 27372,
+          "output_tokens": 300,
+          "total_tokens": 27672
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.913,
+          "input_tokens": 27779,
+          "output_tokens": 315,
+          "total_tokens": 28094
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.996,
+          "input_tokens": 18740,
+          "output_tokens": 328,
+          "total_tokens": 19068
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.222,
+          "input_tokens": 12614,
+          "output_tokens": 783,
+          "total_tokens": 13397
+        }
+      ]
+    }
+  }
+}

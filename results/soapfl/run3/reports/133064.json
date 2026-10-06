@@ -1,0 +1,258 @@
+{
+  "bug_id": "133064",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-11-15",
+    "resolved": "90ab8eaedd3efd7919bffa7638db66e67df3f0b8"
+  },
+  "final_top10": [
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_ast_lowering/src/item.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_expand/src/expand.rs",
+    "compiler/rustc_resolve/src/def_collector.rs",
+    "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_expand/src/placeholders.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_parse/src/parser/path.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines an inherent impl for a generic type `Foo<T, ...>` with a const generic argument supplied by an inline block expression.",
+        "Uses a const-like block in type arguments, pushing parser and AST lowering around generic argument position handling.",
+        "Invokes the built-in `thread_local!` macro inside that generic argument block, exercising macro expansion in an unusual type-level context.",
+        "Declares a `pub static FOO: Foo = Foo {}` inside `thread_local!`, requiring name resolution and item expansion from within the block.",
+        "References `Foo` before any visible declaration, testing early name resolution and diagnostics for missing types during impl header processing.",
+        "Combines generic parameters, inherent impl syntax, and macro-generated items, stressing HIR lowering and item collection ordering.",
+        "Uses nightly toolchain behavior, so unstable or incompletely validated parsing/lowering paths may be exercised.",
+        "Keeps `main` empty, isolating the compiler failure to front-end compilation of the impl header rather than runtime behavior."
+      ],
+      "summary": "The reproducer places a `thread_local!` macro invocation inside a block used as a generic argument in an inherent `impl` header for `Foo<T, ...>`. This is invalid or highly unusual Rust, and it primarily stresses parsing, macro expansion, name resolution, and lowering of items appearing in a type-level generic-argument context on nightly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is an internal compiler error triggered while compiling an inherent impl header that uses an inline block expression as a generic argument, and that block contains a `thread_local!` macro generating a `static` item. The reproducer combines several front-end edge cases: generic argument parsing/lowering, macro expansion in a type-level const-generic-like position, unresolved type names (`Foo` is not declared), and item generation inside the block. Despite user-facing errors (E0412/E0422), rustc continues far enough to build THIR/MIR for a synthesized closure from the `thread_local!` expansion (`closure#1`), then panics during later analysis. This strongly suggests the compiler is incorrectly treating invalid or ill-formed syntax/expansion in an impl generic argument as a valid body-bearing const/closure context, or it is failing to abort/poison later queries after earlier resolution/type-check errors. The common thread is inconsistent handling of macro-expanded constructs inside const generic argument blocks in impl headers, especially when name resolution already failed. The likely defect is in AST lowering/HIR construction or in query gating for THIR/MIR construction for anonymous constants/closures created from macro expansion in this unusual context.",
+      "possible_causes": [
+        "AST lowering or HIR construction incorrectly accepts a macro-expanded block inside a generic argument of an impl header as an anonymous const/body owner, creating invalid nested closure/body nodes from `thread_local!` expansion.",
+        "The compiler fails to properly reject or short-circuit analysis after earlier name-resolution/type errors (E0412/E0422), allowing THIR/MIR/borrowck queries to run on malformed HIR for `<impl>::FOO::{constant#0}::{closure#1}`.",
+        "Macro expansion + item collection for `thread_local!` in a type/const-generic position is not validated against the surrounding syntactic context, producing internal compiler state that later passes assume cannot exist.",
+        "The `thread_local!` expansion likely generates closure-based initialization machinery, and the THIR builder or match-checking logic does not handle such generated closures correctly when their enclosing owner originates from an invalid generic-argument anonymous constant in an impl header.",
+        "Defect in item collection/owner-parent mapping for anonymous constants and macro-generated items inside impl generic arguments, causing later queries to analyze a body with inconsistent owner/context information.",
+        "Improper recovery in parser/lowering for inline const-generic-like blocks in type argument position may misclassify statement/item-containing blocks as valid const arguments, leaving invalid HIR that later ICEs during analysis."
+      ],
+      "evidence": [
+        "The reproducer places `thread_local!` inside a block used as a generic argument in `impl<T> Foo<T, { ... }>`—an extremely unusual type-level context stressing parsing, lowering, and macro expansion.",
+        "Compiler output reports ordinary user errors (E0412, E0422), meaning the source is already invalid, yet rustc still panics instead of gracefully stopping after diagnostics.",
+        "The query stack shows rustc building THIR, MIR, promotion, and borrowck for `<impl at src/main.rs:1:1: 7:6>::FOO::{constant#0}::{constant#0}::{closure#1}`, indicating a macro-generated closure/body was created within the impl header generic argument path.",
+        "`thread_local!` commonly expands to helper items/closures for initialization; seeing `{closure#1}` in the impl-associated path is consistent with expansion artifacts escaping into later compiler phases.",
+        "The failure occurs during `analysis`, not codegen or runtime, matching a front-end/lowering/query-invariant bug rather than a backend issue.",
+        "The reproducer intentionally references undeclared `Foo`, so rustc should emit diagnostics only; the ICE indicates defective error recovery or missing validity checks in production compiler code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1858,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "The reproducer puts a macro invocation that expands to an item inside a block used as a generic argument in an impl header. This is exactly the kind of invalid post-expansion AST shape that AST validation should reject before later lowering/analysis. An ICE after ordinary errors strongly suggests this invalid construct was not screened out here."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "The crashing owner path is `<impl>::FOO::{constant#0}...`, which points to item/owner creation inside an impl header generic argument. That makes item-level lowering and owner registration highly suspicious, especially for macro-generated items and anonymous constants appearing in this unusual location."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "The query stack includes nested `{constant#0}` and a generated `{closure#1}`, implying expression/anon-const lowering accepted a block with nested item-creating constructs in const-generic position. This file contains lowering logic and DefId-creation checks for expressions, anon consts, closures, and const blocks, matching the failure mode closely."
+      },
+      {
+        "path": "compiler/rustc_expand/src/expand.rs",
+        "reason": "`thread_local!` is expanded in a highly unusual type-level/generic-argument context. If expansion allowed an item-producing macro fragment in a position that should not support it, later phases could receive malformed AST/HIR and ICE. The expansion driver is a likely source of context-fragment mismatch or insufficient validation."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/def_collector.rs",
+        "reason": "The bug likely involves incorrect DefId/owner-parent relationships for anonymous constants, closures, and macro-generated items nested under an impl header generic argument. `def_collector` is directly responsible for creating defs in expanded AST and is a strong candidate for malformed ownership state that later THIR/MIR queries trip over."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+        "reason": "The panic happens in `thir_body` for a macro-generated closure under an impl-header anonymous constant, despite earlier user errors. This file explicitly builds THIR bodies and is responsible for rejecting bodies tainted by prior errors; failure to gate malformed bodies here would explain why analysis continues into an impossible context."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Anonymous-const typing is context-sensitive, and this file contains `anon_const_type_of` logic that distinguishes const generic arguments from other parents. A malformed or unsupported parent chain caused by a macro-expanded block in an impl generic argument could be mishandled here, enabling invalid downstream body analysis."
+      },
+      {
+        "path": "compiler/rustc_expand/src/placeholders.rs",
+        "reason": "Macro expansion in unsupported syntactic positions often relies on placeholder fragments. If placeholders/substitution produced a structurally valid-looking but semantically impossible AST fragment for this generic-argument block, later lowering could synthesize the bogus `{constant#0}`/closure owners seen in the query stack."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The code intentionally references undeclared `Foo` and still proceeds far enough to build THIR/MIR for generated closure bodies. That points to error recovery and resolution state around anon consts/generic args possibly being inconsistent, making late resolution a plausible contributor to later invalid lowering/analysis."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/path.rs",
+        "reason": "The syntax stresses parsing of generic arguments with a braced block in path/type position. If the parser misclassified or over-accepted this block as a const generic argument without preserving enough invalidity for later rejection, it could seed the malformed pipeline state that ultimately ICEs."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 166.134,
+    "stage_times_sec": {
+      "checkout": 3.499,
+      "load_bug_context": 0.022,
+      "test_behavior_analysis": 5.928,
+      "test_failure_analysis": 14.273,
+      "load_file_candidates": 0.118,
+      "search_suspicious_files": 142.294
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 449270,
+      "output_tokens": 7423,
+      "total_tokens": 456693,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.928,
+          "input_tokens": 342,
+          "output_tokens": 281,
+          "total_tokens": 623
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.273,
+          "input_tokens": 2150,
+          "output_tokens": 776,
+          "total_tokens": 2926
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.317,
+          "input_tokens": 27955,
+          "output_tokens": 316,
+          "total_tokens": 28271
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.49,
+          "input_tokens": 27913,
+          "output_tokens": 381,
+          "total_tokens": 28294
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.219,
+          "input_tokens": 27257,
+          "output_tokens": 288,
+          "total_tokens": 27545
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.084,
+          "input_tokens": 27709,
+          "output_tokens": 375,
+          "total_tokens": 28084
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.131,
+          "input_tokens": 27740,
+          "output_tokens": 361,
+          "total_tokens": 28101
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.071,
+          "input_tokens": 27859,
+          "output_tokens": 358,
+          "total_tokens": 28217
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.279,
+          "input_tokens": 27873,
+          "output_tokens": 330,
+          "total_tokens": 28203
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.864,
+          "input_tokens": 27727,
+          "output_tokens": 315,
+          "total_tokens": 28042
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.571,
+          "input_tokens": 27865,
+          "output_tokens": 355,
+          "total_tokens": 28220
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.537,
+          "input_tokens": 27843,
+          "output_tokens": 333,
+          "total_tokens": 28176
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.72,
+          "input_tokens": 27572,
+          "output_tokens": 387,
+          "total_tokens": 27959
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.767,
+          "input_tokens": 27849,
+          "output_tokens": 299,
+          "total_tokens": 28148
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.524,
+          "input_tokens": 28029,
+          "output_tokens": 361,
+          "total_tokens": 28390
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.94,
+          "input_tokens": 28101,
+          "output_tokens": 325,
+          "total_tokens": 28426
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.514,
+          "input_tokens": 27790,
+          "output_tokens": 425,
+          "total_tokens": 28215
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 7.278,
+          "input_tokens": 15062,
+          "output_tokens": 374,
+          "total_tokens": 15436
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.955,
+          "input_tokens": 14634,
+          "output_tokens": 783,
+          "total_tokens": 15417
+        }
+      ]
+    }
+  }
+}

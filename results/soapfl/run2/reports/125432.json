@@ -1,0 +1,250 @@
+{
+  "bug_id": "125432",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-05-22",
+    "resolved": "791adf759cc065316f054961875052d5bc03e16c"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/diagnostics/conflict_errors.rs",
+    "compiler/rustc_mir_dataflow/src/move_paths/builder.rs",
+    "compiler/rustc_borrowck/src/places_conflict.rs",
+    "compiler/rustc_mir_build/src/build/matches/test.rs",
+    "compiler/rustc_mir_build/src/build/matches/util.rs",
+    "compiler/rustc_borrowck/src/path_utils.rs",
+    "compiler/rustc_mir_dataflow/src/drop_flag_effects.rs",
+    "compiler/rustc_middle/src/mir/tcx.rs",
+    "compiler/rustc_middle/src/mir/statement.rs",
+    "compiler/rustc_borrowck/src/borrow_set.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `separate_arms`, but `main` is empty, so the crate mainly tests compile-time borrow checking rather than runtime behavior.",
+        "Creates `let mut x = None;`, giving `x` type `Option<_>` inferred later from `Some(0)` and the `Some(right)` pattern.",
+        "Matches on `x` by value with `match x`, exercising pattern matching and move semantics for enum discriminants and payloads.",
+        "The `None` arm reassigns `x = Some(0);`, testing whether reassignment after matching a no-payload variant is accepted.",
+        "The `Some(right)` arm binds and moves the inner value into `right`, then passes it to `consume(right)`, representing a consuming use.",
+        "This checks arm-sensitive borrow checking: only the `Some` arm should create a move/loan of `x`’s contents, not the `None` arm.",
+        "It exercises MIR/NLL dataflow around `match`, verifying the compiler does not incorrectly treat all arms as having an outstanding loan.",
+        "If rustc rejects the `None`-arm assignment, it indicates overly conservative move/borrow analysis across mutually exclusive match arms."
+      ],
+      "summary": "The reproducer isolates a borrow-checking issue in `match` analysis. A mutable `Option` is matched by value; the `None` arm reassigns the variable, while the `Some` arm moves out the payload. Because these arms are exclusive, the `None` arm should not inherit any move/loan from the `Some` arm. The test exercises pattern matching, move semantics, type inference, and arm-sensitive NLL/MIR borrow-check behavior."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer is centered on arm-sensitive borrow/move analysis for a by-value `match` on an `Option`. The critical pattern is that `match x` inspects `x`, one arm (`Some(right)`) moves payload data out, while the other arm (`None`) only reassigns `x`. Because match arms are mutually exclusive, the `None` arm should not be affected by moves/loans that only exist in the `Some` arm. The compiler instead ICEs at the `Some(right) => consume(right)` site, and the panic escalates into `panic in a destructor during cleanup`, which strongly suggests an internal inconsistency during error reporting or MIR borrow-check cleanup rather than a normal user-facing type/borrow error. The commonality across the code shape, behavior summary, and crash location is a failure in branch-sensitive handling of places/projections across match discriminant analysis and arm-local move paths. This points to a defect in compiler logic that merges move/loan state too aggressively across arms, or mishandles the relationship between the matched place `x`, the discriminant test, and the payload binding `right`, eventually triggering an internal invariant violation in borrowck/NLL/MIR diagnostics.",
+      "possible_causes": [
+        "A defect in MIR borrow checker/NLL dataflow for `match` by-value on enums, where move/loan state from the `Some` arm is incorrectly propagated to the `None` arm instead of being kept branch-local.",
+        "A bug in move-path construction or place-conflict analysis for enum matches, especially around distinguishing the discriminant-only `None` case from the payload-moving `Some(right)` case.",
+        "An internal invariant violation in borrowck diagnostics when handling reassignment to a matched local after partial move analysis, causing the compiler to panic while constructing or dropping an error diagnostic.",
+        "A problem in MIR building or pattern-match lowering that represents `match x` as if the whole place `x` remained borrowed/moved across all arms, rather than splitting state per variant/payload access.",
+        "A cleanup/destructor bug in compiler error handling triggered by a prior borrow-check inconsistency, as indicated by the secondary `panic in a destructor during cleanup` after the primary ICE near the `consume(right)` arm."
+      ],
+      "evidence": [
+        "The reproducer intentionally tests mutually exclusive match arms: `None` reassigns `x`, while `Some(right)` consumes the payload, so correct behavior depends on arm-sensitive analysis.",
+        "`match x` is by value, which exercises move semantics and MIR move-path tracking for the scrutinee and its enum payload.",
+        "The crash location is reported at `Some(right) => consume(right)`, the arm that performs the payload move, implicating move/borrow handling around variant payload extraction.",
+        "The behavior summary explicitly targets NLL/MIR borrow-check precision: only the `Some` arm should create move/loan effects, not the `None` arm.",
+        "The compiler ICEs instead of producing an ordinary borrow/type error, indicating an internal compiler invariant failure rather than a simple rejected program.",
+        "`panic in a destructor during cleanup` and an empty query stack suggest the compiler entered an inconsistent state during borrow-check/error-reporting cleanup, consistent with malformed internal state from MIR/NLL analysis."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1787,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/diagnostics/conflict_errors.rs",
+        "reason": "The reproducer appears to hit borrowck/move diagnostics for a by-value enum match with mutually exclusive arms, then ICE during error construction/cleanup. The secondary 'panic in a destructor during cleanup' strongly suggests malformed internal state surfacing while reporting a move/conflict around `Some(right) => consume(right)`, making the borrowck conflict-diagnostics layer highly suspicious."
+      },
+      {
+        "path": "compiler/rustc_mir_dataflow/src/move_paths/builder.rs",
+        "reason": "This case depends on precise move-path construction for `match x` on `Option`, distinguishing discriminant inspection from payload move-out in only the `Some` arm. If move paths for the scrutinee/variant payload are built incorrectly or too coarsely, later borrowck can believe `x` is moved/loaned across all arms and enter an inconsistent state."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/places_conflict.rs",
+        "reason": "Arm-sensitive borrow checking here relies on accurate place-overlap reasoning between the matched local `x`, its discriminant access, reassignment in the `None` arm, and payload extraction in the `Some` arm. An overly conservative or incorrect conflict result for enum-related places could incorrectly propagate interference across mutually exclusive arms."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/test.rs",
+        "reason": "The bug shape may originate earlier in MIR lowering of the match. This file emits the actual variant/discriminant tests and branch structure for enum matches; if the lowered MIR does not correctly separate discriminant testing from payload access per arm, borrowck/move analysis downstream could mis-handle the `None` reassignment versus `Some` move-out."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/util.rs",
+        "reason": "This utility code is closely involved in match CFG construction and fake-borrow handling. Although the reproducer has no guard, incorrect fake-borrow or false-edge generation around matches can affect borrowck’s understanding of scrutinee liveness and arm separation, so it is still a plausible source."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/path_utils.rs",
+        "reason": "Borrowck uses these helpers to find borrows involving a path and to test conflicts through the borrow set. If path filtering around the base local `x` or conflict screening is wrong for enum-match places, a borrow from one arm could be treated as active in another arm, matching the reproducer’s symptom."
+      },
+      {
+        "path": "compiler/rustc_mir_dataflow/src/drop_flag_effects.rs",
+        "reason": "The reproducer exercises initializedness/move effects across branches. This file computes move/init state transitions for move paths at MIR locations; a wrong effect for enum matches or assignments after pattern moves could poison downstream borrowck/drop-state assumptions and contribute to an ICE."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/tcx.rs",
+        "reason": "Place/type reasoning for projections and enum variants is central to distinguishing the whole local `x` from its variant payload. If `PlaceTy`/projection logic mishandles variant-aware field typing in the lowered MIR for `Some(right)`, later move-path or borrow analyses could become inconsistent."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/statement.rs",
+        "reason": "This file defines MIR place/projection helpers that many analyses depend on. Since the bug concerns subtle place/projection behavior around a match on an enum local, a defect in place helper semantics could manifest as incorrect move/conflict analysis."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/borrow_set.rs",
+        "reason": "If the borrow inventory recorded for this MIR is wrong—especially around temporaries or accesses created by the match lowering—subsequent borrowck could diagnose a nonexistent conflict and then ICE when trying to explain it. Less likely than move-path or diagnostics code, but still relevant to this failure mode."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 156.937,
+    "stage_times_sec": {
+      "checkout": 1.332,
+      "load_bug_context": 0.069,
+      "test_behavior_analysis": 6.982,
+      "test_failure_analysis": 11.387,
+      "load_file_candidates": 0.113,
+      "search_suspicious_files": 137.053
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 425038,
+      "output_tokens": 7054,
+      "total_tokens": 432092,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.982,
+          "input_tokens": 390,
+          "output_tokens": 344,
+          "total_tokens": 734
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.387,
+          "input_tokens": 2017,
+          "output_tokens": 663,
+          "total_tokens": 2680
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.133,
+          "input_tokens": 27657,
+          "output_tokens": 407,
+          "total_tokens": 28064
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.925,
+          "input_tokens": 27576,
+          "output_tokens": 288,
+          "total_tokens": 27864
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.085,
+          "input_tokens": 27163,
+          "output_tokens": 334,
+          "total_tokens": 27497
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.654,
+          "input_tokens": 27357,
+          "output_tokens": 345,
+          "total_tokens": 27702
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.42,
+          "input_tokens": 27394,
+          "output_tokens": 279,
+          "total_tokens": 27673
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.33,
+          "input_tokens": 27710,
+          "output_tokens": 324,
+          "total_tokens": 28034
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.846,
+          "input_tokens": 27546,
+          "output_tokens": 344,
+          "total_tokens": 27890
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.054,
+          "input_tokens": 27512,
+          "output_tokens": 388,
+          "total_tokens": 27900
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.36,
+          "input_tokens": 27588,
+          "output_tokens": 407,
+          "total_tokens": 27995
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.689,
+          "input_tokens": 27352,
+          "output_tokens": 347,
+          "total_tokens": 27699
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.436,
+          "input_tokens": 27551,
+          "output_tokens": 356,
+          "total_tokens": 27907
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.884,
+          "input_tokens": 27573,
+          "output_tokens": 327,
+          "total_tokens": 27900
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.097,
+          "input_tokens": 27789,
+          "output_tokens": 329,
+          "total_tokens": 28118
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.797,
+          "input_tokens": 27662,
+          "output_tokens": 393,
+          "total_tokens": 28055
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.799,
+          "input_tokens": 24939,
+          "output_tokens": 363,
+          "total_tokens": 25302
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.511,
+          "input_tokens": 12262,
+          "output_tokens": 816,
+          "total_tokens": 13078
+        }
+      ]
+    }
+  }
+}

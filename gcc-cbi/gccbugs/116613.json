@@ -1,0 +1,49 @@
+{
+  "instance_id": "116613",
+  "test_cases": [
+    {
+      "path": "gcc/testsuite/gcc.dg/sarif-output/bad-binary-op.py",
+      "content": "from sarif import *\n\nimport pytest\n\n@pytest.fixture(scope='function', autouse=True)\ndef sarif():\n    return sarif_from_env()\n\ndef test_basics(sarif):\n    schema = sarif['$schema']\n    assert schema == \"https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json\"\n\n    version = sarif['version']\n    assert version == \"2.1.0\"\n\ndef test_execution_unsuccessful(sarif):\n    runs = sarif['runs']\n    run = runs[0]\n\n    invocations = run['invocations']\n    assert len(invocations) == 1\n    invocation = invocations[0]\n\n    # We expect the 'error' to make executionSuccessful be false\n    assert invocation['executionSuccessful'] == False\n\ndef test_error_location(sarif):\n    runs = sarif['runs']\n    run = runs[0]\n    results = run['results']\n\n    # We expect a single error with annotations.\n    #\n    # The textual form of the diagnostic looks like this:\n    # . PATH/bad-binary-ops.c: In function 'test_4':\n    # . PATH/bad-binary-ops.c:64:23: error: invalid operands to binary + (have 'S' {aka 'struct s'} and 'T' {aka 'struct t'})\n    # .    return callee_4a () + callee_4b (); /* { dg-error \"invalid operands to binary \\+\" } */\n    # .           ~~~~~~~~~~~~ ^ ~~~~~~~~~~~~\n    # .           |              |\n    # .           |              T {aka struct t}\n    # .           S {aka struct s}\n    assert len(results) == 1\n\n    result = results[0]\n    assert result['level'] == 'error'\n\n    assert result['message']['text'] \\\n        == \"invalid operands to binary + (have 'S' {aka 'struct s'} and 'T' {aka 'struct t'})\"\n    locations = result['locations']\n    assert len(locations) == 1\n\n    location = locations[0]\n    assert get_location_artifact_uri(location).endswith('bad-binary-op.c')\n    assert get_location_snippet_text(location) \\\n        == \"  return callee_4a () + callee_4b (); /* { dg-error \\\"invalid operands to binary \\\\+\\\" } */\\n\"\n    EXPECTED_LINE = 14\n    assert get_location_physical_region(location)['startLine'] == EXPECTED_LINE\n    assert get_location_physical_region(location)['startColumn'] == 23\n    assert get_location_physical_region(location)['endColumn'] == 24\n\n    annotations = location['annotations']\n    assert len(annotations) == 2\n    assert annotations[0]['startLine'] == EXPECTED_LINE\n    assert annotations[0]['startColumn'] == 10\n    assert annotations[0]['endColumn'] == 22\n    assert annotations[0]['message']['text'] == \"S {aka struct s}\"\n    assert annotations[1]['startLine'] == EXPECTED_LINE\n    assert annotations[1]['startColumn'] == 25\n    assert annotations[1]['endColumn'] == 37\n    assert annotations[1]['message']['text'] == \"T {aka struct t}\"\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_xhtml_format.c",
+      "content": "  void set_printer (pretty_printer &pp)\n  {\n    m_printer = &pp;\n  }\n\n  pretty_printer *m_printer;\n  m_printer (&pp),\n  m_printer->set_token_printer (&tok_printer);\n  pp_output_formatted_text (m_printer, m_context.get_urlifier ());\n  m_printer->set_token_printer (nullptr);\n  pp_clear_output_area (m_printer);\n\t\t\t   m_printer);\n      (label_text::take (xstrdup (pp_formatted_text (m_printer))));\n    pp_clear_output_area (m_printer);\n  bool follows_reference_printer_p () const final override\n  {\n    return false;\n  }\n  void update_printer () final override\n  {\n    m_printer = m_context.clone_printer ();\n\n    /* Don't colorize the text.  */\n    pp_show_color (m_printer.get ()) = false;\n\n    /* No textual URLs.  */\n    m_printer->set_url_format (URL_FORMAT_NONE);\n\n    /* Update the builder to use the new printer.  */\n    m_builder.set_printer (*get_printer ());\n  }\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/sarif-output/multiple-outputs.py",
+      "content": "from sarif import *\n\nimport pytest\n\n@pytest.fixture(scope='function', autouse=True)\ndef sarif():\n    return sarif_from_env()\n\ndef test_execution_unsuccessful(sarif):\n    runs = sarif['runs']\n    run = runs[0]\n\n    invocations = run['invocations']\n    assert len(invocations) == 1\n    invocation = invocations[0]\n\n    # We expect the 'error' to make executionSuccessful be false\n    assert invocation['executionSuccessful'] == False\n\ndef test_result(sarif):\n    runs = sarif['runs']\n    run = runs[0]\n    results = run['results']\n\n    # We expect a single error with a secondary location and a fix-it hint.\n    #\n    # The textual form of the diagnostic would look like this:\n    #  . PATH/missing-semicolon.c: In function 'missing_semicolon':\n    #  . PATH/missing-semicolon.c:19:12: error: expected ';' before '}' token\n    #  .    19 |   return 42\n    #  .       |            ^\n    #  .       |            ;\n    #  .    20 | }\n    #  .       | ~           \n    assert len(results) == 1\n    \n    result = results[0]\n    assert result['level'] == 'error'\n    assert result['message']['text'] == \"expected ';' before '}' token\"\n    locations = result['locations']\n    assert len(locations) == 1\n\n    assert len(result['fixes']) == 1\n    assert len(result['fixes'][0]['artifactChanges']) == 1\n    change = result['fixes'][0]['artifactChanges'][0]\n    assert len(change['replacements']) == 1\n    replacement = change['replacements'][0]\n    assert replacement['deletedRegion']['startColumn'] == 12\n    assert replacement['deletedRegion']['endColumn'] == 12\n    assert replacement['insertedContent']['text'] == ';'\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/sarif-output/multiple-outputs.c",
+      "content": "/* Verify that we can output multiple different versions of SARIF\n   with -fdiagnostics-add-output (specifying version and filename),\n   as well as usual text output.  */\n\n/* { dg-do compile } */\n/* { dg-additional-options \"-fdiagnostics-add-output=sarif:file=multiple-outputs-c.2.1.sarif,version=2.1\" } */\n/* { dg-additional-options \"-fdiagnostics-add-output=sarif:file=multiple-outputs-c.2.2.sarif,version=2.2-prerelease\" } */\n\n/* Verify that SARIF output can capture secondary locations\n   relating to a diagnostic.  */\n\nint missing_semicolon (void)\n{\n  return 42 /* { dg-error \"expected ';' before '.' token\" } */\n}\n\n/* Verify that JSON was written to the output files with the\n   expected version and expected names:\n   { dg-final { verify-sarif-file \"2.1\" \"multiple-outputs-c.2.1.sarif\" }  }\n   { dg-final { verify-sarif-file \"2.2\" \"multiple-outputs-c.2.2.sarif\" }  }\n*/\n\n/* Use a Python script to verify various properties about the generated\n   .sarif files:\n   { dg-final { run-sarif-pytest multiple-outputs-c.2.1 \"multiple-outputs.py\" } }\n   { dg-final { run-sarif-pytest multiple-outputs-c.2.2 \"multiple-outputs.py\" } }\n*/\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/sarif-output/bad-binary-op.c",
+      "content": "/* { dg-options \"-fdiagnostics-show-caret -fdiagnostics-add-output=sarif\" } */\n\nstruct s {};\nstruct t {};\n\ntypedef struct s S;\ntypedef struct t T;\n\nextern S callee_4a (void);\nextern T callee_4b (void);\n\nint test_4 (void)\n{\n  return callee_4a () + callee_4b (); /* { dg-error \"invalid operands to binary \\+\" } */\n\n/* { dg-begin-multiline-output \"\" }\n   return callee_4a () + callee_4b ();\n          ~~~~~~~~~~~~ ^ ~~~~~~~~~~~~\n          |              |\n          |              T {aka struct t}\n          S {aka struct s}\n   { dg-end-multiline-output \"\" } */\n}\n\n/* Verify that some JSON was written to a file with the expected name.  */\n/* { dg-final { verify-sarif-file } } */\n\n/* Use a Python script to verify various properties about the generated\n   .sarif file:\n   { dg-final { run-sarif-pytest bad-binary-op.c \"bad-binary-op.py\" } } */\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/sarif-output/add-output-sarif-defaults.c",
+      "content": "/* Verify using -fdiagnostics-add-output=sarif with the defaults.  */\n\n/* { dg-do compile } */\n/* { dg-additional-options \"-fdiagnostics-add-output=sarif\" } */\n\n/* Verify that SARIF output can capture secondary locations\n   relating to a diagnostic.  */\n\nint missing_semicolon (void)\n{\n  return 42 /* { dg-error \"expected ';' before '.' token\" } */\n}\n\n/* Verify that JSON was written to the output file with the\n   expected version and expected name:\n   { dg-final { verify-sarif-file \"2.1\" }  } */\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/plugin/diagnostic_plugin_test_paths.c",
+      "content": "      simple_diagnostic_path path (global_dc->get_reference_printer ());\n      test_diagnostic_path path (global_dc->get_reference_printer ());\n      test_diagnostic_path path (global_dc->get_reference_printer ());\n      test_diagnostic_path path (global_dc->get_reference_printer ());\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/plugin/expensive_selftests_plugin.c",
+      "content": "  diagnostic_show_locus (&dc, richloc, DK_ERROR, dc.get_reference_printer ());\n"
+    },
+    {
+      "path": "gcc/testsuite/lib/scansarif.exp",
+      "content": "#\n# If present, the second argument is the expected filename of the .sarif file\n    set output_file [lindex $args 1]\n    verbose \"output_file: $output_file\" 2\n    if { $output_file == \"\" } {\n\tset output_file \"[file tail $filename].sarif\"\n    }\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/plugin/crash-test-ice-in-header-sarif-2.2.c",
+      "content": "/* { dg-options \"-fdiagnostics-set-output=sarif:version=2.2-prerelease\" } */\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/plugin/analyzer_cpython_plugin.c",
+      "content": "  pp_show_color (&pp) = pp_show_color (global_dc->get_reference_printer ());\n"
+    }
+  ]
+}

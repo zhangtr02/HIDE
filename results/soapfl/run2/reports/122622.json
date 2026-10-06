@@ -1,0 +1,250 @@
+{
+  "bug_id": "122622",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-03-16",
+    "resolved": "c67326b063bd27ed04f306ba2e372cd92e0a8751"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+    "compiler/rustc_ast_lowering/src/path.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_builtin_macros/src/deriving/clone.rs",
+    "compiler/rustc_builtin_macros/src/deriving/generic/mod.rs",
+    "compiler/rustc_parse/src/parser/ty.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with a generic associated type: `type SomeType<'a>;`, exercising GAT parsing and trait item well-formedness.",
+        "Declares `Foo<T>` with bound `T: SomeTrait`, so the associated type may be referenced through the type parameter.",
+        "Uses a higher-ranked trait bound in a function pointer type: `for<'a> fn(...)`, exercising late-bound lifetime binder handling.",
+        "References the GAT projection inside the HRTB binder: `T::SomeType<'a>`, testing interaction between projections and universally quantified lifetimes.",
+        "Derives `Clone` for `Foo<T>`, forcing trait derivation to analyze a field whose type contains HRTB and projected associated types.",
+        "Checks whether the function pointer field is considered `Clone` independently of extra properties of `T`, stressing derive obligation generation.",
+        "Requires the compiler to normalize and validate the projected type under binders without constructing invalid lifetime or trait obligations.",
+        "Main is empty, so the reproducer isolates type-checking, derive expansion, and well-formedness/obligation computation rather than runtime behavior."
+      ],
+      "summary": "The reproducer is a minimal compile-time test combining a generic associated type with a higher-ranked function pointer inside a `#[derive(Clone)]` struct. It exercises parsing, binder handling, associated type projection under lifetimes, and derive-generated trait obligations. The likely failure area is compiler reasoning about `Clone` and well-formedness for `for<'a> fn(T::SomeType<'a>)`."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is a false lifetime-resolution error on valid syntax that combines three specific features: a generic associated type (`type SomeType<'a>`), a higher-ranked binder on a function pointer (`for<'a> fn(...)`), and use of the bound lifetime inside an associated type projection (`T::SomeType<'a>`). The compiler reports E0261 for `'a` at the projection argument, even though `'a` is introduced immediately by the surrounding `for<'a>` binder. This strongly suggests the compiler is not propagating or looking up late-bound lifetimes correctly when they appear inside an associated type projection nested in a bare function type. Because the reproducer also uses `#[derive(Clone)]`, the problematic path may be triggered during derive-generated trait obligation/well-formedness analysis of the field type rather than only ordinary parsing. Overall, the likely compiler defect is in binder/lifetime scope handling for projected GAT types under HRTB, possibly during AST/HIR lowering, lifetime resolution, or derive obligation construction, causing the bound region to be treated as out of scope.",
+      "possible_causes": [
+        "Incorrect lifetime scoping in rustc when resolving a late-bound lifetime introduced by `for<'a>` and used inside an associated type projection like `T::SomeType<'a>` within a bare function pointer type.",
+        "Bug in AST->HIR lowering or name resolution for higher-ranked lifetimes where the `for<'a>` binder is attached to the function type but not made visible to nested projection arguments.",
+        "Defect in well-formedness or type collection logic for generic associated type projections under binders, causing `T::SomeType<'a>` to be checked outside the HRTB scope.",
+        "Derive(`Clone`) expansion or its generated obligation analysis may be invoking type validation on the field type in a context that drops or mishandles the higher-ranked lifetime binder.",
+        "Improper handling of bound regions in projection paths under function pointer signatures, specifically an interaction bug between HRTB region binding and GAT argument substitution/validation."
+      ],
+      "evidence": [
+        "The code explicitly binds `'a` with `for<'a> fn(...)`, so reporting `use of undeclared lifetime name 'a` indicates the compiler failed to recognize a valid binder.",
+        "The error points exactly at `'a` in `T::SomeType<'a>`, not at the `for<'a>` syntax itself, narrowing the issue to lifetime visibility inside the projection argument.",
+        "The reproducer's core interaction is GAT + HRTB + projection: `type SomeType<'a>;` and `x: for<'a> fn(T::SomeType<'a>)`.",
+        "`main` is empty, so the failure comes purely from compile-time phases such as lowering, name resolution, type checking, or derive obligation generation.",
+        "`#[derive(Clone)]` forces compiler-generated analysis of the field type, which can expose bugs in binder-preserving trait obligation or well-formedness computation even when the field type should be trivially cloneable as a function pointer.",
+        "The compiler's help message suggests introducing `'a` at the struct level, which is inappropriate here because `'a` is intended to be late-bound by `for<'a>`; this further indicates the existing binder was ignored or lost by compiler logic."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1757,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "Most suspicious because the emitted E0261 says the `for<'a>` binder was not recognized for the use inside `T::SomeType<'a>`. This file is exactly responsible for resolving late-bound lifetimes and assigning them to fn-pointer/HRTB scopes in HIR. A bug here could easily make `'a` visible for the bare fn binder itself but not for uses nested inside associated type projection arguments."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The error is a name-resolution style lifetime error (`use of undeclared lifetime name 'a`), which strongly points at late lifetime resolution. This file resolves lifetimes appearing in types and generic arguments, and a bug in how it traverses `for<'a> fn(...)` with nested projection arguments could cause the binder scope to be dropped before reaching `T::SomeType<'a>`."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+        "reason": "AST lowering must decide which lifetimes are locally bound versus free. Since the failing pattern is specifically a bound lifetime used inside a projection nested under a bare function type, a collector bug could misclassify `'a` as not covered by the current binder stack, leading later stages to treat it as undeclared."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "The problematic lifetime use occurs inside an associated type projection path `T::SomeType<'a>`. This lowering code handles qualified paths and generic arguments, so an interaction bug here could fail to preserve binder context when lowering generic arguments on projection segments inside a `for<'a>` bare fn type."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "If parsing and resolution succeed but HIR/type conversion mishandles GAT projection arguments under binders, the compiler may effectively validate `T::SomeType<'a>` outside the `for<'a>` scope. This file is central to converting HIR type syntax, including associated projections, into internal types."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The reproducer uses `#[derive(Clone)]`, which forces well-formedness checking of the field type and generated impl obligations. If binder information is lost during WF checking or normalization of the field type, this file could trigger the bogus undeclared lifetime path during derive-related analysis."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "WF obligation generation for projected associated types under binders is another plausible failure point, especially because the test stresses normalization and validation of `T::SomeType<'a>` under `for<'a>`. A bug here could surface during the derived `Clone` impl’s obligations."
+      },
+      {
+        "path": "compiler/rustc_builtin_macros/src/deriving/clone.rs",
+        "reason": "Less likely than resolution/lowering, but the bug may be exposed specifically through `#[derive(Clone)]`. This file synthesizes the `Clone` impl and chooses generated bounds; if it constructs or reuses the field type in a context that drops the HRTB binder, it could provoke the invalid lifetime complaint."
+      },
+      {
+        "path": "compiler/rustc_builtin_macros/src/deriving/generic/mod.rs",
+        "reason": "Generic derive infrastructure computes field-based trait bounds and generated impl structure. Because the failure description highlights derive obligation generation on a field containing both HRTB and GAT projection, this shared derive machinery is a reasonable suspect if the issue is derive-specific rather than core type resolution."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/ty.rs",
+        "reason": "Least suspicious among these, but still relevant because the syntax combines a bare function type with an HRTB and a projected GAT argument. If the AST shape for `for<'a> fn(T::SomeType<'a>)` is malformed or the binder is attached too narrowly during parsing, later phases would report exactly this kind of undeclared lifetime error."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 144.247,
+    "stage_times_sec": {
+      "checkout": 0.708,
+      "load_bug_context": 0.106,
+      "test_behavior_analysis": 7.766,
+      "test_failure_analysis": 10.73,
+      "load_file_candidates": 0.11,
+      "search_suspicious_files": 124.827
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 404589,
+      "output_tokens": 6891,
+      "total_tokens": 411480,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.766,
+          "input_tokens": 347,
+          "output_tokens": 315,
+          "total_tokens": 662
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.73,
+          "input_tokens": 1033,
+          "output_tokens": 674,
+          "total_tokens": 1707
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.804,
+          "input_tokens": 26717,
+          "output_tokens": 352,
+          "total_tokens": 27069
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.099,
+          "input_tokens": 26584,
+          "output_tokens": 337,
+          "total_tokens": 26921
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.244,
+          "input_tokens": 26204,
+          "output_tokens": 381,
+          "total_tokens": 26585
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 5.943,
+          "input_tokens": 26396,
+          "output_tokens": 285,
+          "total_tokens": 26681
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.674,
+          "input_tokens": 26401,
+          "output_tokens": 310,
+          "total_tokens": 26711
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.162,
+          "input_tokens": 26785,
+          "output_tokens": 404,
+          "total_tokens": 27189
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.419,
+          "input_tokens": 26566,
+          "output_tokens": 334,
+          "total_tokens": 26900
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.021,
+          "input_tokens": 26542,
+          "output_tokens": 351,
+          "total_tokens": 26893
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.813,
+          "input_tokens": 26638,
+          "output_tokens": 367,
+          "total_tokens": 27005
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.978,
+          "input_tokens": 26456,
+          "output_tokens": 348,
+          "total_tokens": 26804
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.855,
+          "input_tokens": 26753,
+          "output_tokens": 327,
+          "total_tokens": 27080
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.63,
+          "input_tokens": 26606,
+          "output_tokens": 297,
+          "total_tokens": 26903
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.124,
+          "input_tokens": 26829,
+          "output_tokens": 274,
+          "total_tokens": 27103
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.536,
+          "input_tokens": 26565,
+          "output_tokens": 342,
+          "total_tokens": 26907
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.444,
+          "input_tokens": 17806,
+          "output_tokens": 350,
+          "total_tokens": 18156
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.05,
+          "input_tokens": 13361,
+          "output_tokens": 843,
+          "total_tokens": 14204
+        }
+      ]
+    }
+  }
+}

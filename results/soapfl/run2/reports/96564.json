@@ -1,0 +1,230 @@
+{
+  "bug_id": "96564",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-04-28",
+    "resolved": "69a5d2481e856a5a18885390b8cf6950b9ff8dd3"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/projection.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+    "compiler/rustc_typeck/src/collect/type_of.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables the unstable `type_alias_impl_trait` feature to define an opaque alias `Ty<'a>` for some hidden `FnOnce() -> &'a str` closure type.",
+        "Declares `Ty<'a>` with a lifetime parameter, exercising how opaque `impl Trait` aliases capture and propagate borrowed lifetimes.",
+        "`defining` returns `Ty<'_>` from `&str` by using a `move` closure that captures the reference and returns it unchanged.",
+        "The closure implements `FnOnce`, so the alias tests one-shot callable trait behavior rather than `Fn` or `FnMut`.",
+        "`execute` accepts the opaque alias directly and invokes it, checking that the hidden closure type satisfies the aliased callable trait bound.",
+        "Returning `&str` from `execute` exercises lifetime inference and elision through an opaque type and trait-call boundary.",
+        "The compiler must unify the hidden concrete type chosen in `defining` with uses of the same opaque alias in `execute`.",
+        "This stresses nightly rustc handling of opaque type aliases involving closures, borrowed captures, and region/lifetime checking."
+      ],
+      "summary": "The reproducer is a minimal nightly test for `type_alias_impl_trait` with lifetimes. It defines an opaque alias for a closure returning a borrowed `&str`, constructs that closure in one function, and consumes it in another. This exercises closure inference, opaque type identity, `FnOnce` call resolution, and lifetime propagation of a captured reference through the hidden type."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on lifetime propagation through a `type_alias_impl_trait` opaque alias whose hidden type is a closure implementing `FnOnce() -> &'a str`. The reproducer defines `Ty<'a>` with an explicit lifetime parameter and successfully constructs it in `defining` from an input `&str`, so the alias is intended to carry the borrowed lifetime through the hidden closure type. The error is instead emitted at `execute(ty: Ty<'_>) -> &str`, where rustc treats the returned `&str` as referencing an anonymous lifetime not constrained by the function inputs (E0581). That suggests the compiler is not recognizing that the lifetime inside `Ty<'_>` constrains the return type through the opaque alias's associated `FnOnce::Output`. The note about lifetimes in an associated type not being considered constrained is especially relevant because the returned reference is exposed via the callable trait's associated output type, not directly as a named function parameter type. Overall, the common pattern is a misanalysis of lifetime constraints when an opaque type alias with region parameters is used through a callable trait projection (`FnOnce::Output`) and then returned from another function. The likely bug is in compiler handling of opaque type alias lifetime capture / region constraint computation across trait-call boundaries, causing a valid relationship between `Ty<'a>` and `&'a str` to be lost and producing a spurious unconstrained-lifetime diagnostic.",
+      "possible_causes": [
+        "Incorrect lifetime-constraint analysis for `type_alias_impl_trait` opaque aliases: rustc may fail to record that the alias parameter `'a` constrains the hidden closure's return reference `&'a str`.",
+        "Bug in `FnOnce`/callable trait projection handling for opaque aliases: the compiler likely loses the connection between input `Ty<'a>` and the associated output type `<Ty<'a> as FnOnce>::Output = &'a str` when checking `execute`.",
+        "Overly conservative E0581 checking for associated types: the compiler note indicates associated-type lifetimes are treated as unconstrained, which is probably incorrect here because the associated output originates from an input opaque type carrying the lifetime.",
+        "Region/lifetime inference defect around hidden closure types captured inside opaque aliases: the borrowed lifetime from `defining` may not be propagated through the hidden closure environment into later uses of the same opaque alias.",
+        "Missing normalization or improper opaque-type identity unification across function boundaries: rustc may not normalize the opaque alias enough to see that the concrete hidden closure type returned by `defining` and consumed by `execute` preserves the same lifetime parameter."
+      ],
+      "evidence": [
+        "The reproducer uses `#![feature(type_alias_impl_trait)]`, so the exercised path is rustc's opaque type alias implementation rather than ordinary type checking.",
+        "`type Ty<'a> = impl FnOnce() -> &'a str;` explicitly ties the opaque alias to a lifetime parameter and a callable output reference.",
+        "`defining(s: &str) -> Ty<'_> { move || s }` succeeds in expressing a hidden closure that captures and returns the borrowed input, showing the alias is intended to carry the borrow.",
+        "The error occurs at `fn execute(ty: Ty<'_>) -> &str { ty() }`, precisely where rustc must infer that invoking the opaque callable returns a reference constrained by the lifetime inside `Ty<'_>`.",
+        "Compiler output is E0581: `return type references an anonymous lifetime, which is not constrained by the fn input types`, indicating rustc failed to see the input `Ty<'_>` as constraining the output lifetime.",
+        "The diagnostic note says `lifetimes appearing in an associated type are not considered constrained`, matching the fact that the returned `&str` is reached through the callable trait's associated output type.",
+        "The behavior summary explicitly stresses opaque type identity, closure inference, `FnOnce` call resolution, and lifetime propagation through the hidden type, all of which align with the observed miscompilation/false error."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1416,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "E0581 is emitted during function signature well-formedness checking, and this reproducer fails specifically on `fn execute(ty: Ty<'_>) -> &str`. The bug looks like WF checking is incorrectly deciding that the return `&str` is unconstrained because it only sees the lifetime through the callable associated output of the opaque alias."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "The note says lifetimes appearing in an associated type are not considered constrained, which points directly at WF-obligation generation around associated types/projections. `Ty<'a>` is used via `FnOnce::Output = &'a str`, so a mistake here could produce the spurious unconstrained-lifetime error."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "`type_alias_impl_trait` relies on inference support for opaque aliases. The reproducer depends on preserving the relationship between the alias lifetime parameter `'a` and the hidden closure return type `&'a str`; losing that mapping here would explain why downstream checking no longer sees the output lifetime as constrained."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "This file remaps instantiated opaque aliases back to their defining hidden types and validates region relationships. The failure pattern strongly suggests the compiler is mishandling how the opaque alias lifetime parameter is tied to the hidden closure type across function boundaries."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/projection.rs",
+        "reason": "Calling `ty()` requires recovering the projected associated output type of `FnOnce`. If projection is deferred or represented incorrectly for an opaque alias like `Ty<'a>`, the compiler may fail to connect the input alias lifetime to the returned `&str`."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The bug specifically crosses a trait-call boundary (`FnOnce`) and depends on normalizing the associated output type from an opaque alias. Problems in projection/normalization here could cause the WF checker to see only an anonymous associated-type lifetime instead of a constrained `'a`."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "If the outlives obligations induced by the hidden closure type or by `<Ty<'a> as FnOnce>::Output` are not decomposed properly, the necessary region constraints tying the result to the input alias lifetime may never be generated."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+        "reason": "This reproducer is fundamentally about implied lifetime bounds carried by a type in function signature checking. If implied outlives bounds for opaque aliases or callable outputs are missing, `execute` could be falsely rejected as having an unconstrained output lifetime."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect/type_of.rs",
+        "reason": "TAIT/type-alias-impl-trait handling begins in type collection, and incorrect declaration-side handling of the opaque alias `Ty<'a>` could lead later phases to forget that `'a` is captured by the hidden closure return type."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Opaque-type lifetime capture often depends on region rewriting and member-constraint processing. Although the error appears before borrow checking in many cases, this file is still plausible because it directly handles opaque-type region relationships that are central to this bug."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 126.581,
+    "stage_times_sec": {
+      "checkout": 1.609,
+      "load_bug_context": 0.041,
+      "test_behavior_analysis": 5.957,
+      "test_failure_analysis": 13.705,
+      "load_file_candidates": 0.073,
+      "search_suspicious_files": 105.196
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 324865,
+      "output_tokens": 6099,
+      "total_tokens": 330964,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.956,
+          "input_tokens": 380,
+          "output_tokens": 309,
+          "total_tokens": 689
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.705,
+          "input_tokens": 1012,
+          "output_tokens": 819,
+          "total_tokens": 1831
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 6.876,
+          "input_tokens": 26841,
+          "output_tokens": 359,
+          "total_tokens": 27200
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.707,
+          "input_tokens": 26434,
+          "output_tokens": 327,
+          "total_tokens": 26761
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.691,
+          "input_tokens": 26594,
+          "output_tokens": 323,
+          "total_tokens": 26917
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.608,
+          "input_tokens": 26608,
+          "output_tokens": 375,
+          "total_tokens": 26983
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.457,
+          "input_tokens": 26627,
+          "output_tokens": 360,
+          "total_tokens": 26987
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.746,
+          "input_tokens": 26640,
+          "output_tokens": 373,
+          "total_tokens": 27013
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.051,
+          "input_tokens": 26707,
+          "output_tokens": 352,
+          "total_tokens": 27059
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 10.412,
+          "input_tokens": 26203,
+          "output_tokens": 403,
+          "total_tokens": 26606
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.766,
+          "input_tokens": 26045,
+          "output_tokens": 362,
+          "total_tokens": 26407
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.643,
+          "input_tokens": 26492,
+          "output_tokens": 268,
+          "total_tokens": 26760
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.153,
+          "input_tokens": 26266,
+          "output_tokens": 360,
+          "total_tokens": 26626
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.803,
+          "input_tokens": 21868,
+          "output_tokens": 368,
+          "total_tokens": 22236
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.258,
+          "input_tokens": 10148,
+          "output_tokens": 741,
+          "total_tokens": 10889
+        }
+      ]
+    }
+  }
+}

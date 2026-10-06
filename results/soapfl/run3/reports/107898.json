@@ -1,0 +1,244 @@
+{
+  "bug_id": "107898",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-02-09",
+    "resolved": "ef934d9b632b8ac00276558824664c104b92b5f0"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_hir_typeck/src/method/confirm.rs",
+    "compiler/rustc_hir_typeck/src/method/probe.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_hir_analysis/src/check/mod.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_middle/src/ty/abstract_const.rs",
+    "compiler/rustc_ty_utils/src/layout.rs",
+    "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `generic_const_exprs`, allowing const expressions like `size_of::<T>()` inside type-level array lengths.",
+        "Defines trait `X<T>` with two by-value methods, exercising trait method resolution on a generic impl.",
+        "Implements `X<T>` for `Y` with a where-clause `[(); size_of::<T>()]: Sized`, forcing evaluation of a generic const expression in trait impl selection.",
+        "Uses `std::mem::size_of::<T>()` in a const context, testing compiler handling of type-dependent compile-time layout queries.",
+        "Method `f` calls `self.g()` inside the same impl, exercising method lookup and obligation propagation under the generic const bound.",
+        "The array-length trick `[(); N]: Sized` is a common well-formedness constraint, probing whether rustc accepts and carries the const-evaluatable requirement.",
+        "Because `self` is consumed by value, the call chain also checks move semantics and by-value receiver lowering in trait methods.",
+        "`main` does nothing; compilation of the impl and its const-dependent obligations is the reproducer’s actual test target."
+      ],
+      "summary": "This reproducer targets rustc’s handling of generic const expressions inside a trait impl bound. It uses `size_of::<T>()` in an array length to constrain `impl<T> X<T> for Y`, then calls one trait method from another. The key exercised behaviors are const-evaluatable checking, trait method resolution, and obligation propagation for a generic impl on nightly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an internal compiler error during the analysis/type-checking phase, not during code generation or runtime. The reproducer combines three notable ingredients: (1) a generic const expression in an impl where-clause (`[(); size_of::<T>()]: Sized`), (2) trait method type-checking inside that impl, and (3) an intra-impl method call (`self.g()`) that forces method resolution and re-use of the impl’s predicates. The common theme is propagation and normalization of const-evaluatable obligations attached to a generic trait impl. Because `size_of::<T>()` is used in a type-level array length, rustc must carry a type-dependent const well-formedness predicate while checking the body of `f` and resolving `g`. The stack indicates the ICE occurs in `rustc_hir_analysis::check_crate`, which is consistent with a bug in HIR/type-checking or predicate elaboration rather than borrow checking or codegen. A likely issue is that the compiler mishandles the generic const obligation from the impl header when performing method lookup for `self.g()`, possibly attempting to evaluate or normalize `size_of::<T>()` too early, or assuming a fully-resolved type/layout where only a generic parameter exists. Another plausible pattern is inconsistent treatment of the impl’s `where [(); size_of::<T>()]: Sized` bound between well-formedness checking and body checking, leading to an unexpected state and ICE instead of a normal diagnostic.",
+      "possible_causes": [
+        "Bug in trait method resolution/type checking for calls within a generic impl body, where impl predicates involving `generic_const_exprs` are not correctly propagated to the method-call obligation context.",
+        "Defect in const-evaluatable checking or normalization of array-length expressions like `[(); size_of::<T>()]` when the const depends on a generic parameter inside an impl header.",
+        "Compiler incorrectly attempts premature layout/const evaluation of `size_of::<T>()` during HIR analysis, despite `T` still being generic, leading to an ICE instead of deferred obligation handling.",
+        "Mismatch between well-formedness checking of the impl’s where-clause and later body checking/method lookup, causing an internal invariant violation when elaborating predicates for `self.g()`.",
+        "Possible bug in handling by-value trait receiver method calls inside the same impl when the impl carries generic const predicates, exposing a missing normalization or fulfillment case in rustc_hir_analysis."
+      ],
+      "evidence": [
+        "The reproducer requires `#![feature(generic_const_exprs)]`, so the failing path is specifically in unstable generic-const-expression handling.",
+        "The impl header contains `[(); size_of::<T>()]: Sized`, a classic const-evaluatable/well-formedness bound that forces rustc to reason about a type-dependent const expression.",
+        "`f` calls `self.g()` inside the same generic impl, which triggers method resolution and obligation propagation under the impl’s predicates.",
+        "`main` is empty, so the crash is caused purely by compiling/analyzing the impl, narrowing the issue to front-end analysis/type checking.",
+        "The stack trace shows `rustc_hir_analysis::check_crate`, indicating the ICE happens during semantic analysis rather than MIR/codegen.",
+        "The query stack is empty at panic end, suggesting an unexpected internal state/assertion rather than an ordinary user-facing type error.",
+        "The code uses `size_of::<T>()` in a const context, which requires layout-related reasoning for a generic type parameter and is a known delicate compiler area."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1589,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "Most suspicious because the reproducer centers on `generic_const_exprs` with `[(); size_of::<T>()]: Sized` in an impl where-clause. This file is the dedicated logic for deciding whether such generic consts are evaluatable under the current param-env, including abstract-const expansion and `MentionsParam` handling. An ICE during analysis strongly suggests a bad path in carrying or checking this const-evaluatable obligation."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+        "reason": "`f` calls `self.g()` inside the same generic impl, so method-call confirmation must instantiate the selected trait method and register all obligations from the impl/trait context. If const-evaluatable predicates from the impl header are mishandled during confirmation, this exact intra-impl method call can trigger an ICE during HIR analysis."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/probe.rs",
+        "reason": "Method lookup for `self.g()` happens before confirmation and may need to consider impl predicates while assembling/selecting candidates. Since the crash arises from compiling the body of a trait impl with a generic const bound, probe logic is a plausible place where obligations are propagated or normalized incorrectly."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The impl header uses a classic well-formedness-style bound `[(); size_of::<T>()]: Sized`. This file performs WF checking for item signatures, predicates, and impl headers, and could be mishandling normalization or registration of the generic const obligation before body checking proceeds."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "If the ICE comes from generating WF obligations for a generic argument/const in the impl predicates, this file is directly involved. It computes WF obligations for types and consts and is therefore a strong candidate when generic const expressions in array lengths cause analysis-time failures."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/mod.rs",
+        "reason": "The visible stack ends in `rustc_hir_analysis::check_crate`, so the failure is definitely in the HIR analysis pipeline. While this file is a coordinator rather than deep logic, it is still a plausible location for the specific pass wiring that triggers the bad interaction between WF/type checking and generic const obligations."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The reproducer depends on the impl’s where-clause predicate being collected and later reused during method checking. If `predicates_of` builds or exposes the impl predicates incorrectly for generic const expressions, later stages could ICE when resolving `self.g()` under that environment."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/abstract_const.rs",
+        "reason": "`size_of::<T>()` under `generic_const_exprs` often flows through abstract-const machinery before const-evaluatable checking. A bug in expansion/classification of the abstract const for this type-dependent expression could surface as an ICE during analysis."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/layout.rs",
+        "reason": "`size_of::<T>()` requires type layout reasoning, and the reproducer specifically uses it on a still-generic `T`. If some path incorrectly forces layout computation too early during analysis, this file is a credible source of the invariant violation."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+        "reason": "Because the code is a trait impl method body inside `impl<T> X<T> for Y`, impl-vs-trait method compatibility checking may interact with the impl’s predicates. It is less direct than const-evaluatable checking, but still plausible if the ICE is triggered while validating or instantiating impl method predicates under the generic const bound."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 140.009,
+    "stage_times_sec": {
+      "checkout": 1.363,
+      "load_bug_context": 0.056,
+      "test_behavior_analysis": 6.163,
+      "test_failure_analysis": 11.262,
+      "load_file_candidates": 0.255,
+      "search_suspicious_files": 120.908
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 377607,
+      "output_tokens": 6358,
+      "total_tokens": 383965,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.163,
+          "input_tokens": 417,
+          "output_tokens": 312,
+          "total_tokens": 729
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.262,
+          "input_tokens": 1949,
+          "output_tokens": 724,
+          "total_tokens": 2673
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.233,
+          "input_tokens": 27436,
+          "output_tokens": 342,
+          "total_tokens": 27778
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.772,
+          "input_tokens": 27525,
+          "output_tokens": 232,
+          "total_tokens": 27757
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.606,
+          "input_tokens": 27016,
+          "output_tokens": 299,
+          "total_tokens": 27315
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.264,
+          "input_tokens": 27452,
+          "output_tokens": 319,
+          "total_tokens": 27771
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.153,
+          "input_tokens": 27399,
+          "output_tokens": 327,
+          "total_tokens": 27726
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.324,
+          "input_tokens": 27711,
+          "output_tokens": 364,
+          "total_tokens": 28075
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.664,
+          "input_tokens": 27565,
+          "output_tokens": 333,
+          "total_tokens": 27898
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.427,
+          "input_tokens": 27436,
+          "output_tokens": 313,
+          "total_tokens": 27749
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.244,
+          "input_tokens": 27608,
+          "output_tokens": 363,
+          "total_tokens": 27971
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.644,
+          "input_tokens": 26327,
+          "output_tokens": 310,
+          "total_tokens": 26637
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.636,
+          "input_tokens": 27419,
+          "output_tokens": 320,
+          "total_tokens": 27739
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 10.348,
+          "input_tokens": 27700,
+          "output_tokens": 334,
+          "total_tokens": 28034
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.517,
+          "input_tokens": 27598,
+          "output_tokens": 355,
+          "total_tokens": 27953
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.056,
+          "input_tokens": 8743,
+          "output_tokens": 304,
+          "total_tokens": 9047
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.989,
+          "input_tokens": 10306,
+          "output_tokens": 807,
+          "total_tokens": 11113
+        }
+      ]
+    }
+  }
+}

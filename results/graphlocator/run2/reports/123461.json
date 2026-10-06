@@ -1,0 +1,233 @@
+{
+  "bug_id": "123461",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-04-02",
+    "resolved": "1684a753dbca5d23b2e03568e6fbbb48eb72d0e6"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/intrinsicck.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/checks.rs",
+    "compiler/rustc_hir_analysis/src/check/intrinsicck.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_hir_typeck/src/intrinsicck.rs",
+      "compiler/rustc_hir_typeck/src/fn_ctxt/checks.rs",
+      "compiler/rustc_hir_analysis/src/check/intrinsicck.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/intrinsicck.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/checks.rs",
+        "rank": 2
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/intrinsicck.rs",
+        "rank": 3
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/123461.json",
+    "graph_cache_hit": false,
+    "graph_cache_build_mode": "skeleton",
+    "graph_cache_bug_id": "123461",
+    "graph_cache_checkout_commit": "1684a753dbca5d23b2e03568e6fbbb48eb72d0e6",
+    "initial_graph_node_count": 55041,
+    "initial_graph_edge_count": 55040,
+    "graph_node_count": 55041,
+    "graph_edge_count": 56940,
+    "lazy_loaded_edge_count": 1900,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"check_transmutes\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_typeck/src/fn_ctxt/checks.rs\", \"content\": \"pub(in super::super) fn check_transmutes(&self) {\\n        let mut deferred_transmute_checks = self.deferred_transmute_checks.borrow_mut();\\n        debug!(\\\"FnCtxt::check_transmutes: {} deferred checks\\\", deferred_transmute_checks.len());\\n        for (from, to, hir_id) in deferred_transmute_checks.drain(..) {\\n            self.check_transmute(from, to, hir_id);\\n        }\\n    }\"}",
+      "{\"type\": \"FILE\", \"name\": \"intrinsicck.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/check/intrinsicck.rs\", \"content\": \"intrinsicck.rs\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"check_transmute\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_typeck/src/intrinsicck.rs\", \"content\": \"pub fn check_transmute(&self, from: Ty<'tcx>, to: Ty<'tcx>, hir_id: HirId) {\\n        let tcx = self.tcx;\\n        let dl = &tcx.data_layout;\\n        let span = tcx.hir().span(hir_id);\\n        let normalize = |ty| {\\n            let ty = self.resolve_vars_if_possible(ty);\\n            self.tcx.normalize_erasing_regions(self.param_env, ty)\\n        };\\n        let from = normalize(from);\\n        let to = normalize(to);\\n        trace!(?from, ?to);\\n        if from.has_non_region_infer() || to.has_non_region_infer() {\\n            // Note: this path is currently not reached in any test, so any\\n            // example that triggers this would be worth minimizing and\\n            // converting into a test.\\n            tcx.dcx().span_bug(span, \\\"argument to transmute has inference variables\\\");\\n        }\\n        // Transmutes that are only changing lifetimes are always ok.\\n        if from == to {\\n            return;\\n        }\\n\\n        let skel = |ty| SizeSkeleton::compute(ty, tcx, self.param_env);\\n        let sk_from = skel(from);\\n        let sk_to = skel(to);\\n        trace!(?sk_from, ?sk_to);\\n\\n        // Check for same size using the skeletons.\\n        if let (Ok(sk_from), Ok(sk_to)) = (sk_from, sk_to) {\\n            if sk_from.same_size(sk_to) {\\n                return;\\n            }\\n\\n            // Special-case transmuting from `typeof(function)` and\\n            // `Option<typeof(function)>` to present a clearer error.\\n            let from = unpack_option_like(tcx, from);\\n            if let (&ty::FnDef(..), SizeSkeleton::Known(size_to)) = (from.kind(), sk_to)\\n                && size_to == Pointer(dl.instruction_address_space).size(&tcx)\\n            {\\n                struct_span_code_err!(tcx.dcx(), span, E0591, \\\"can't transmute zero-sized type\\\")\\n                    .with_note(format!(\\\"source type: {from}\\\"))\\n                    .with_note(format!(\\\"target type: {to}\\\"))\\n                    .with_help(\\\"cast with `as` to a pointer instead\\\")\\n                    .emit();\\n                return;\\n            }\\n        }\\n\\n        // Try to display a sensible error with as much information as possible.\\n        let skeleton_string = |ty: Ty<'tcx>, sk: Result<_, &_>| match sk {\\n            Ok(SizeSkeleton::Pointer { tail, .. }) => format!(\\\"pointer to `{tail}`\\\"),\\n            Ok(SizeSkeleton::Known(size)) => {\\n                if let Some(v) = u128::from(size.bytes()).checked_mul(8) {\\n                    format!(\\\"{v} bits\\\")\\n                } else {\\n                    // `u128` should definitely be able to hold the size of different architectures\\n                    // larger sizes should be reported as error `are too big for the current architecture`\\n                    // otherwise we have a bug somewhere\\n                    bug!(\\\"{:?} overflow for u128\\\", size)\\n                }\\n            }\\n            Ok(SizeSkeleton::Generic(size)) => {\\n                if let Some(size) = size.try_eval_target_usize(tcx, self.param_env) {\\n                    format!(\\\"{size} bytes\\\")\\n                } else {\\n                    format!(\\\"generic size {size}\\\")\\n                }\\n            }\\n            Err(LayoutError::Unknown(bad)) => {\\n                if *bad == ty {\\n                    \\\"this type does not have a fixed size\\\".to_owned()\\n                } else {\\n                    format!(\\\"size can vary because of {bad}\\\")\\n                }\\n            }\\n            Err(err) => err.to_string(),\\n        };\\n\\n        let mut err = struct_span_code_err!(\\n            tcx.dcx(),\\n            span,\\n            E0512,\\n            \\\"cannot transmute between types of different sizes, \\\\\\n                                        or dependently-sized types\\\"\\n        );\\n        if from == to {\\n            err.note(format!(\\\"`{from}` does not have a fixed size\\\"));\\n            err.emit();\\n        } else {\\n            err.note(format!(\\\"source type: `{}` ({})\\\", from, skeleton_string(from, sk_from)))\\n                .note(format!(\\\"target type: `{}` ({})\\\", to, skeleton_string(to, sk_to)));\\n            if let Err(LayoutError::ReferencesError(_)) = sk_from {\\n                err.delay_as_bug();\\n            } else if let Err(LayoutError::ReferencesError(_)) = sk_to {\\n                err.delay_as_bug();\\n            } else {\\n                err.emit();\\n            }\\n        }\\n    }\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_hir_typeck/src/intrinsicck.rs",
+      "compiler/rustc_hir_typeck/src/fn_ctxt/checks.rs",
+      "compiler/rustc_hir_analysis/src/check/intrinsicck.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Transmute check treats unresolved inference variables as an internal bug instead of a recoverable user error",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "check_transmute",
+              "file": "compiler/rustc_hir_typeck/src/intrinsicck.rs",
+              "content": "pub fn check_transmute(&self, from: Ty<'tcx>, to: Ty<'tcx>, hir_id: HirId) {\n        let tcx = self.tcx;\n        let dl = &tcx.data_layout;\n        let span = tcx.hir().span(hir_id);\n        let normalize = |ty| {\n            let ty = self.resolve_vars_if_possible(ty);\n            self.tcx.normalize_erasing_regions(self.param_env, ty)\n        };\n        let from = normalize(from);\n        let to = normalize(to);\n        trace!(?from, ?to);\n        if from.has_non_region_infer() || to.has_non_region_infer() {\n            // Note: this path is currently not reached in any test, so any\n            // example that triggers this would be worth minimizing and\n            // converting into a test.\n            tcx.dcx().span_bug(span, \"argument to transmute has inference variables\");\n        }\n        // Transmutes that are only changing lifetimes are always ok.\n        if from == to {\n            return;\n        }\n\n        let skel = |ty| SizeSkeleton::compute(ty, tcx, self.param_env);\n        let sk_from = skel(from);\n        let sk_to = skel(to);\n        trace!(?sk_from, ?sk_to);\n\n        // Check for same size using the skeletons.\n        if let (Ok(sk_from), Ok(sk_to)) = (sk_from, sk_to) {\n            if sk_from.same_size(sk_to) {\n                return;\n            }\n\n            // Special-case transmuting from `typeof(function)` and\n            // `Option<typeof(function)>` to present a clearer error.\n            let from = unpack_option_like(tcx, from);\n            if let (&ty::FnDef(..), SizeSkeleton::Known(size_to)) = (from.kind(), sk_to)\n                && size_to == Pointer(dl.instruction_address_space).size(&tcx)\n            {\n                struct_span_code_err!(tcx.dcx(), span, E0591, \"can't transmute zero-sized type\")\n                    .with_note(format!(\"source type: {from}\"))\n                    .with_note(format!(\"target type: {to}\"))\n                    .with_help(\"cast with `as` to a pointer instead\")\n                    .emit();\n                return;\n            }\n        }\n\n        // Try to display a sensible error with as much information as possible.\n        let skeleton_string = |ty: Ty<'tcx>, sk: Result<_, &_>| match sk {\n            Ok(SizeSkeleton::Pointer { tail, .. }) => format!(\"pointer to `{tail}`\"),\n            Ok(SizeSkeleton::Known(size)) => {\n                if let Some(v) = u128::from(size.bytes()).checked_mul(8) {\n                    format!(\"{v} bits\")\n                } else {\n                    // `u128` should definitely be able to hold the size of different architectures\n                    // larger sizes should be reported as error `are too big for the current architecture`\n                    // otherwise we have a bug somewhere\n                    bug!(\"{:?} overflow for u128\", size)\n                }\n            }\n            Ok(SizeSkeleton::Generic(size)) => {\n                if let Some(size) = size.try_eval_target_usize(tcx, self.param_env) {\n                    format!(\"{size} bytes\")\n                } else {\n                    format!(\"generic size {size}\")\n                }\n            }\n            Err(LayoutError::Unknown(bad)) => {\n                if *bad == ty {\n                    \"this type does not have a fixed size\".to_owned()\n                } else {\n                    format!(\"size can vary because of {bad}\")\n                }\n            }\n            Err(err) => err.to_string(),\n        };\n\n        let mut err = struct_span_code_err!(\n            tcx.dcx(),\n            span,\n            E0512,\n            \"cannot transmute between types of different sizes, \\\n                                        or dependently-sized types\"\n        );\n        if from == to {\n            err.note(format!(\"`{from}` does not have a fixed size\"));\n            err.emit();\n        } else {\n            err.note(format!(\"source type: `{}` ({})\", from, skeleton_string(from, sk_from)))\n                .note(format!(\"target type: `{}` ({})\", to, skeleton_string(to, sk_to)));\n            if let Err(LayoutError::ReferencesError(_)) = sk_from {\n                err.delay_as_bug();\n            } else if let Err(LayoutError::ReferencesError(_)) = sk_to {\n                err.delay_as_bug();\n            } else {\n                err.emit();\n            }\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Deferred transmute validation runs after partial type resolution, allowing closure/underscore types to remain unresolved when checked",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "check_transmutes",
+              "file": "compiler/rustc_hir_typeck/src/fn_ctxt/checks.rs",
+              "content": "pub(in super::super) fn check_transmutes(&self) {\n        let mut deferred_transmute_checks = self.deferred_transmute_checks.borrow_mut();\n        debug!(\"FnCtxt::check_transmutes: {} deferred checks\", deferred_transmute_checks.len());\n        for (from, to, hir_id) in deferred_transmute_checks.drain(..) {\n            self.check_transmute(from, to, hir_id);\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Anonymous const array length forces type checking and const-evaluation of a transmute expression involving a closure with inferred Option parameter",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "intrinsicck.rs",
+              "file": "compiler/rustc_hir_analysis/src/check/intrinsicck.rs",
+              "content": "intrinsicck.rs"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 1.0
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.95
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.74
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 162.161,
+    "stage_times_sec": {
+      "load_bug_context": 0.0,
+      "checkout": 1.003,
+      "load_or_build_graph": 37.454,
+      "symptom_vertices_locating": 106.908,
+      "dynamic_cig_discovering": 14.794,
+      "convert_results": 0.063
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 11,
+      "input_tokens": 132055,
+      "output_tokens": 895,
+      "total_tokens": 132950,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.523,
+          "input_tokens": 10662,
+          "output_tokens": 98,
+          "total_tokens": 10760
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.225,
+          "input_tokens": 10025,
+          "output_tokens": 17,
+          "total_tokens": 10042
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 3.057,
+          "input_tokens": 10774,
+          "output_tokens": 42,
+          "total_tokens": 10816
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.985,
+          "input_tokens": 11899,
+          "output_tokens": 74,
+          "total_tokens": 11973
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.062,
+          "input_tokens": 11987,
+          "output_tokens": 46,
+          "total_tokens": 12033
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.954,
+          "input_tokens": 10025,
+          "output_tokens": 17,
+          "total_tokens": 10042
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.851,
+          "input_tokens": 12113,
+          "output_tokens": 75,
+          "total_tokens": 12188
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 3.877,
+          "input_tokens": 11172,
+          "output_tokens": 132,
+          "total_tokens": 11304
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 3.573,
+          "input_tokens": 16933,
+          "output_tokens": 132,
+          "total_tokens": 17065
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 3.56,
+          "input_tokens": 14413,
+          "output_tokens": 131,
+          "total_tokens": 14544
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.716,
+          "input_tokens": 12052,
+          "output_tokens": 131,
+          "total_tokens": 12183
+        }
+      ]
+    }
+  }
+}

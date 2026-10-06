@@ -1,0 +1,243 @@
+{
+  "bug_id": "114061",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-07-24",
+    "resolved": "8771282d4e7a5c4569e49d1f878fb3ba90a974d0"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+    "compiler/rustc_trait_selection/src/solve/eval_ctxt/select.rs",
+    "compiler/rustc_trait_selection/src/solve/assembly/mod.rs",
+    "compiler/rustc_trait_selection/src/solve/eval_ctxt.rs",
+    "compiler/rustc_trait_selection/src/solve/canonicalize.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Imports all items from an auxiliary crate and relies on its trait definitions and blanket logic to drive the test.",
+        "Defines a local type `Local`, then implements `WithAssoc<'_>` for `Box<Local>` using an elided lifetime in the impl header.",
+        "Sets the associated type `Assoc` to `()`, exercising associated types in trait impl resolution.",
+        "Uses a generic helper `impls_trait<T: Trait>()` to force compile-time verification that a concrete type satisfies another trait bound.",
+        "Calls `impls_trait::<Box<Local>>()`, requiring the compiler to infer or derive that `Box<Local>` implements `Trait`.",
+        "Exercises cross-crate trait solving, where `Trait` is likely provided indirectly from the dependency via bounds involving `WithAssoc`.",
+        "Tests interaction between boxed local types, lifetime-parameterized trait impls, and associated-type normalization during obligation checking.",
+        "Targets nightly trait solver/compiler behavior, where proving `Trait` for `Box<Local>` may fail due to incorrect handling of the `WithAssoc<'_>` impl."
+      ],
+      "summary": "The reproducer is a compile-time trait-resolution test. It defines `Local`, implements a dependency trait `WithAssoc<'_>` for `Box<Local>`, and then asks the compiler to prove `Box<Local>: Trait` through a generic bound. This exercises lifetime elision in impls, associated types, cross-crate obligation solving, and normalization/inference in the nightly trait solver."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is an ambiguous trait-resolution error for a concrete type that should be disambiguated by the where-clause of one blanket impl. The compiler reports two candidate impls for `Box<Local>: dep::Trait`: a direct blanket `impl<T> Trait for Box<T>` and a second blanket `impl<T> Trait for T where T: 'static, for<'a> T: WithAssoc<'a>, for<'a> <T as WithAssoc<'a>>::Assoc: IsUnit`. The reproducer specifically makes `Box<Local>` satisfy the second impl by providing `impl WithAssoc<'_> for Box<Local> { type Assoc = (); }`, which should semantically correspond to the higher-ranked requirement `for<'a> Box<Local>: WithAssoc<'a>` if the elided lifetime impl is generalized correctly. The common theme across the code and error is incorrect interaction between lifetime elision in trait impl headers, HRTB/canonical trait obligation solving, and associated-type normalization across crates. Because the compiler still treats both `Trait` impls as simultaneously applicable instead of preferring/rejecting one consistently, the likely bug is in production trait selection/confirmation logic: the impl `WithAssoc<'_> for Box<Local>` is not being related correctly to `for<'a> WithAssoc<'a>` obligations, or its associated type `Assoc = ()` is not being normalized/proven under the bound during overlap/selection. This points to a defect in the trait solver coherence/selection path rather than in the reproducer.",
+      "possible_causes": [
+        "Bug in trait solver handling of an impl written with elided lifetime `impl WithAssoc<'_> for Box<Local>`: it may fail to generalize or equate this impl with the higher-ranked obligation `for<'a> Box<Local>: WithAssoc<'a>`.",
+        "Defect in candidate selection/ambiguity resolution for blanket trait impls, where rustc keeps both `impl<T> Trait for Box<T>` and the conditional `impl<T> Trait for T where ...` as viable for `Box<Local>` instead of resolving or rejecting one via proper obligation evaluation.",
+        "Incorrect normalization/projection of the associated type under binder context: `<Box<Local> as WithAssoc<'a>>::Assoc` may not be reduced to `()` consistently when checking `for<'a> ... : IsUnit`.",
+        "Cross-crate obligation evaluation bug in the new/nightly trait solver, especially around canonicalization of higher-ranked trait bounds and imported blanket impls from the dependency crate.",
+        "Possible coherence/overlap checking defect causing rustc to expose overlapping blanket impl candidates at use-site rather than recognizing one candidate's where-clauses through the `WithAssoc` impl and handling specialization/overlap consistently."
+      ],
+      "evidence": [
+        "Compiler output explicitly reports two `Trait` impl candidates for the same concrete type `Box<Local>`, showing ambiguity in trait selection rather than a missing impl.",
+        "The reproducer adds `impl WithAssoc<'_> for Box<Local> { type Assoc = (); }`, directly targeting the where-clauses of the second blanket impl (`for<'a> T: WithAssoc<'a>` and associated type implementing `IsUnit`).",
+        "The impl uses an elided lifetime `'_` while the required blanket bound is higher-ranked `for<'a>`, making lifetime generalization/binder handling a central similarity.",
+        "Associated type `Assoc = ()` is chosen specifically to satisfy an `IsUnit`-style bound, so failure suggests projection/normalization under HRTB may be mishandled.",
+        "The behavior is cross-crate: trait definitions and blanket impls live in `dep`, while the concrete `WithAssoc` impl is local, matching known fragile areas in rustc obligation solving and canonicalization.",
+        "Error is E0283 ('type annotations needed') rather than a coherence-definition error, indicating candidate confirmation/selection failed during obligation solving at the call site."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1648,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Most suspicious because the failure is an E0283 ambiguity at use-site with two blanket impl candidates both considered applicable for `Box<Local>: Trait`. This file is the core classic trait-selection candidate assembly/winnowing logic, where higher-ranked obligations like `for<'a> T: WithAssoc<'a>` are evaluated to decide whether a conditional impl remains viable or ambiguous."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "The conditional blanket impl depends on confirming `for<'a> Box<Local>: WithAssoc<'a>` and normalizing nested obligations arising from that impl. If confirmation mishandles the impl written as `WithAssoc<'_>` or fails to instantiate/check the HRTB correctly, selection can incorrectly leave both blanket impls as matching."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The second blanket impl also requires proving `for<'a> <T as WithAssoc<'a>>::Assoc: IsUnit`. That directly exercises associated-type projection under binders; a bug here could prevent normalizing the projection to `()` consistently, causing the solver to treat the conditional impl as ambiguously applicable."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "The reproducer hinges on relating a local impl `impl WithAssoc<'_> for Box<Local>` to a higher-ranked obligation `for<'a> Box<Local>: WithAssoc<'a>`. This file contains the inference machinery for instantiating and comparing higher-ranked binders, so a bug in placeholder/fresh-var handling could explain the incorrect ambiguity."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "Because the reproducer uses an elided lifetime `'_` in an impl header, incorrect lowering or bound-variable resolution of that lifetime could feed wrong binder semantics into later trait solving. This file is the best candidate among those listed for translating such lifetime syntax into the compiler’s bound-variable model."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+        "reason": "Also relevant to the `'_` impl header: if lifetime elision/synthetic lifetime use collection is mishandled during lowering, the resulting HIR/type representation may not correctly reflect the intended generality needed to satisfy `for<'a>` obligations."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/solve/eval_ctxt/select.rs",
+        "reason": "If the nightly toolchain is routing some selection paths through the new solver compatibility layer, this file is a plausible source of ambiguity retention: it converts proof results into legacy selection outcomes and explicitly handles multiple successful candidates and `Maybe` certainty."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/solve/assembly/mod.rs",
+        "reason": "Candidate assembly in the new solver is another plausible place where both impls could be retained without properly discharging the HRTB/associated-type requirements of the conditional blanket impl. The bug signature matches incorrect candidate matching under quantified predicates."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/solve/eval_ctxt.rs",
+        "reason": "This file manages new-solver goal evaluation, universes, and nested obligations. Since the reproducer stresses cross-crate HRTB and associated-type obligations, mishandling of universes/canonical goals here could surface as spurious ambiguity."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/solve/canonicalize.rs",
+        "reason": "Canonicalization bugs are plausible because the problematic obligations are higher-ranked and cross-crate. If binder/universe information for `WithAssoc<'_>` versus `for<'a> WithAssoc<'a>` is lost or over-generalized during canonicalization, the solver can fail to distinguish or confirm the right candidate."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 153.806,
+    "stage_times_sec": {
+      "checkout": 3.2,
+      "load_bug_context": 0.053,
+      "test_behavior_analysis": 8.016,
+      "test_failure_analysis": 13.314,
+      "load_file_candidates": 0.101,
+      "search_suspicious_files": 129.122
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 382970,
+      "output_tokens": 6887,
+      "total_tokens": 389857,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 8.016,
+          "input_tokens": 386,
+          "output_tokens": 305,
+          "total_tokens": 691
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.314,
+          "input_tokens": 1185,
+          "output_tokens": 815,
+          "total_tokens": 2000
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.632,
+          "input_tokens": 26751,
+          "output_tokens": 369,
+          "total_tokens": 27120
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.296,
+          "input_tokens": 26891,
+          "output_tokens": 307,
+          "total_tokens": 27198
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.222,
+          "input_tokens": 26435,
+          "output_tokens": 329,
+          "total_tokens": 26764
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.421,
+          "input_tokens": 26748,
+          "output_tokens": 403,
+          "total_tokens": 27151
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.157,
+          "input_tokens": 26691,
+          "output_tokens": 376,
+          "total_tokens": 27067
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.073,
+          "input_tokens": 27063,
+          "output_tokens": 353,
+          "total_tokens": 27416
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.074,
+          "input_tokens": 26875,
+          "output_tokens": 351,
+          "total_tokens": 27226
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.433,
+          "input_tokens": 26919,
+          "output_tokens": 324,
+          "total_tokens": 27243
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.877,
+          "input_tokens": 26872,
+          "output_tokens": 325,
+          "total_tokens": 27197
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.806,
+          "input_tokens": 26637,
+          "output_tokens": 353,
+          "total_tokens": 26990
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.543,
+          "input_tokens": 26975,
+          "output_tokens": 305,
+          "total_tokens": 27280
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.508,
+          "input_tokens": 26894,
+          "output_tokens": 329,
+          "total_tokens": 27223
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.477,
+          "input_tokens": 27132,
+          "output_tokens": 458,
+          "total_tokens": 27590
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.289,
+          "input_tokens": 20231,
+          "output_tokens": 389,
+          "total_tokens": 20620
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.286,
+          "input_tokens": 12285,
+          "output_tokens": 796,
+          "total_tokens": 13081
+        }
+      ]
+    }
+  }
+}

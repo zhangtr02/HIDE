@@ -1,0 +1,229 @@
+{
+  "bug_id": "93841",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-02-09",
+    "resolved": "0c292c9667f1b202a9150d58bdd2e89e3e803996"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/coercion.rs",
+    "compiler/rustc_typeck/src/check/autoderef.rs",
+    "compiler/rustc_trait_selection/src/autoderef.rs",
+    "compiler/rustc_typeck/src/check/fn_ctxt/checks.rs",
+    "compiler/rustc_infer/src/infer/projection.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_typeck/src/check/expr.rs",
+    "compiler/rustc_infer/src/infer/combine.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `frob(&str) -> impl Deref<Target = Path> + '_`, returning an opaque type tied to the input string’s lifetime.",
+        "Uses `OsStr::new(path).as_ref()` to convert `&str` into a borrowed `&Path` through standard-library `AsRef` implementations.",
+        "Exercises return-position `impl Trait` with a lifetime capture (`+'_`), so the hidden type borrows from the function argument.",
+        "Uses `Deref<Target = Path>` abstraction instead of exposing `&Path` directly, testing deref-based coercions on opaque return types.",
+        "In `main`, stores the opaque result in `old_path`, requiring the compiler to preserve the hidden borrowed type across a local binding.",
+        "Calls `open_parent(&old_path)` where `&impl Deref<Target = Path>` must coerce, via deref chain, into `&Path` expected by the callee.",
+        "Checks borrow checking and lifetime propagation from the original string literal through `frob` into the later function call.",
+        "Targets compiler behavior around type inference, coercion, and region handling for opaque borrowed types on nightly Rust."
+      ],
+      "summary": "The reproducer returns a borrowed path-like opaque type from `frob` using `impl Deref<Target = Path> + '_`. It converts `&str` to `&Path` via `OsStr`/`AsRef`, stores that opaque value, then passes `&old_path` to a function needing `&Path`. This stresses RPIT lifetime capture, deref coercions, hidden-type inference, and borrow/region analysis."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on an opaque return type (`impl Deref<Target = Path> + '_`) whose hidden concrete type is effectively a borrowed `&Path`. The program then takes a reference to the opaque local (`&old_path`) and expects normal deref coercion to produce the `&Path` required by `open_parent`. The compiler instead reports a type mismatch between `Path` and the opaque type, which indicates it is not applying or not recognizing the deref/autoref coercion chain for a return-position `impl Trait` value. The common theme across the reproducer behavior and the diagnostic is interaction between RPIT opaque types, lifetime-captured borrowed hidden types, and coercion from `&impl Deref<Target = Path>` to `&Path`. Since the same pattern should work for a concrete `&Path` or ordinary derefable wrapper, the likely defect is in compiler type checking/coercion logic for opaque types, especially when the hidden type is a reference and the coercion must occur through an extra borrow of the opaque local.",
+      "possible_causes": [
+        "Bug in type coercion / method-adjustment logic where deref coercions are not performed through a return-position opaque type implementing `Deref<Target = Path>`, causing `&impl Deref<Target = Path>` not to coerce to `&Path`.",
+        "Incorrect handling of return-position `impl Trait` obligations in trait solving or type checking, so the compiler fails to use the guaranteed `Deref<Target = Path>` bound of the opaque type during argument coercion.",
+        "Defect in normalization/projection of associated type bounds on opaque types (`Deref::Target = Path`), preventing the coercion engine from proving the target type is `Path`.",
+        "Bug in region/lifetime handling for RPIT with `+'_` capture, where the hidden borrowed reference type is not propagated correctly after binding to a local, leading the coercion step to treat the opaque type too abstractly.",
+        "Possible issue in HIR/MIR type-check adjustment generation for autoref+deref chains involving opaque locals, specifically missing an adjustment from `&Opaque` to `&Path` even though the hidden type is dereferenceable to `Path`."
+      ],
+      "evidence": [
+        "`frob` returns `impl Deref<Target = Path> + '_`, so callers are promised the returned value dereferences to `Path`.",
+        "The body `OsStr::new(path).as_ref()` yields a borrowed path-like reference, so the hidden type is compatible with `Deref<Target = Path>`.",
+        "The call site uses `open_parent(&old_path)` where the callee expects `&Path`; this should be satisfied by deref coercion from a reference to a derefable value.",
+        "Compiler error E0308 says `expected struct Path, found opaque type`, showing it compared against the opaque type directly instead of completing the deref-based coercion.",
+        "The reproducer specifically stresses RPIT + lifetime capture + local binding + deref coercion, and the failure occurs exactly at that interaction point, not at construction of the path value itself.",
+        "No reproducer evidence suggests a bug in user code logic; the mismatch is between a trait-guaranteed capability (`Deref<Target = Path>`) and the compiler's rejection of using it in argument passing."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1393,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/coercion.rs",
+        "reason": "Most likely site: the failure is specifically that `&old_path` does not coerce from `&impl Deref<Target = Path>` to `&Path`. That is the core responsibility of type-check coercion logic, including autoref+deref coercions. The diagnostic suggests the compiler compares the opaque type directly instead of using its `Deref` bound during coercion."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/autoderef.rs",
+        "reason": "This reproducer depends on autoderef being materialized for an opaque RPIT value behind an extra reference. If typeck fails to build the deref chain or emit the needed adjustments for `&Opaque -> &Path`, this file is a strong candidate."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/autoderef.rs",
+        "reason": "Autoderef search itself may be rejecting or not exploring deref through an opaque type constrained by `Deref<Target = Path>`. Since the hidden type is abstract but the bound is explicit, a bug here could prevent discovering the deref target used by coercion."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/fn_ctxt/checks.rs",
+        "reason": "The error is emitted at an argument-position coercion in a function call. This file coordinates checking actual arguments against formal parameter types and invokes coercions, so it is a plausible place where coercion for opaque derefable arguments is skipped or mishandled."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/projection.rs",
+        "reason": "The reproducer relies on using the bound `Deref<Target = Path>` of an opaque type, which may require projection/normalization of the associated type `Target`. If projection on the opaque-bound path is not deferred or normalized correctly, coercion would fail exactly as observed."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "Closely related to associated type normalization for `Deref::Target = Path`. A bug here could prevent proving that the opaque type’s deref target is `Path`, causing downstream coercion to treat the opaque type as non-dereferenceable."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "RPIT opaque types are central to the reproducer. If inference records or exposes the opaque return type too abstractly during body type checking, coercion may fail to use its promised trait bounds after binding the result to a local."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "This file handles reconstructing and validating hidden types for opaque types. Since the reproducer stresses lifetime-captured RPIT whose hidden type is effectively `&Path`, a bug in opaque-type instantiation/definition mapping could interfere with later coercion and bound use."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/expr.rs",
+        "reason": "Expression checking owns application of adjustments and expected-type propagation. The problematic expression is `&old_path` in argument position, so a bug here could cause the expression to be checked without the expected coercion path being applied for opaque deref types."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "reason": "If relating the argument type to the parameter type mishandles opaque types with trait bounds, the type checker may report a raw mismatch instead of allowing coercion/projection-driven relation. Less direct than coercion/autoderef files, but still plausible in this RPIT interaction."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 141.215,
+    "stage_times_sec": {
+      "checkout": 4.058,
+      "load_bug_context": 0.121,
+      "test_behavior_analysis": 6.716,
+      "test_failure_analysis": 12.44,
+      "load_file_candidates": 0.126,
+      "search_suspicious_files": 117.754
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 319209,
+      "output_tokens": 5812,
+      "total_tokens": 325021,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.716,
+          "input_tokens": 426,
+          "output_tokens": 335,
+          "total_tokens": 761
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.439,
+          "input_tokens": 1118,
+          "output_tokens": 684,
+          "total_tokens": 1802
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.83,
+          "input_tokens": 26813,
+          "output_tokens": 410,
+          "total_tokens": 27223
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.61,
+          "input_tokens": 26412,
+          "output_tokens": 274,
+          "total_tokens": 26686
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.317,
+          "input_tokens": 26601,
+          "output_tokens": 304,
+          "total_tokens": 26905
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.856,
+          "input_tokens": 26595,
+          "output_tokens": 354,
+          "total_tokens": 26949
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.916,
+          "input_tokens": 26504,
+          "output_tokens": 352,
+          "total_tokens": 26856
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.786,
+          "input_tokens": 26674,
+          "output_tokens": 355,
+          "total_tokens": 27029
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.718,
+          "input_tokens": 26641,
+          "output_tokens": 418,
+          "total_tokens": 27059
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.404,
+          "input_tokens": 25705,
+          "output_tokens": 280,
+          "total_tokens": 25985
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.29,
+          "input_tokens": 26434,
+          "output_tokens": 388,
+          "total_tokens": 26822
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.043,
+          "input_tokens": 26639,
+          "output_tokens": 296,
+          "total_tokens": 26935
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.68,
+          "input_tokens": 26192,
+          "output_tokens": 329,
+          "total_tokens": 26521
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.184,
+          "input_tokens": 17026,
+          "output_tokens": 297,
+          "total_tokens": 17323
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 15.096,
+          "input_tokens": 9429,
+          "output_tokens": 736,
+          "total_tokens": 10165
+        }
+      ]
+    }
+  }
+}

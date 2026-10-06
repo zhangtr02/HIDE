@@ -1,0 +1,163 @@
+{
+  "bug_id": "129811",
+  "checkout": {
+    "requested": "nightly-2024-08-29",
+    "resolved": "100fde5246bf56f22fb5cc85374dd841296fce0e"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/coroutine.rs",
+    "compiler/rustc_ty_utils/src/layout.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_middle/src/ty/closure.rs",
+    "compiler/rustc_mir_build/src/build/expr/into.rs",
+    "compiler/rustc_mir_build/src/build/scope.rs",
+    "compiler/rustc_mir_transform/src/lib.rs",
+    "compiler/rustc_middle/src/ty/layout.rs",
+    "compiler/rustc_hir_analysis/src/check/check.rs",
+    "compiler/rustc_mir_transform/src/inline.rs"
+  ],
+  "evidence": {
+    "bug_id": "129811",
+    "execution": {
+      "toolchain": "nightly-2024-08-29",
+      "return_code": 101,
+      "kind": "diagnostic_error",
+      "command": "rustup run nightly-2024-08-29 cargo build",
+      "rustflags": []
+    },
+    "log": {
+      "error_codes": [
+        "E0391"
+      ],
+      "diagnostic_messages": [
+        "cycle detected when optimizing MIR for `orchestrate_simple_crud::{closure#0}::{closure#0}::{closure#0}::{closure#1}`"
+      ],
+      "ice_message": "",
+      "panic_messages": [],
+      "panic_modes": [],
+      "query_stack": [],
+      "compiler_paths_mentioned": [],
+      "source_spans": [
+        {
+          "path": "src/main.rs",
+          "line": 10,
+          "column": 39
+        }
+      ],
+      "rustc_symbols": [],
+      "raw_tail": "=== START 2026-02-02 19:02:15 ===\nBug ID: 129811\nToolchain: nightly-2024-08-29\nSource: /data/zhangtianrong/projects/rustc-cbl/rustcbugs/129811\nRun dir: /data/zhangtianrong/projects/rustc-cbl/run/129811\nCMD: rustup run nightly-2024-08-29 cargo build\n------------------------------------------------------------\n   Compiling bug_129811 v0.1.0 (/data/zhangtianrong/projects/rustc-cbl/run/129811)\nerror[E0391]: cycle detected when optimizing MIR for `orchestrate_simple_crud::{closure#0}::{closure#0}::{closure#0}::{closure#1}`\n  --> src/main.rs:10:39\n   |\n10 |     orchestrate_memd_routing(async || async {}.await).await;\n   |                                       ^^^^^^^^^^^^^^\n   |\n   = note: ...which immediately requires optimizing MIR for `orchestrate_simple_crud::{closure#0}::{closure#0}::{closure#0}::{closure#1}` again\n   = note: cycle used when computing layout of `{async closure body@src/main.rs:10:39: 10:53}`\n   = note: see https://rustc-dev-guide.rust-lang.org/overview.html#queries and https://rustc-dev-guide.rust-lang.org/query.html for more information\n\nFor more information about this error, try `rustc --explain E0391`.\nerror: could not compile `bug_129811` (bin \"bug_129811\") due to 1 previous error\n------------------------------------------------------------\nReturn code: 101\n"
+    },
+    "query_trace": {
+      "availability": "unknown_only",
+      "queries": [],
+      "query_key_samples": [],
+      "query_key_terms": {
+        "def_paths": [],
+        "item_names": [],
+        "type_terms": []
+      },
+      "metadata": {
+        "status": "ok",
+        "event_count": 4408,
+        "named_event_count": 0,
+        "unknown_event_count": 4408,
+        "summary_available": true
+      }
+    }
+  },
+  "stage1": {
+    "skipped": true,
+    "ablation": "w/o crate and module localization",
+    "selected_crates": []
+  },
+  "stage2": {
+    "skipped": true,
+    "ablation": "w/o crate and module localization",
+    "selected_modules": []
+  },
+  "stage3": {
+    "candidate_universe_size": 1833,
+    "localization_mode": "global_file_localization",
+    "doc_screened_files": [
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "reason": "Most direct match: the failure happens while optimizing MIR for an async closure body, and this pass is the coroutine/state-machine transformer that computes suspension-state layout and rewrites coroutine bodies, so a self-recursive layout query here could trigger the reported cycle."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs",
+        "reason": "The diagnostic explicitly says the cycle is used when computing layout of the async closure body, and this file is where `TyAndLayout` is actually computed and validated, making it a prime place for a bad coroutine-layout recursion to surface."
+      },
+      {
+        "id": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "Async closures are classified and given coroutine signatures here, so an incorrect closure/coroutine kind or output type can feed later layout computation with the wrong body shape."
+      },
+      {
+        "id": "compiler/rustc_middle/src/ty/closure.rs",
+        "reason": "This file owns the type-level closure/coroutine capture model, and async-closure capture shape directly affects the computed coroutine layout, so it is a plausible upstream source of the layout cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/into.rs",
+        "reason": "This is one of the main lowering paths for destination-based expressions, including control-flow and `yield`-style lowering that async closures rely on; a malformed lowered body here could later make MIR optimization re-enter layout computation."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/scope.rs",
+        "reason": "Coroutine drop-tree and suspension-scope management happen here, and async closure bodies depend on those scopes before MIR optimization, so incorrect scope/drop shaping is a plausible precursor to the cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/lib.rs",
+        "reason": "This crate root assembles the MIR optimization pipeline, so if the regression is triggered specifically during MIR optimization, pass ordering or coroutine-pass placement is a reasonable secondary suspect."
+      },
+      {
+        "id": "compiler/rustc_middle/src/ty/layout.rs",
+        "reason": "This is the shared ABI/layout query bridge used by higher layers; a reentrant `layout_of` path through an async closure body would pass through this interface even if the bug is in a caller."
+      },
+      {
+        "id": "compiler/rustc_hir_analysis/src/check/check.rs",
+        "reason": "This pass validates coroutine-related and layout-sensitive item rules up front, so a bad async-closure signature or coroutine-related type check here could seed the later optimization-time layout recursion."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/inline.rs",
+        "reason": "Lower-confidence but still plausible: inlining is another MIR optimization that can re-enter query logic on nested async bodies, so it can participate in an optimization-time cycle even if it is not the primary coroutine-specific site."
+      }
+    ],
+    "file_eval_top_k": 10
+  },
+  "efficiency": {
+    "total_wall_time_sec": 120.55,
+    "stage_times_sec": {
+      "checkout": 5.109,
+      "load_issue": 0.007,
+      "load_reproducer": 0.049,
+      "load_evidence": 0.011,
+      "enumerate_all_files": 0.06,
+      "load_all_file_docs": 0.209,
+      "file_localization_llm": 115.103
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 1,
+      "input_tokens": 185786,
+      "output_tokens": 7663,
+      "total_tokens": 193449,
+      "requests": [
+        {
+          "stage": "global_file_localization",
+          "latency_sec": 115.095,
+          "input_tokens": 185786,
+          "output_tokens": 7663,
+          "total_tokens": 193449
+        }
+      ]
+    }
+  },
+  "diagnosis": {
+    "groundtruth_files": [
+      "compiler/rustc_mir_transform/src/validate.rs"
+    ],
+    "groundtruth_file_rank": null,
+    "file_top1_hit": false,
+    "file_top3_hit": false,
+    "file_top5_hit": false,
+    "file_top10_hit": false
+  }
+}

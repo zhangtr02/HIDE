@@ -1,0 +1,288 @@
+{
+  "bug_id": "93841",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-02-09",
+    "resolved": "0c292c9667f1b202a9150d58bdd2e89e3e803996"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/coercion.rs",
+    "compiler/rustc_typeck/src/check/expectation.rs",
+    "compiler/rustc_typeck/src/check/check.rs",
+    "compiler/rustc_middle/src/ty/context.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_typeck/src/check/coercion.rs",
+      "compiler/rustc_typeck/src/check/expectation.rs",
+      "compiler/rustc_typeck/src/check/check.rs",
+      "compiler/rustc_middle/src/ty/context.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/coercion.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/expectation.rs",
+        "rank": 2
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/check.rs",
+        "rank": 3
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/context.rs",
+        "rank": 4
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/93841.json",
+    "graph_cache_hit": true,
+    "graph_cache_build_mode": "bug_cache",
+    "graph_cache_bug_id": "93841",
+    "graph_cache_checkout_commit": "0c292c9667f1b202a9150d58bdd2e89e3e803996",
+    "initial_graph_node_count": 45048,
+    "initial_graph_edge_count": 45047,
+    "graph_node_count": 45048,
+    "graph_edge_count": 114451,
+    "lazy_loaded_edge_count": 69404,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"can_coerce\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_typeck/src/check/coercion.rs\", \"content\": \"pub fn can_coerce(&self, expr_ty: Ty<'tcx>, target: Ty<'tcx>) -> bool {\\n        let source = self.resolve_vars_with_obligations(expr_ty);\\n        debug!(\\\"coercion::can_with_predicates({:?} -> {:?})\\\", source, target);\\n\\n        let cause = self.cause(rustc_span::DUMMY_SP, ObligationCauseCode::ExprAssignable);\\n        // We don't ever need two-phase here since we throw out the result of the coercion\\n        let coerce = Coerce::new(self, cause, AllowTwoPhase::No);\\n        self.probe(|_| {\\n            let ok = match coerce.coerce(source, target) {\\n                Ok(ok) => ok,\\n                _ => return false,\\n            };\\n            let mut fcx = traits::FulfillmentContext::new_in_snapshot();\\n            fcx.register_predicate_obligations(self, ok.obligations);\\n            fcx.select_where_possible(&self).is_empty()\\n        })\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"coerce\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_typeck/src/check/coercion.rs\", \"content\": \"pub fn coerce<'a>(\\n        &mut self,\\n        fcx: &FnCtxt<'a, 'tcx>,\\n        cause: &ObligationCause<'tcx>,\\n        expression: &'tcx hir::Expr<'tcx>,\\n        expression_ty: Ty<'tcx>,\\n    ) {\\n        self.coerce_inner(fcx, cause, Some(expression), expression_ty, None, false)\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"coerce\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_typeck/src/check/coercion.rs\", \"content\": \"fn coerce(&self, a: Ty<'tcx>, b: Ty<'tcx>) -> CoerceResult<'tcx> {\\n        // First, remove any resolved type variables (at the top level, at least):\\n        let a = self.shallow_resolve(a);\\n        let b = self.shallow_resolve(b);\\n        debug!(\\\"Coerce.tys({:?} => {:?})\\\", a, b);\\n\\n        // Just ignore error types.\\n        if a.references_error() || b.references_error() {\\n            return success(vec![], self.fcx.tcx.ty_error(), vec![]);\\n        }\\n\\n        // Coercing from `!` to any type is allowed:\\n        if a.is_never() {\\n            return success(simple(Adjust::NeverToAny)(b), b, vec![]);\\n        }\\n\\n        // Coercing *from* an unresolved inference variable means that\\n        // we have no information about the source type. This will always\\n        // ultimately fall back to some form of subtyping.\\n        if a.is_ty_var() {\\n            return self.coerce_from_inference_variable(a, b, identity);\\n        }\\n\\n        // Consider coercing the subtype to a DST\\n        //\\n        // NOTE: this is wrapped in a `commit_if_ok` because it creates\\n        // a \\\"spurious\\\" type variable, and we don't want to have that\\n        // type variable in memory if the coercion fails.\\n        let unsize = self.commit_if_ok(|_| self.coerce_unsized(a, b));\\n        match unsize {\\n            Ok(_) => {\\n                debug!(\\\"coerce: unsize successful\\\");\\n                return unsize;\\n            }\\n            Err(TypeError::ObjectUnsafeCoercion(did)) => {\\n                debug!(\\\"coerce: unsize not object safe\\\");\\n                return Err(TypeError::ObjectUnsafeCoercion(did));\\n            }\\n            Err(error) => {\\n                debug!(?error, \\\"coerce: unsize failed\\\");\\n            }\\n        }\\n\\n        // Examine the supertype and consider auto-borrowing.\\n        match *b.kind() {\\n            ty::RawPtr(mt_b) => {\\n                return self.coerce_unsafe_ptr(a, b, mt_b.mutbl);\\n            }\\n            ty::Ref(r_b, _, mutbl_b) => {\\n                return self.coerce_borrowed_pointer(a, b, r_b, mutbl_b);\\n            }\\n            _ => {}\\n        }\\n\\n        match *a.kind() {\\n            ty::FnDef(..) => {\\n                // Function items are coercible to any closure\\n                // type; function pointers are not (that would\\n                // require double indirection).\\n                // Additionally, we permit coercion of function\\n                // items to drop the unsafe qualifier.\\n                self.coerce_from_fn_item(a, b)\\n            }\\n            ty::FnPtr(a_f) => {\\n                // We permit coercion of fn pointers to drop the\\n                // unsafe qualifier.\\n                self.coerce_from_fn_pointer(a, a_f, b)\\n            }\\n            ty::Closure(closure_def_id_a, substs_a) => {\\n                // Non-capturing closures are coercible to\\n                // function pointers or unsafe function pointers.\\n                // It cannot convert closures that require unsafe.\\n                self.coerce_closure_to_fn(a, closure_def_id_a, substs_a, b)\\n            }\\n            _ => {\\n                // Otherwise, just use unification rules.\\n                self.unify_and(a, b, identity)\\n            }\\n        }\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"mk_opaque\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/ty/context.rs\", \"content\": \"pub fn mk_opaque(self, def_id: DefId, substs: SubstsRef<'tcx>) -> Ty<'tcx> {\\n        self.mk_ty(Opaque(def_id, substs))\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"check_opaque\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_typeck/src/check/check.rs\", \"content\": \"pub(super) fn check_opaque<'tcx>(\\n    tcx: TyCtxt<'tcx>,\\n    def_id: LocalDefId,\\n    substs: SubstsRef<'tcx>,\\n    span: Span,\\n    origin: &hir::OpaqueTyOrigin,\\n) {\\n    check_opaque_for_inheriting_lifetimes(tcx, def_id, span);\\n    if tcx.type_of(def_id).references_error() {\\n        return;\\n    }\\n    if check_opaque_for_cycles(tcx, def_id, substs, span, origin).is_err() {\\n        return;\\n    }\\n    check_opaque_meets_bounds(tcx, def_id, substs, span, origin);\\n}\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"strip_opaque\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_typeck/src/check/expectation.rs\", \"content\": \"fn strip_opaque(self, fcx: &FnCtxt<'a, 'tcx>) -> Self {\\n        match self {\\n            ExpectHasType(ty) => {\\n                let ty = fcx.resolve_vars_if_possible(ty);\\n                match *ty.kind() {\\n                    ty::Opaque(def_id, _)\\n                        if fcx.infcx.opaque_type_origin(def_id, DUMMY_SP).is_some() =>\\n                    {\\n                        NoExpectation\\n                    }\\n                    _ => self,\\n                }\\n            }\\n            _ => self,\\n        }\\n    }\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_typeck/src/check/coercion.rs",
+      "compiler/rustc_typeck/src/check/expectation.rs",
+      "compiler/rustc_typeck/src/check/check.rs",
+      "compiler/rustc_middle/src/ty/context.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Opaque impl Trait treated as a distinct type during coercion/autoref",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "coerce",
+              "file": "compiler/rustc_typeck/src/check/coercion.rs",
+              "content": "fn coerce(&self, a: Ty<'tcx>, b: Ty<'tcx>) -> CoerceResult<'tcx> {\n        // First, remove any resolved type variables (at the top level, at least):\n        let a = self.shallow_resolve(a);\n        let b = self.shallow_resolve(b);\n        debug!(\"Coerce.tys({:?} => {:?})\", a, b);\n\n        // Just ignore error types.\n        if a.references_error() || b.references_error() {\n            return success(vec![], self.fcx.tcx.ty_error(), vec![]);\n        }\n\n        // Coercing from `!` to any type is allowed:\n        if a.is_never() {\n            return success(simple(Adjust::NeverToAny)(b), b, vec![]);\n        }\n\n        // Coercing *from* an unresolved inference variable means that\n        // we have no information about the source type. This will always\n        // ultimately fall back to some form of subtyping.\n        if a.is_ty_var() {\n            return self.coerce_from_inference_variable(a, b, identity);\n        }\n\n        // Consider coercing the subtype to a DST\n        //\n        // NOTE: this is wrapped in a `commit_if_ok` because it creates\n        // a \"spurious\" type variable, and we don't want to have that\n        // type variable in memory if the coercion fails.\n        let unsize = self.commit_if_ok(|_| self.coerce_unsized(a, b));\n        match unsize {\n            Ok(_) => {\n                debug!(\"coerce: unsize successful\");\n                return unsize;\n            }\n            Err(TypeError::ObjectUnsafeCoercion(did)) => {\n                debug!(\"coerce: unsize not object safe\");\n                return Err(TypeError::ObjectUnsafeCoercion(did));\n            }\n            Err(error) => {\n                debug!(?error, \"coerce: unsize failed\");\n            }\n        }\n\n        // Examine the supertype and consider auto-borrowing.\n        match *b.kind() {\n            ty::RawPtr(mt_b) => {\n                return self.coerce_unsafe_ptr(a, b, mt_b.mutbl);\n            }\n            ty::Ref(r_b, _, mutbl_b) => {\n                return self.coerce_borrowed_pointer(a, b, r_b, mutbl_b);\n            }\n            _ => {}\n        }\n\n        match *a.kind() {\n            ty::FnDef(..) => {\n                // Function items are coercible to any closure\n                // type; function pointers are not (that would\n                // require double indirection).\n                // Additionally, we permit coercion of function\n                // items to drop the unsafe qualifier.\n                self.coerce_from_fn_item(a, b)\n            }\n            ty::FnPtr(a_f) => {\n                // We permit coercion of fn pointers to drop the\n                // unsafe qualifier.\n                self.coerce_from_fn_pointer(a, a_f, b)\n            }\n            ty::Closure(closure_def_id_a, substs_a) => {\n                // Non-capturing closures are coercible to\n                // function pointers or unsafe function pointers.\n                // It cannot convert closures that require unsafe.\n                self.coerce_closure_to_fn(a, closure_def_id_a, substs_a, b)\n            }\n            _ => {\n                // Otherwise, just use unification rules.\n                self.unify_and(a, b, identity)\n            }\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Expectation logic strips opaque expectations, changing how type checking proceeds for opaque return types",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "strip_opaque",
+              "file": "compiler/rustc_typeck/src/check/expectation.rs",
+              "content": "fn strip_opaque(self, fcx: &FnCtxt<'a, 'tcx>) -> Self {\n        match self {\n            ExpectHasType(ty) => {\n                let ty = fcx.resolve_vars_if_possible(ty);\n                match *ty.kind() {\n                    ty::Opaque(def_id, _)\n                        if fcx.infcx.opaque_type_origin(def_id, DUMMY_SP).is_some() =>\n                    {\n                        NoExpectation\n                    }\n                    _ => self,\n                }\n            }\n            _ => self,\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Opaque type checking/validation regression affecting inferred use of impl Trait in argument passing",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "check_opaque",
+              "file": "compiler/rustc_typeck/src/check/check.rs",
+              "content": "pub(super) fn check_opaque<'tcx>(\n    tcx: TyCtxt<'tcx>,\n    def_id: LocalDefId,\n    substs: SubstsRef<'tcx>,\n    span: Span,\n    origin: &hir::OpaqueTyOrigin,\n) {\n    check_opaque_for_inheriting_lifetimes(tcx, def_id, span);\n    if tcx.type_of(def_id).references_error() {\n        return;\n    }\n    if check_opaque_for_cycles(tcx, def_id, substs, span, origin).is_err() {\n        return;\n    }\n    check_opaque_meets_bounds(tcx, def_id, substs, span, origin);\n}"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Construction of opaque types preserves opacity instead of exposing Deref target for this call site",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "mk_opaque",
+              "file": "compiler/rustc_middle/src/ty/context.rs",
+              "content": "pub fn mk_opaque(self, def_id: DefId, substs: SubstsRef<'tcx>) -> Ty<'tcx> {\n        self.mk_ty(Opaque(def_id, substs))\n    }"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.95
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.78
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.62
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.72
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 1302.453,
+    "stage_times_sec": {
+      "load_bug_context": 0.023,
+      "checkout": 2.758,
+      "load_or_build_graph": 27.291,
+      "symptom_vertices_locating": 1256.311,
+      "dynamic_cig_discovering": 14.503,
+      "convert_results": 0.004
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 62482,
+      "output_tokens": 1120,
+      "total_tokens": 63602,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 2.487,
+          "input_tokens": 1802,
+          "output_tokens": 120,
+          "total_tokens": 1922
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.662,
+          "input_tokens": 1158,
+          "output_tokens": 18,
+          "total_tokens": 1176
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.054,
+          "input_tokens": 1936,
+          "output_tokens": 27,
+          "total_tokens": 1963
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.29,
+          "input_tokens": 1240,
+          "output_tokens": 18,
+          "total_tokens": 1258
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 1.483,
+          "input_tokens": 1977,
+          "output_tokens": 27,
+          "total_tokens": 2004
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.849,
+          "input_tokens": 2401,
+          "output_tokens": 18,
+          "total_tokens": 2419
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.8,
+          "input_tokens": 3329,
+          "output_tokens": 88,
+          "total_tokens": 3417
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.741,
+          "input_tokens": 1774,
+          "output_tokens": 18,
+          "total_tokens": 1792
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.019,
+          "input_tokens": 3942,
+          "output_tokens": 28,
+          "total_tokens": 3970
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.423,
+          "input_tokens": 1240,
+          "output_tokens": 17,
+          "total_tokens": 1257
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 3.143,
+          "input_tokens": 2904,
+          "output_tokens": 153,
+          "total_tokens": 3057
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 3.778,
+          "input_tokens": 18183,
+          "output_tokens": 148,
+          "total_tokens": 18331
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 2.54,
+          "input_tokens": 2452,
+          "output_tokens": 146,
+          "total_tokens": 2598
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 2.63,
+          "input_tokens": 9217,
+          "output_tokens": 147,
+          "total_tokens": 9364
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 2.402,
+          "input_tokens": 8927,
+          "output_tokens": 147,
+          "total_tokens": 9074
+        }
+      ]
+    }
+  }
+}

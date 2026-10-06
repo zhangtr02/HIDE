@@ -1,0 +1,238 @@
+{
+  "bug_id": "105251",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-12-03",
+    "resolved": "32e613bbaafee1bcabba48a2257b838f8d1c03d3"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_mir_transform/src/generator.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_infer/src/infer/region_constraints/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/outlives_bounds.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a generic function with an explicit self-outlives lifetime bound: `'s: 's` on `&'s str`, exercising lifetime constraint handling.",
+        "Returns `impl Future<Output = impl Sized>`, using nested opaque types in both the function return and the future output.",
+        "Uses an `async move` block, so the compiler lowers it into a generated future state machine capturing `s` by value.",
+        "Moves the borrowed `&'s str` into the async block and stores it in a local `_s`, testing borrow propagation through async lowering.",
+        "Relies on return-position `impl Trait` with async, requiring inference of hidden concrete types across desugaring boundaries.",
+        "Exercises trait-based future typing from `std::future::Future`, where the async block’s inferred output is the unit type `()`.",
+        "The inner `impl Sized` is effectively satisfied by `()`, testing opaque type normalization and size-trait satisfaction.",
+        "Targets nightly compilation behavior around lifetime checking, opaque types, and async desugaring interactions that could trigger the rustc bug."
+      ],
+      "summary": "The reproducer is a minimal function combining an explicit lifetime bound, a borrowed string parameter, `async move`, and nested return-position `impl Trait`. Rust lowers the async block into a hidden future that captures the reference and yields `()`, which must satisfy the inner `impl Sized`. This stresses compiler handling of lifetime constraints, opaque type inference, normalization, and async desugaring on nightly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer combines three compiler-sensitive features in one signature/body: (1) an explicit tautological outlives bound (`'s: 's`), (2) nested return-position opaque types (`impl Future<Output = impl Sized>`), and (3) `async move` lowering that captures a borrowed reference `&'s str`. The observed behavior is that nightly-2022-12-03 compiles this successfully, so the implicated bug is likely in compiler logic that used to mishandle the interaction between lifetime predicates, async/generator lowering, and opaque type inference/normalization. A common pattern across the code and described behavior is hidden type computation across desugaring boundaries: the outer opaque type is the anonymous future from the async block, while the inner opaque type is effectively `()`. The explicit `'s: 's` bound is unusual and stresses region predicate handling; if the compiler incorrectly propagated or canonicalized this bound while computing the hidden types for RPIT/async, it could produce invalid obligations, cycle errors, or region inference failures. Because the async block captures `s`, the generated future carries the borrowed lifetime into the hidden future type, so any defect is likely in production code that maps captured lifetimes into generator/future witness types or in the type checker’s treatment of opaque types with captured regions.",
+      "possible_causes": [
+        "Bug in return-position `impl Trait` hidden type inference for nested opaque types, especially when the outer opaque is an async-generated future and the inner opaque is the future output.",
+        "Incorrect handling/canonicalization of explicit self-outlives lifetime predicates like `'s: 's` in region checking or implied-bounds computation, leading to wrong obligations during async/RPIT type checking.",
+        "Defect in async/generator lowering that records captured borrowed lifetimes (`&'s str`) into the generated future type or witness, causing region constraints to be lost, duplicated, or normalized incorrectly.",
+        "Fault in opaque type normalization across async desugaring boundaries, where the compiler must reconcile the async block output `()` with `impl Sized` while also computing the outer future opaque type.",
+        "Problem in borrow/lifetime propagation through `async move` capture analysis, specifically for references with explicit generic lifetime bounds, causing hidden type region mismatches.",
+        "Issue in trait obligation generation/fulfillment for `Future<Output = impl Sized>` where nested associated output constraints and opaque types interact with inferred unit output from an async block."
+      ],
+      "evidence": [
+        "The function signature uses nested opaque types: `-> impl Future<Output = impl Sized>`, which is a known stress point for hidden type inference and normalization.",
+        "The body is an `async move` block, so rustc must lower it to a generator/future and carry captured variable types and lifetimes into a synthesized hidden type.",
+        "The captured value is `s: &'s str`, meaning the generated future type depends on region `'s`; this directly exercises lifetime propagation through async lowering.",
+        "The explicit bound `'s: 's` is unusual but legal, making it likely to expose bugs in region predicate simplification or canonicalization rather than in user code semantics.",
+        "The async block’s output is unit `()`, which must satisfy the inner `impl Sized`; this tests whether rustc correctly infers and normalizes the inner opaque output type.",
+        "The reproducer summary explicitly highlights lifetime checking, opaque type inference, normalization, and async desugaring interactions, matching the likely compiler subsystems involved.",
+        "Compilation succeeds with only a dead_code warning, indicating the intended failure was due to a compiler bug in these feature interactions rather than an error in the reproducer source."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1553,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Most directly matches the bug shape: nested RPIT/opaque types combined with an async-generated future capturing a borrowed lifetime. This file resolves opaque hidden types after region inference and rewrites regions for canonical hidden-type definitions, exactly where a bad interaction between captured regions and `impl Trait` could occur."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Handles remapping generics and regions between the enclosing function and the opaque type itself. Since the reproducer stresses lifetime capture (`'s`) across async desugaring into RPIT hidden types, incorrect reverse-mapping or region handling here is highly plausible."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Core inference support for collecting and resolving opaque types during type checking. The reproducer’s `impl Future<Output = impl Sized>` requires hidden type inference for both outer and inner opaques, making this a prime suspect for nested opaque-type inference issues."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+        "reason": "Builds free/universal region outlives relations from predicates and implied bounds. The unusual explicit bound `'s: 's` specifically stresses lifetime-predicate handling, and bad canonicalization or propagation here could affect later opaque-type/async region reasoning."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+        "reason": "Computes implied outlives bounds from well-formedness. Async return-position `impl Trait` plus explicit lifetime bounds can depend on implied outlives extraction, so a bug here could mis-handle tautological or captured lifetime constraints."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "Lowers type-outlives obligations into region constraints. This is a likely bridge point where the borrowed `&'s str` captured by the async block and the opaque future hidden type could generate incorrect region obligations."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/generator.rs",
+        "reason": "Implements async/generator lowering into the state machine that captures `s`. If the bug came from how captured borrowed lifetimes are represented in the generated future/witness type, this file is a strong candidate."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "Collects item predicates, including inferred outlives constraints. Since the reproducer explicitly uses a self-outlives predicate `'s: 's`, incorrect collection or propagation of predicates here could underlie the observed bug."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/region_constraints/mod.rs",
+        "reason": "Central storage and collection for region/member constraints, including those arising from opaque hidden types. If nested opaque async lowering created malformed member constraints, the issue could originate here."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/outlives_bounds.rs",
+        "reason": "Re-instantiates implied outlives bounds into the local inference context. Given the reproducer’s mix of explicit lifetime bounds, opaque types, and async lowering, this layer is suspicious as another place where region assumptions may be mishandled."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 138.357,
+    "stage_times_sec": {
+      "checkout": 1.204,
+      "load_bug_context": 0.07,
+      "test_behavior_analysis": 5.215,
+      "test_failure_analysis": 12.949,
+      "load_file_candidates": 0.091,
+      "search_suspicious_files": 118.828
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 356460,
+      "output_tokens": 6053,
+      "total_tokens": 362513,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.215,
+          "input_tokens": 362,
+          "output_tokens": 306,
+          "total_tokens": 668
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.948,
+          "input_tokens": 997,
+          "output_tokens": 739,
+          "total_tokens": 1736
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 6.54,
+          "input_tokens": 26478,
+          "output_tokens": 313,
+          "total_tokens": 26791
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.239,
+          "input_tokens": 26421,
+          "output_tokens": 368,
+          "total_tokens": 26789
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.48,
+          "input_tokens": 26306,
+          "output_tokens": 346,
+          "total_tokens": 26652
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.185,
+          "input_tokens": 26543,
+          "output_tokens": 345,
+          "total_tokens": 26888
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.457,
+          "input_tokens": 26580,
+          "output_tokens": 347,
+          "total_tokens": 26927
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.362,
+          "input_tokens": 26733,
+          "output_tokens": 350,
+          "total_tokens": 27083
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.252,
+          "input_tokens": 26614,
+          "output_tokens": 353,
+          "total_tokens": 26967
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.167,
+          "input_tokens": 26537,
+          "output_tokens": 295,
+          "total_tokens": 26832
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.756,
+          "input_tokens": 26679,
+          "output_tokens": 293,
+          "total_tokens": 26972
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.781,
+          "input_tokens": 25207,
+          "output_tokens": 333,
+          "total_tokens": 25540
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.137,
+          "input_tokens": 26743,
+          "output_tokens": 307,
+          "total_tokens": 27050
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.206,
+          "input_tokens": 26776,
+          "output_tokens": 340,
+          "total_tokens": 27116
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.513,
+          "input_tokens": 24864,
+          "output_tokens": 332,
+          "total_tokens": 25196
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.724,
+          "input_tokens": 12620,
+          "output_tokens": 686,
+          "total_tokens": 13306
+        }
+      ]
+    }
+  }
+}

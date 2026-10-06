@@ -1,0 +1,273 @@
+{
+  "bug_id": "128717",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-08-05",
+    "resolved": "176e5452095444815207be02c16de0b1487a1b53"
+  },
+  "final_top10": [
+    "compiler/rustc_errors/src/lib.rs",
+    "compiler/rustc_span/src/source_map.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_errors/src/lib.rs",
+      "compiler/rustc_span/src/source_map.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_errors/src/lib.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_span/src/source_map.rs",
+        "rank": 2
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/128717.json",
+    "graph_cache_hit": true,
+    "graph_cache_build_mode": "bug_cache",
+    "graph_cache_bug_id": "128717",
+    "graph_cache_checkout_commit": "176e5452095444815207be02c16de0b1487a1b53",
+    "initial_graph_node_count": 57064,
+    "initial_graph_edge_count": 57063,
+    "graph_node_count": 57064,
+    "graph_edge_count": 98831,
+    "lazy_loaded_edge_count": 41768,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"lookup_char_pos\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_span/src/source_map.rs\", \"content\": \"pub fn lookup_char_pos(&self, pos: BytePos) -> Loc {\\n        let sf = self.lookup_source_file(pos);\\n        let (line, col, col_display) = sf.lookup_file_pos_with_col_display(pos);\\n        Loc { file: sf, line, col, col_display }\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"is_valid_span\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_span/src/source_map.rs\", \"content\": \"pub fn is_valid_span(&self, sp: Span) -> Result<(Loc, Loc), SpanLinesError> {\\n        let lo = self.lookup_char_pos(sp.lo());\\n        trace!(?lo);\\n        let hi = self.lookup_char_pos(sp.hi());\\n        trace!(?hi);\\n        if lo.file.start_pos != hi.file.start_pos {\\n            return Err(SpanLinesError::DistinctSources(Box::new(DistinctSources {\\n                begin: (lo.file.name.clone(), lo.file.start_pos),\\n                end: (hi.file.name.clone(), hi.file.start_pos),\\n            })));\\n        }\\n        Ok((lo, hi))\\n    }\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_errors/src/lib.rs",
+      "compiler/rustc_span/src/source_map.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "E",
+          "name": "Suggestion splicing uses lookup_char_pos on malformed substitution span during diagnostic emission",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "splice_lines",
+              "file": "compiler/rustc_errors/src/lib.rs",
+              "content": "pub(crate) fn splice_lines(\n        &self,\n        sm: &SourceMap,\n    ) -> Vec<(String, Vec<SubstitutionPart>, Vec<Vec<SubstitutionHighlight>>, bool)> {\n        // For the `Vec<Vec<SubstitutionHighlight>>` value, the first level of the vector\n        // corresponds to the output snippet's lines, while the second level corresponds to the\n        // substrings within that line that should be highlighted.\n\n        use rustc_span::{CharPos, Pos};\n\n        /// Extracts a substring from the provided `line_opt` based on the specified low and high\n        /// indices, appends it to the given buffer `buf`, and returns the count of newline\n        /// characters in the substring for accurate highlighting. If `line_opt` is `None`, a\n        /// newline character is appended to the buffer, and 0 is returned.\n        ///\n        /// ## Returns\n        ///\n        /// The count of newline characters in the extracted substring.\n        fn push_trailing(\n            buf: &mut String,\n            line_opt: Option<&Cow<'_, str>>,\n            lo: &Loc,\n            hi_opt: Option<&Loc>,\n        ) -> usize {\n            let mut line_count = 0;\n            // Convert CharPos to Usize, as CharPose is character offset\n            // Extract low index and high index\n            let (lo, hi_opt) = (lo.col.to_usize(), hi_opt.map(|hi| hi.col.to_usize()));\n            if let Some(line) = line_opt {\n                if let Some(lo) = line.char_indices().map(|(i, _)| i).nth(lo) {\n                    // Get high index while account for rare unicode and emoji with char_indices\n                    let hi_opt = hi_opt.and_then(|hi| line.char_indices().map(|(i, _)| i).nth(hi));\n                    match hi_opt {\n                        // If high index exist, take string from low to high index\n                        Some(hi) if hi > lo => {\n                            // count how many '\\n' exist\n                            line_count = line[lo..hi].matches('\\n').count();\n                            buf.push_str(&line[lo..hi])\n                        }\n                        Some(_) => (),\n                        // If high index absence, take string from low index till end string.len\n                        None => {\n                            // count how many '\\n' exist\n                            line_count = line[lo..].matches('\\n').count();\n                            buf.push_str(&line[lo..])\n                        }\n                    }\n                }\n                // If high index is None\n                if hi_opt.is_none() {\n                    buf.push('\\n');\n                }\n            }\n            line_count\n        }\n\n        assert!(!self.substitutions.is_empty());\n\n        self.substitutions\n            .iter()\n            .filter(|subst| {\n                // Suggestions coming from macros can have malformed spans. This is a heavy\n                // handed approach to avoid ICEs by ignoring the suggestion outright.\n                let invalid = subst.parts.iter().any(|item| sm.is_valid_span(item.span).is_err());\n                if invalid {\n                    debug!(\"splice_lines: suggestion contains an invalid span: {:?}\", subst);\n                }\n                !invalid\n            })\n            .cloned()\n            .filter_map(|mut substitution| {\n                // Assumption: all spans are in the same file, and all spans\n                // are disjoint. Sort in ascending order.\n                substitution.parts.sort_by_key(|part| part.span.lo());\n\n                // Find the bounding span.\n                let lo = substitution.parts.iter().map(|part| part.span.lo()).min()?;\n                let hi = substitution.parts.iter().map(|part| part.span.hi()).max()?;\n                let bounding_span = Span::with_root_ctxt(lo, hi);\n                // The different spans might belong to different contexts, if so ignore suggestion.\n                let lines = sm.span_to_lines(bounding_span).ok()?;\n                assert!(!lines.lines.is_empty() || bounding_span.is_dummy());\n\n                // We can't splice anything if the source is unavailable.\n                if !sm.ensure_source_file_source_present(&lines.file) {\n                    return None;\n                }\n\n                let mut highlights = vec![];\n                // To build up the result, we do this for each span:\n                // - push the line segment trailing the previous span\n                //   (at the beginning a \"phantom\" span pointing at the start of the line)\n                // - push lines between the previous and current span (if any)\n                // - if the previous and current span are not on the same line\n                //   push the line segment leading up to the current span\n                // - splice in the span substitution\n                //\n                // Finally push the trailing line segment of the last span\n                let sf = &lines.file;\n                let mut prev_hi = sm.lookup_char_pos(bounding_span.lo());\n                prev_hi.col = CharPos::from_usize(0);\n                let mut prev_line =\n                    lines.lines.get(0).and_then(|line0| sf.get_line(line0.line_index));\n                let mut buf = String::new();\n\n                let mut line_highlight = vec![];\n                // We need to keep track of the difference between the existing code and the added\n                // or deleted code in order to point at the correct column *after* substitution.\n                let mut acc = 0;\n                let mut only_capitalization = false;\n                for part in &substitution.parts {\n                    only_capitalization |= is_case_difference(sm, &part.snippet, part.span);\n                    let cur_lo = sm.lookup_char_pos(part.span.lo());\n                    if prev_hi.line == cur_lo.line {\n                        let mut count =\n                            push_trailing(&mut buf, prev_line.as_ref(), &prev_hi, Some(&cur_lo));\n                        while count > 0 {\n                            highlights.push(std::mem::take(&mut line_highlight));\n                            acc = 0;\n                            count -= 1;\n                        }\n                    } else {\n                        acc = 0;\n                        highlights.push(std::mem::take(&mut line_highlight));\n                        let mut count = push_trailing(&mut buf, prev_line.as_ref(), &prev_hi, None);\n                        while count > 0 {\n                            highlights.push(std::mem::take(&mut line_highlight));\n                            count -= 1;\n                        }\n                        // push lines between the previous and current span (if any)\n                        for idx in prev_hi.line..(cur_lo.line - 1) {\n                            if let Some(line) = sf.get_line(idx) {\n                                buf.push_str(line.as_ref());\n                                buf.push('\\n');\n                                highlights.push(std::mem::take(&mut line_highlight));\n                            }\n                        }\n                        if let Some(cur_line) = sf.get_line(cur_lo.line - 1) {\n                            let end = match cur_line.char_indices().nth(cur_lo.col.to_usize()) {\n                                Some((i, _)) => i,\n                                None => cur_line.len(),\n                            };\n                            buf.push_str(&cur_line[..end]);\n                        }\n                    }\n                    // Add a whole line highlight per line in the snippet.\n                    let len: isize = part\n                        .snippet\n                        .split('\\n')\n                        .next()\n                        .unwrap_or(&part.snippet)\n                        .chars()\n                        .map(|c| match c {\n                            '\\t' => 4,\n                            _ => 1,\n                        })\n                        .sum();\n                    if !is_different(sm, &part.snippet, part.span) {\n                        // Account for cases where we are suggesting the same code that's already\n                        // there. This shouldn't happen often, but in some cases for multipart\n                        // suggestions it's much easier to handle it here than in the origin.\n                    } else {\n                        line_highlight.push(SubstitutionHighlight {\n                            start: (cur_lo.col.0 as isize + acc) as usize,\n                            end: (cur_lo.col.0 as isize + acc + len) as usize,\n                        });\n                    }\n                    buf.push_str(&part.snippet);\n                    let cur_hi = sm.lookup_char_pos(part.span.hi());\n                    // Account for the difference between the width of the current code and the\n                    // snippet being suggested, so that the *later* suggestions are correctly\n                    // aligned on the screen. Note that cur_hi and cur_lo can be on different\n                    // lines, so cur_hi.col can be smaller than cur_lo.col\n                    acc += len - (cur_hi.col.0 as isize - cur_lo.col.0 as isize);\n                    prev_hi = cur_hi;\n                    prev_line = sf.get_line(prev_hi.line - 1);\n                    for line in part.snippet.split('\\n').skip(1) {\n                        acc = 0;\n                        highlights.push(std::mem::take(&mut line_highlight));\n                        let end: usize = line\n                            .chars()\n                            .map(|c| match c {\n                                '\\t' => 4,\n                                _ => 1,\n                            })\n                            .sum();\n                        line_highlight.push(SubstitutionHighlight { start: 0, end });\n                    }\n                }\n                highlights.push(std::mem::take(&mut line_highlight));\n                // if the replacement already ends with a newline, don't print the next line\n                if !buf.ends_with('\\n') {\n                    push_trailing(&mut buf, prev_line.as_ref(), &prev_hi, None);\n                }\n                // remove trailing newlines\n                while buf.ends_with('\\n') {\n                    buf.pop();\n                }\n                if highlights.iter().all(|parts| parts.is_empty()) {\n                    None\n                } else {\n                    Some((buf, substitution.parts, highlights, only_capitalization))\n                }\n            })\n            .collect()\n    }"
+            }
+          ]
+        },
+        {
+          "id": "A",
+          "name": "Invalid span boundary computed for diagnostic/suggestion emission",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "is_valid_span",
+              "file": "compiler/rustc_span/src/source_map.rs",
+              "content": "pub fn is_valid_span(&self, sp: Span) -> Result<(Loc, Loc), SpanLinesError> {\n        let lo = self.lookup_char_pos(sp.lo());\n        trace!(?lo);\n        let hi = self.lookup_char_pos(sp.hi());\n        trace!(?hi);\n        if lo.file.start_pos != hi.file.start_pos {\n            return Err(SpanLinesError::DistinctSources(Box::new(DistinctSources {\n                begin: (lo.file.name.clone(), lo.file.start_pos),\n                end: (hi.file.name.clone(), hi.file.start_pos),\n            })));\n        }\n        Ok((lo, hi))\n    }"
+            }
+          ]
+        },
+        {
+          "id": "B",
+          "name": "BytePos lookup over multi-byte Unicode character crosses/asserts invalid bounds",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "lookup_char_pos",
+              "file": "compiler/rustc_span/src/source_map.rs",
+              "content": "pub fn lookup_char_pos(&self, pos: BytePos) -> Loc {\n        let sf = self.lookup_source_file(pos);\n        let (line, col, col_display) = sf.lookup_file_pos_with_col_display(pos);\n        Loc { file: sf, line, col, col_display }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "C",
+          "name": "Unicode-unaware handling of fullwidth parentheses in diagnostics pipeline",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "lookup_char_pos",
+              "file": "compiler/rustc_span/src/source_map.rs",
+              "content": "pub fn lookup_char_pos(&self, pos: BytePos) -> Loc {\n        let sf = self.lookup_source_file(pos);\n        let (line, col, col_display) = sf.lookup_file_pos_with_col_display(pos);\n        Loc { file: sf, line, col, col_display }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Type-check error reporting emits diagnostics using malformed span after parse errors",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "is_valid_span",
+              "file": "compiler/rustc_span/src/source_map.rs",
+              "content": "pub fn is_valid_span(&self, sp: Span) -> Result<(Loc, Loc), SpanLinesError> {\n        let lo = self.lookup_char_pos(sp.lo());\n        trace!(?lo);\n        let hi = self.lookup_char_pos(sp.hi());\n        trace!(?hi);\n        if lo.file.start_pos != hi.file.start_pos {\n            return Err(SpanLinesError::DistinctSources(Box::new(DistinctSources {\n                begin: (lo.file.name.clone(), lo.file.start_pos),\n                end: (hi.file.name.clone(), hi.file.start_pos),\n            })));\n        }\n        Ok((lo, hi))\n    }"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "E",
+          "target": "A",
+          "weight": 0.99
+        },
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.98
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.99
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.96
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.94
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 1009.698,
+    "stage_times_sec": {
+      "load_bug_context": 0.007,
+      "checkout": 1.026,
+      "load_or_build_graph": 33.802,
+      "symptom_vertices_locating": 365.064,
+      "dynamic_cig_discovering": 607.711,
+      "convert_results": 0.004
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 13,
+      "input_tokens": 130058,
+      "output_tokens": 1316,
+      "total_tokens": 131374,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.708,
+          "input_tokens": 6815,
+          "output_tokens": 144,
+          "total_tokens": 6959
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.812,
+          "input_tokens": 6143,
+          "output_tokens": 18,
+          "total_tokens": 6161
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.454,
+          "input_tokens": 6973,
+          "output_tokens": 46,
+          "total_tokens": 7019
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.256,
+          "input_tokens": 7033,
+          "output_tokens": 26,
+          "total_tokens": 7059
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.976,
+          "input_tokens": 6184,
+          "output_tokens": 17,
+          "total_tokens": 6201
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 1.853,
+          "input_tokens": 7073,
+          "output_tokens": 44,
+          "total_tokens": 7117
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 1.993,
+          "input_tokens": 7253,
+          "output_tokens": 45,
+          "total_tokens": 7298
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 3.85,
+          "input_tokens": 6265,
+          "output_tokens": 165,
+          "total_tokens": 6430
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 4.053,
+          "input_tokens": 18534,
+          "output_tokens": 136,
+          "total_tokens": 18670
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 4.091,
+          "input_tokens": 12742,
+          "output_tokens": 180,
+          "total_tokens": 12922
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.867,
+          "input_tokens": 14783,
+          "output_tokens": 164,
+          "total_tokens": 14947
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 4.483,
+          "input_tokens": 17822,
+          "output_tokens": 168,
+          "total_tokens": 17990
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 3.378,
+          "input_tokens": 12438,
+          "output_tokens": 163,
+          "total_tokens": 12601
+        }
+      ]
+    }
+  }
+}

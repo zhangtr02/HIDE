@@ -1,0 +1,229 @@
+{
+  "bug_id": "114907",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-06-08",
+    "resolved": "5435ed6916a59e8d5acba2149316a841c3905cbd"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/type_check/input_output.rs",
+    "compiler/rustc_typeck/src/check/closure.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_typeck/src/check/callee.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_infer/src/infer/projection.rs",
+    "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+    "compiler/rustc_typeck/src/check/upvar.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a custom Result alias with an uninhabited Error enum, exercising generic default type parameters and never-constructible error types in trait and closure signatures.",
+        "Implements Read and Write for S, creating a concrete stream type used as the associated InternalStream of a generic HandshakeRole implementation.",
+        "Uses a trait Callback with a blanket impl for any FnOnce(&Request, Response) -> Result<Response>, exercising closure-to-trait matching and higher-order generic bounds.",
+        "Defines HandshakeError<Role> containing MidHandshake<Role>, making error typing depend on a generic role and its associated stream type.",
+        "Implements Debug, Display, and std::error::Error for the generic HandshakeError<Role>, exercising trait impls over role-constrained generic enums.",
+        "ServerHandshake<S, C> implements HandshakeRole with associated type InternalStream = S, tying callback and stream generics into handshake state typing.",
+        "MidHandshake<Role> stores HandshakeMachine<Role::InternalStream>, exercising projection through associated types inside nested generic structs and methods.",
+        "main passes a closure to accept; inside it, another closure callback is passed to accept, stressing nested closure inference, FnOnce satisfaction, and recursive generic type checking."
+      ],
+      "summary": "The reproducer builds a generic handshake API around associated types, blanket closure trait impls, and role-parameterized error/state types. The key exercised path is nested calls to accept using inferred closures, where rustc must resolve FnOnce-based Callback impls, associated type projections, and recursive generic error types together."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a compiler bug in MIR borrow checking or earlier type checking for nested closures with inferred FnOnce signatures under blanket trait impls. The reproducer combines several stressors: a blanket impl of Callback for any FnOnce(&Request, Response) -> Result<Response>, nested closures passed to a generic function accept<C: Callback>, and recursive generic types where HandshakeError<Role> contains MidHandshake<Role>, which in turn projects Role::InternalStream through HandshakeMachine<Role::InternalStream>. The query stack shows the ICE occurs specifically during `mir_borrowck` of `main::{closure#0}`, so type inference/region setup for the outer closure likely produced invalid or inconsistent MIR borrowck inputs. A likely common pattern is that the outer closure passed to `accept` contains an inner closure also passed to `accept`, causing rustc to infer closure kind/signature and normalize associated types through the Callback blanket impl while handling unreachable `todo!()` expressions and the uninhabited default Error type. This suggests a defect in compiler handling of nested closure obligation resolution, upvar/region capture analysis, or normalization of projection-dependent return types before borrow checking.",
+      "possible_causes": [
+        "Bug in MIR borrow checker preparation for nested closures where closure signature is inferred through a blanket trait impl (`impl<F> Callback for F where F: FnOnce(...) -> ...`), leading to invalid region or upvar capture information for `main::{closure#0}`.",
+        "Defect in trait obligation resolution / closure kind inference for `FnOnce` when a closure passed to a generic function contains another inferred closure passed to the same generic function, causing inconsistent inferred types to reach borrowck.",
+        "Incorrect normalization of associated type projections inside recursive generic error/state types (`HandshakeError<Role>` -> `MidHandshake<Role>` -> `Role::InternalStream`) when combined with closure-based trait matching, potentially leaving malformed MIR or typeck results.",
+        "Compiler bug in handling uninhabited/default error types in closure return type inference (`Result<T, E = Error>` with empty enum `Error`), interacting with `todo!()` divergence and causing an ICE instead of a normal type error.",
+        "Failure in region/type checking around nested higher-order function calls where the outer closure must satisfy `Callback` and contains an inner closure with unconstrained argument types, exposing a missing check or bad assumption in borrowck/typeck handoff."
+      ],
+      "evidence": [
+        "ICE occurs during query `mir_borrowck` for `main::{closure#0}`, directly implicating closure MIR borrow checking rather than codegen or linking.",
+        "The reproducer's central construct is nested closures passed to `accept<C: Callback>`, with `Callback` implemented via a blanket `FnOnce` bound, a known stress pattern for closure inference and obligation resolution.",
+        "The generic type graph is recursive and projection-heavy: `HandshakeError<Role>` contains `MidHandshake<Role>`, which contains `HandshakeMachine<Role::InternalStream>`, tying associated type normalization to error typing.",
+        "The outer closure body defines `let callback = |_, _| todo!();` and then calls `accept(callback);`, so rustc must infer the inner closure signature solely from trait matching against `Callback` while type-checking the outer closure.",
+        "Use of `todo!()` introduces diverging expressions, which can mask type constraints and make inference paths more fragile in compiler internals.",
+        "The custom `Result<T, E = Error>` alias with an uninhabited `Error` enum adds unusual return-type structure that may interact badly with closure return inference and generic obligation solving."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1432,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/input_output.rs",
+        "reason": "The ICE occurs during `mir_borrowck` of `main::{closure#0}`, and this file specifically handles closure signature checking/instantiation inside borrowck. The reproducer stresses inferred closure signatures through a blanket `FnOnce`-based trait impl, making this closure-specific borrowck signature reconciliation the most suspicious spot."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/closure.rs",
+        "reason": "The program relies on nested closure inference with almost all types flowing from the `Callback` blanket impl and `accept<C: Callback>`. This file is responsible for inferring closure signatures and kinds from context, so a bad inferred closure signature or kind could later crash MIR borrow checking."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "This is the main MIR type-checking driver used by borrowck and is exactly on the query path reported in the panic. If the handoff from earlier type checking to MIR/NLL is inconsistent for the outer closure body, the bug could be in the central MIR type-checking logic here."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/callee.rs",
+        "reason": "The reproducer centers on calling `accept` with nested closures and forcing rustc to match the closures against callable/trait-based expectations. This file handles call expression typing and deferred/overloaded closure call resolution, so it is a plausible origin for malformed closure call typing that later triggers an ICE in borrowck."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "`Callback` is implemented via a blanket impl for any `FnOnce(&Request, Response) -> Result<Response>`, so trait selection is heavily involved in proving that the outer and inner closures satisfy `Callback`. A bug in selecting or confirming these obligations could leave inconsistent types/projections for later stages."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The generic error/state types use associated type projection (`Role::InternalStream`) nested through `MidHandshake` and `HandshakeError`. Combined with closure-based trait matching, projection normalization/selection here is a strong candidate for producing malformed inferred types that only surface during borrowck."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The reproducer mixes nested closures with projection-heavy generic types, so normalization of associated types and other foldable values is on the critical path. If normalization around closure obligations or projected stream types is incomplete or inconsistent, borrowck can ICE downstream."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/projection.rs",
+        "reason": "This file creates fresh inference vars and projection obligations when associated types cannot be normalized immediately. That behavior is directly relevant to `Role::InternalStream` in a context where closure trait obligations are inferred lazily, making deferred projection handling suspicious."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+        "reason": "If borrowck is trying to relate the inferred closure signature, return type, and projected generic error types, the NLL type relation code here may be where inconsistent closure/projection types turn into an ICE. The nested closure plus associated-type-heavy signature makes type relation logic a plausible failure point."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/upvar.rs",
+        "reason": "Although the closure bodies are simple, the ICE is specifically for the outer closure and nested closure patterns often stress closure environment/capture analysis. If incorrect upvar/capture information was recorded for the outer closure while inferring its `FnOnce` role, borrowck could later panic on that malformed state."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 136.335,
+    "stage_times_sec": {
+      "checkout": 4.324,
+      "load_bug_context": 0.053,
+      "test_behavior_analysis": 7.074,
+      "test_failure_analysis": 13.103,
+      "load_file_candidates": 0.136,
+      "search_suspicious_files": 111.645
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 350878,
+      "output_tokens": 5847,
+      "total_tokens": 356725,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.074,
+          "input_tokens": 920,
+          "output_tokens": 313,
+          "total_tokens": 1233
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.102,
+          "input_tokens": 2752,
+          "output_tokens": 725,
+          "total_tokens": 3477
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.987,
+          "input_tokens": 28477,
+          "output_tokens": 365,
+          "total_tokens": 28842
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.231,
+          "input_tokens": 28054,
+          "output_tokens": 246,
+          "total_tokens": 28300
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.103,
+          "input_tokens": 28242,
+          "output_tokens": 272,
+          "total_tokens": 28514
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.271,
+          "input_tokens": 28256,
+          "output_tokens": 395,
+          "total_tokens": 28651
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.511,
+          "input_tokens": 28305,
+          "output_tokens": 367,
+          "total_tokens": 28672
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.471,
+          "input_tokens": 28288,
+          "output_tokens": 351,
+          "total_tokens": 28639
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.396,
+          "input_tokens": 28308,
+          "output_tokens": 313,
+          "total_tokens": 28621
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.238,
+          "input_tokens": 28035,
+          "output_tokens": 338,
+          "total_tokens": 28373
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.762,
+          "input_tokens": 27561,
+          "output_tokens": 351,
+          "total_tokens": 27912
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.015,
+          "input_tokens": 28103,
+          "output_tokens": 321,
+          "total_tokens": 28424
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.498,
+          "input_tokens": 28040,
+          "output_tokens": 357,
+          "total_tokens": 28397
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.851,
+          "input_tokens": 26718,
+          "output_tokens": 370,
+          "total_tokens": 27088
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.279,
+          "input_tokens": 10819,
+          "output_tokens": 763,
+          "total_tokens": 11582
+        }
+      ]
+    }
+  }
+}

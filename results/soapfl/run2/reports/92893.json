@@ -1,0 +1,244 @@
+{
+  "bug_id": "92893",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-01-13",
+    "resolved": "1bd4fdc943513e1004f498bbf289279c9784fc6f"
+  },
+  "final_top10": [
+    "compiler/rustc_ast_passes/src/feature_gate.rs",
+    "compiler/rustc_parse/src/parser/expr.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+    "compiler/rustc_mir_build/src/build/mod.rs",
+    "compiler/rustc_const_eval/src/transform/check_consts/check.rs",
+    "compiler/rustc_const_eval/src/transform/check_consts/ops.rs",
+    "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_ast_lowering/src/item.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a struct with a default generic type parameter, so `Bug` can be used without explicitly supplying `A`.",
+        "The default type is an array type `[(); N]`, exercising const generics where the array length is a compile-time constant.",
+        "The const expression uses a tuple field access `(let a = (), 1).1`, which embeds a `let` expression inside a type-level constant.",
+        "This relies on unstable inline `let` expressions in expression position, especially inside const-evaluated type contexts.",
+        "The compiler must parse and lower a `let` expression appearing inside a generic default argument, not normal runtime code.",
+        "Type checking must evaluate the array length constant and infer that the tuple’s second field yields `1`.",
+        "Because the struct body simply stores `a: A`, the reproducer isolates front-end handling of the default type expression rather than runtime behavior.",
+        "`main` is empty, so any failure comes from compilation of item definitions, exercising rustc parsing, HIR lowering, and const/type validation."
+      ],
+      "summary": "The reproducer minimizes to a struct whose default generic parameter is an array type sized by a const expression containing an inline `let` and tuple projection. It targets nightly-only language interactions between default generic arguments, const evaluation in types, and parsing/lowering of `let` expressions in nonstandard positions. With no runtime logic, any failure is purely a compiler front-end issue."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on a type-level constant used in a default generic parameter: `A = [(); (let a = (), 1).1]`. This combines several sensitive compiler paths at once: defaulted generic parameters, array-length const evaluation, tuple field projection, and an inline `let` expression in a nonstandard expression context. The query stack shows the ICE occurs while building and const-evaluating the synthetic constant for the default parameter (`Bug::{constant#0}`), not during runtime codegen or borrow checking. That strongly suggests a compiler defect in MIR construction/const-checking for anonymous constants originating from type defaults. The reproducer is especially suspicious because `let` expressions are unstable and usually rejected with E0658, yet rustc continues far enough into MIR/const-eval to panic. This indicates incomplete feature-gating or invalid lowering/qualification of `ExprKind::Let` when it appears inside a type-level anonymous const used for array length computation.",
+      "possible_causes": [
+        "rustc likely mishandles `ExprKind::Let` inside anonymous constants created for default generic type arguments, allowing it to reach MIR building/const-eval instead of being cleanly rejected during feature gating or type checking.",
+        "A defect may exist in HIR lowering or THIR/MIR construction for tuple projection on an expression containing inline `let` in const contexts, producing invalid MIR for `Bug::{constant#0}`.",
+        "Const qualification/evaluation for array length constants may incorrectly assume such expressions are already validated, and panic when encountering a `let` expression node in a type-system constant.",
+        "Well-formedness checking of default generic parameters may be invoking constant simplification on unsupported syntax without guarding against unstable or non-const-valid expression forms.",
+        "There may be a missing diagnostic path for unstable `let` expressions in type-level const contexts, causing rustc to both emit E0658 and still attempt evaluation of the malformed constant, leading to an ICE."
+      ],
+      "evidence": [
+        "The reproducer contains no executable logic; `main` is empty, so the crash must originate from compilation of the item definition and its default generic argument.",
+        "The query stack pinpoints the failing entity as `Bug::{constant#0}`, the compiler-generated anonymous constant for the default type expression.",
+        "The panic occurs through `mir_built`, `mir_const`, `mir_const_qualif`, and `eval_to_const_value_raw`, directly implicating MIR construction and const-evaluation of the type-level constant.",
+        "The default generic parameter uses an array length `[(); N]`, which forces compile-time constant evaluation in the type system.",
+        "The constant expression `(let a = (), 1).1` includes an inline `let` expression plus tuple field access, an unusual and unstable combination for const/type contexts.",
+        "Compiler output references `rustc --explain E0658`, indicating unstable syntax was involved, but the compiler still proceeded into later constant-processing queries and panicked instead of stopping cleanly.",
+        "The behavior summary emphasizes front-end parsing, lowering, and const/type validation interactions, matching the query stack and isolating the bug to compiler production code handling of these phases."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1377,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_ast_passes/src/feature_gate.rs",
+        "reason": "Most suspicious because the reproducer uses unstable inline `let` expressions and the compiler output references E0658, yet compilation proceeds into MIR building and const-eval for the anonymous const. That strongly suggests the feature gate for `let` expressions in this unusual type-level/default-generic context is missing or incomplete here."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/expr.rs",
+        "reason": "The problematic syntax is an expression-form `let` embedded inside a tuple expression in an array-length const. Parsing and early gated-span marking for this nonstandard expression position may be wrong, allowing unsupported syntax to survive too far into later phases."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "If AST feature gating did not stop it, lowering of `ExprKind::Let` inside an anonymous const used in a type default is a likely next failure point. Incorrect HIR lowering for `let` expressions in this unusual context could produce invalid downstream THIR/MIR."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "The query stack starts at `mir_built` for `Bug::{constant#0}`. THIR expression construction is a likely place where a lowered `let` expression inside a const anonymous body is mishandled before MIR construction, especially combined with tuple projection."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/mod.rs",
+        "reason": "This is the MIR construction entry point for const bodies, including anonymous consts like `Bug::{constant#0}`. Since the ICE occurs while building MIR for that synthetic const, this file is a strong candidate for missing rejection or incorrect handling of unsupported THIR forms in const bodies."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/check_consts/check.rs",
+        "reason": "The compiler reaches const checking/qualification after MIR build. If unsupported `let`-expression-origin MIR is not rejected properly in const contexts, this MIR const checker may be assuming invariants that do not hold and triggering the ICE path."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/check_consts/ops.rs",
+        "reason": "This file models which MIR operations are forbidden or unstable in const contexts. A missing operation classification for MIR generated from `let` expressions inside anonymous consts could explain why rustc emits an instability error but still continues into invalid evaluation."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+        "reason": "The query stack includes `eval_to_allocation_raw` and `eval_to_const_value_raw`, so if earlier phases incorrectly permit the const body through, this query-layer const evaluation code may be failing to gracefully reject the malformed constant and instead panicking."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Well-formedness checking triggers simplification/evaluation of the default generic parameter constant, as shown by `check_item_well_formed` in the query stack. This file is relevant because it may be invoking evaluatability on an anonymous const that should have been blocked earlier."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "The reproducer centers on a default generic type parameter on a struct item. Item-level lowering is a plausible source of bugs in how the anonymous const for that default argument is created and attached, especially for unusual const expressions in generic defaults."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 128.655,
+    "stage_times_sec": {
+      "checkout": 1.744,
+      "load_bug_context": 0.224,
+      "test_behavior_analysis": 6.087,
+      "test_failure_analysis": 10.244,
+      "load_file_candidates": 7.206,
+      "search_suspicious_files": 103.15
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 331751,
+      "output_tokens": 6035,
+      "total_tokens": 337786,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.087,
+          "input_tokens": 351,
+          "output_tokens": 295,
+          "total_tokens": 646
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.244,
+          "input_tokens": 2128,
+          "output_tokens": 641,
+          "total_tokens": 2769
+        },
+        {
+          "stage": "file_summary:compiler_rustc_builtin_macros_src_llvm_asm_rs",
+          "latency_sec": 3.958,
+          "input_tokens": 1385,
+          "output_tokens": 220,
+          "total_tokens": 1605
+        },
+        {
+          "stage": "file_summary:compiler_rustc_builtin_macros_src_llvm_asm_rs_repair",
+          "latency_sec": 3.088,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.242,
+          "input_tokens": 27783,
+          "output_tokens": 308,
+          "total_tokens": 28091
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 5.231,
+          "input_tokens": 27402,
+          "output_tokens": 189,
+          "total_tokens": 27591
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.628,
+          "input_tokens": 27575,
+          "output_tokens": 364,
+          "total_tokens": 27939
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.145,
+          "input_tokens": 27510,
+          "output_tokens": 335,
+          "total_tokens": 27845
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.199,
+          "input_tokens": 27524,
+          "output_tokens": 339,
+          "total_tokens": 27863
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 6.673,
+          "input_tokens": 27612,
+          "output_tokens": 320,
+          "total_tokens": 27932
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.817,
+          "input_tokens": 27608,
+          "output_tokens": 400,
+          "total_tokens": 28008
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.547,
+          "input_tokens": 26693,
+          "output_tokens": 364,
+          "total_tokens": 27057
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.323,
+          "input_tokens": 27391,
+          "output_tokens": 359,
+          "total_tokens": 27750
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.677,
+          "input_tokens": 27614,
+          "output_tokens": 207,
+          "total_tokens": 27821
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.488,
+          "input_tokens": 27148,
+          "output_tokens": 376,
+          "total_tokens": 27524
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.831,
+          "input_tokens": 14686,
+          "output_tokens": 382,
+          "total_tokens": 15068
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.323,
+          "input_tokens": 11086,
+          "output_tokens": 716,
+          "total_tokens": 11802
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,236 @@
+{
+  "bug_id": "104005",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-11-04",
+    "resolved": "215e3cd218b83b8a3152d84d92f17109253c25e1"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_infer/src/infer/outlives/verify.rs",
+    "compiler/rustc_trait_selection/src/traits/outlives_bounds.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_infer/src/infer/outlives/components.rs",
+    "compiler/rustc_middle/src/traits/select.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait returning `Box<dyn Display>`, exercising trait objects, dynamic dispatch, and object-safe method use with owned `self`.",
+        "Implements the trait for `(T, Option<&'static T>)` when `T: Display`, combining tuple impls, generic bounds, and a required `'static` reference inside the tuple type.",
+        "`extend_lt` uses a where-clause `(T, Option<U>): Displayable`, relying on trait solving to infer which `U` makes the tuple satisfy the impl.",
+        "Calling `Displayable::display((val, None))` forces `None` to be typed as `Option<U>`, so the compiler must unify it with the impl’s `Option<&'static T>`.",
+        "The call `extend_lt(&String::from(...))` gives `T = &'temporary String`, introducing a non-static borrowed value from a temporary allocation.",
+        "Trait matching can infer `U = &'static T`, which here becomes `&'static &'temporary String`, nesting lifetimes through references.",
+        "That inferred type is ill-formed unless `'temporary: 'static`; the reproducer checks whether rustc incorrectly accepts or mishandles this lifetime requirement.",
+        "It exercises compiler behavior around higher-ranked lifetime validity, well-formedness checking of inferred generic arguments, and trait obligation normalization/selection."
+      ],
+      "summary": "The reproducer builds a trait impl that only exists for tuples containing `Option<&'static T>`, then calls a generic function with a temporary reference. Trait inference must pick a `U` making `(T, Option<U>)` match the impl, producing a nested reference type like `&'static &'temporary String`. That type is not well-formed without extending the temporary lifetime to `'static`. The test targets rustc’s handling of inferred lifetimes, well-formedness checks, and trait selection for generic tuple impls."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer is accepted even though trait resolution appears to satisfy `(T, Option<U>): Displayable` by inferring a `U` that embeds an impossible lifetime relation. The key pattern is that the only available impl is `Displayable for (T, Option<&'static T>)`, while the call site uses `T = &'temporary String` from a temporary. To make the where-clause hold, selection can choose `U = &'static T`, yielding `Option<&'static &'temporary String>`. That nested reference type is only well-formed if `'temporary: 'static`, which is false here. The common theme across the code and behavior is interaction between trait obligation solving, inference of hidden generic arguments from an impl header, normalization/unification of tuple component types, and missing well-formedness/outlives validation on the inferred type. Since compilation succeeds, the likely compiler bug is not in parsing or borrow checking of the explicit code, but in the trait solver / type checker accepting an impl match without re-checking the inferred `U` and its implied lifetime constraints.",
+      "possible_causes": [
+        "Missing well-formedness check after trait matching infers `U = &'static T`, so rustc accepts `&'static &'temporary String` without enforcing the required outlives relation `'temporary: 'static`.",
+        "Trait selection / obligation fulfillment for `(T, Option<U>): Displayable` may be unifying against the impl `(T, Option<&'static T>)` without generating the implied region obligation from the nested reference type.",
+        "The compiler may be dropping or failing to propagate outlives constraints introduced during normalization of the impl header, especially for inferred generic arguments appearing only inside tuple/Option structure.",
+        "Canonicalization or fulfillment of projection/selection obligations may treat the inferred `U` as syntactically matching the impl while skipping WF validation of the instantiated impl arguments.",
+        "A bug in implied-bounds or region-checking for trait obligations could allow an ill-formed type to satisfy a where-clause when the problematic lifetime only arises through inference rather than explicit annotation."
+      ],
+      "evidence": [
+        "The only impl is `impl<T: Display> Displayable for (T, Option<&'static T>)`, so satisfying `(T, Option<U>): Displayable` necessarily requires inferring `U` from `&'static T`.",
+        "At the call site, `T = &'temporary String` because `extend_lt` is invoked with `&String::from(...)`, a borrow of a temporary.",
+        "Substituting that `T` into the impl shape yields an inferred `U` equivalent to `&'static &'temporary String`, introducing nested lifetimes.",
+        "Such a type is ill-formed unless the inner borrow outlives `'static`, i.e. `'temporary: 'static`, which cannot hold for a temporary borrow.",
+        "Despite this, the compiler output shows successful compilation with return code 0, indicating rustc accepted the invalid inference path.",
+        "The reproducer specifically stresses trait solving, generic tuple impl matching, inference of `None` as `Option<U>`, and lifetime well-formedness of inferred generic arguments, aligning the failure with compiler obligation/WF checking rather than user code logic."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1522,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "Most suspicious because the bug appears during confirming a trait impl match for `(T, Option<U>): Displayable` against `impl<T> Displayable for (T, Option<&'static T>)`. This is where impl arguments are instantiated/unified and nested obligations are produced; a missing well-formedness or outlives obligation for inferred `U = &'static T` would let the invalid match succeed."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Candidate assembly/selection may be accepting the impl as applicable without preserving the lifetime constraints implied by the instantiated impl header. Since the reproducer succeeds only if trait solving treats the impl as valid for an ill-formed inferred `U`, the core selection logic is highly suspect."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "The failure strongly suggests missing generation of WF obligations for an inferred generic argument containing nested references and lifetimes. This file is responsible for computing WF obligations from types/trait arguments, so it is a prime place for a skipped `WellFormed` check on the instantiated `&'static &'temporary String`-like type."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "HIR/type-level well-formedness checking should reject ill-formed instantiated types or register the necessary obligations early. If trait matching infers a problematic `U` but no WF obligation is emitted or enforced, the bug could stem from this layer not checking inferred instantiations arising from where-clause satisfaction."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "If the trait solver does create a type-outlives requirement, this file is responsible for lowering it into concrete region constraints. A bug here could drop the implied `'temporary: 'static`-style requirement introduced by the nested reference type, allowing compilation to proceed."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+        "reason": "This layer converts type outlives requirements into verifiable region conditions. The reproducer specifically depends on whether the compiler enforces outlives constraints arising indirectly from an inferred nested reference type, making verification logic a plausible source of the missing check."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/outlives_bounds.rs",
+        "reason": "The issue may involve implied outlives reasoning for types assumed well formed. If this code computes or reinstantiates implied bounds incompletely for the instantiated impl/self type, it could fail to recover the necessary lifetime relationship after trait matching."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The where-clause `(T, Option<U>): Displayable` is central to the bug, and predicate construction/propagation errors could cause the solver to work with an incomplete set of inferred outlives predicates. Less direct than selection/WF code, but still relevant to missing implied constraints."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/components.rs",
+        "reason": "Outlives decomposition of nested reference types like `&'static &'temporary String` may be mishandled, leading downstream logic to miss the inner-lifetime requirement. If the type is decomposed too weakly, the required region relation would never be generated."
+      },
+      {
+        "path": "compiler/rustc_middle/src/traits/select.rs",
+        "reason": "This file defines the cached selection/evaluation results and ambiguity model used by trait resolution. While less likely than the active selection implementation, an issue in how selection results are represented/cached for obligations with inferred lifetimes could contribute to accepting the impl without rechecking WF constraints."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 129.75,
+    "stage_times_sec": {
+      "checkout": 2.77,
+      "load_bug_context": 0.081,
+      "test_behavior_analysis": 7.007,
+      "test_failure_analysis": 10.856,
+      "load_file_candidates": 0.091,
+      "search_suspicious_files": 108.945
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 349025,
+      "output_tokens": 6184,
+      "total_tokens": 355209,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.006,
+          "input_tokens": 507,
+          "output_tokens": 389,
+          "total_tokens": 896
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.856,
+          "input_tokens": 1124,
+          "output_tokens": 657,
+          "total_tokens": 1781
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.0,
+          "input_tokens": 26818,
+          "output_tokens": 462,
+          "total_tokens": 27280
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.964,
+          "input_tokens": 26355,
+          "output_tokens": 298,
+          "total_tokens": 26653
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.27,
+          "input_tokens": 26410,
+          "output_tokens": 317,
+          "total_tokens": 26727
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.473,
+          "input_tokens": 26569,
+          "output_tokens": 339,
+          "total_tokens": 26908
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.008,
+          "input_tokens": 26673,
+          "output_tokens": 347,
+          "total_tokens": 27020
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.813,
+          "input_tokens": 26744,
+          "output_tokens": 392,
+          "total_tokens": 27136
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.124,
+          "input_tokens": 26716,
+          "output_tokens": 331,
+          "total_tokens": 27047
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.655,
+          "input_tokens": 26640,
+          "output_tokens": 359,
+          "total_tokens": 26999
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.66,
+          "input_tokens": 26322,
+          "output_tokens": 339,
+          "total_tokens": 26661
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.024,
+          "input_tokens": 25491,
+          "output_tokens": 317,
+          "total_tokens": 25808
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.384,
+          "input_tokens": 26352,
+          "output_tokens": 333,
+          "total_tokens": 26685
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.126,
+          "input_tokens": 26776,
+          "output_tokens": 175,
+          "total_tokens": 26951
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.537,
+          "input_tokens": 18370,
+          "output_tokens": 346,
+          "total_tokens": 18716
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.879,
+          "input_tokens": 11158,
+          "output_tokens": 783,
+          "total_tokens": 11941
+        }
+      ]
+    }
+  }
+}

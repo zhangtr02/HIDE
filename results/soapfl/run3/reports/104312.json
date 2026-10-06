@@ -1,0 +1,222 @@
+{
+  "bug_id": "104312",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2021-04-26",
+    "resolved": "3709ae324c9daabbdabe048faa6fbedbeccf27ec"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/collect.rs",
+    "compiler/rustc_middle/src/ty/generics.rs",
+    "compiler/rustc_typeck/src/collect/type_of.rs",
+    "compiler/rustc_middle/src/ty/subst.rs",
+    "compiler/rustc_typeck/src/astconv/mod.rs",
+    "compiler/rustc_typeck/src/astconv/generics.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_parse/src/parser/generics.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_typeck/src/check/wfcheck.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Declares a trait with const generics: `Foo<const M: u8, const M: u8 = M>`.",
+        "Uses two const generic parameters with the same identifier `M`, exercising duplicate generic parameter name handling.",
+        "Gives the second const parameter a default value `= M`, referencing another generic parameter in a const default.",
+        "Creates a self/conflicting reference because both const parameters share the same name, stressing name resolution in generic parameter lists.",
+        "Implements the trait for `()` as `impl Foo<2> for () {}`, relying on the defaulted second const argument.",
+        "Tests trait impl matching and substitution when const generic defaults are present.",
+        "Exercises nightly-only const generics support on an older toolchain (`nightly-2021-04-26`).",
+        "Targets compiler validation stages for generic parameter declaration, default const evaluation, and diagnostics instead of runtime behavior."
+      ],
+      "summary": "The reproducer is a minimal compile-time test for const generics. It defines a trait with two const parameters that illegally reuse the same name and gives one a default based on that name, then implements the trait using the defaulted argument. This stresses rustc’s parsing, name resolution, generic parameter validation, const-generic default handling, and trait impl checking on an older nightly compiler."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on malformed const-generic parameter declarations that should be rejected diagnostically, but instead reach trait/impl type collection and trigger an ICE. The reproducer combines three stressors in one generic parameter list: duplicate const parameter names (`M` reused), a default const argument on the second parameter, and a default expression (`= M`) whose name resolution becomes ambiguous/self-referential because both parameters share the same identifier. The compiler does emit user-facing errors (E0403/E0658), so front-end validation partially recognizes the invalid declaration, but later compilation phases still proceed with an inconsistent generic parameter environment. The query stack shows the panic occurs in `impl_trait_ref` while computing the implemented trait for `impl Foo<2> for () {}`, indicating that trait-ref construction or substitution of defaulted const parameters is using corrupted/invalid generic metadata produced during item collection. This strongly suggests a missing error-recovery guard in const-generic generic-parameter validation or in trait-ref lowering for impls with defaulted const arguments.",
+      "possible_causes": [
+        "Bug in generic parameter collection/validation for const generics: duplicate generic parameter names are diagnosed but not fully rejected, leaving multiple const params with the same symbol in the generics table and causing later ambiguity or invalid indexing.",
+        "Defect in name resolution for const generic defaults: the default expression `= M` may resolve against the wrong parameter or create a self-reference when duplicate names exist, producing an invalid lowered const/default that later ICEs during trait impl processing.",
+        "Missing error-recovery in `impl_trait_ref` or related trait-ref lowering code: after earlier errors, the compiler still attempts to instantiate the trait reference for `impl Foo<2> for ()` and incorrectly applies the default const argument from a malformed generic signature.",
+        "Incorrect handling of defaulted const generic arguments in trait impl substitution: `impl Foo<2>` requires filling in the omitted second const parameter, and the substitution logic may assume unique parameter identities/names, which is violated by duplicate `M` parameters.",
+        "Defect in item type collection for traits with invalid const-generic defaults: `collect_mod_item_types` may record partially invalid generic defaults without marking the trait definition unusable, allowing downstream queries to operate on malformed HIR/Ty structures."
+      ],
+      "evidence": [
+        "Reproducer declares `trait Foo<const M: u8, const M: u8 = M> {}`, combining duplicate const param names with a const default referencing `M`.",
+        "Compiler reports E0403 and E0658, showing the invalid construct is recognized, but compilation continues far enough to panic instead of stopping cleanly.",
+        "Query stack pinpoints the ICE at `#0 [impl_trait_ref] computing trait implemented by <impl at src/main.rs:2:1: 2:22>`, so the crash happens while lowering/checking the impl, not during parsing.",
+        "The impl `impl Foo<2> for () {}` omits the second const argument, forcing the compiler to use the defaulted const parameter path.",
+        "`collect_mod_item_types` appears in the query stack before the ICE, consistent with a bug in collecting or lowering trait generics/item types for malformed const-generic declarations.",
+        "Behavior summary explicitly stresses generic declaration validation, default const evaluation, trait impl matching, and substitution for defaulted const arguments on an old nightly with unstable const generics."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1258,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/collect.rs",
+        "reason": "Most suspicious because the ICE happens during `collect_mod_item_types`, and the query stack pinpoints `impl_trait_ref` for the impl. This file drives item-type collection and trait/impl metadata construction, so a missing error-recovery path for malformed const generics with duplicate names could easily surface here."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/generics.rs",
+        "reason": "The bug centers on malformed generic parameter metadata: two const params share the same name and one has a default. This file defines `GenericParamDef` and access to const parameter defaults, making it a likely place where duplicate-name diagnostics do not prevent later invalid generic/default lookup."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect/type_of.rs",
+        "reason": "This file participates in computing item types and handling generic const parameters/default-related lowering. Since the invalid trait definition survives far enough to ICE while building the impl trait ref, incorrect recovery or lowering of the trait’s generic signature/default const could originate here."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/subst.rs",
+        "reason": "`impl Foo<2> for () {}` omits the second const argument, forcing substitution/default filling. If substitution logic assumes unique generic parameter identities and the duplicate `M` names corrupt that assumption, the failure could arise here when constructing generic args for the impl trait ref."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/astconv/mod.rs",
+        "reason": "Trait-ref lowering for `impl Foo<2>` flows through AST/HIR-to-ty conversion. This central astconv layer is a plausible source for mishandling omitted defaulted const args after earlier errors, especially when name resolution/default mapping for generic parameters is inconsistent."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/astconv/generics.rs",
+        "reason": "This file specifically validates and builds generic arguments against expected generic params. Because the impl relies on a defaulted const generic argument and the declaration has duplicate const parameter names, argument counting/kind checking or default application here is highly suspect."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The default expression `= M` inside the generic parameter list requires name resolution in a context made ambiguous by duplicate parameter names. If late resolution resolves the wrong `M` or leaves an invalid partial result after emitting E0403/E0658, downstream type collection could ICE."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/generics.rs",
+        "reason": "The reproducer stresses parsing of const generic parameters, duplicate names, and defaults in the same parameter list. While the parser likely accepts the syntax intentionally, it may construct AST forms that later phases are not prepared to reject cleanly in this edge case."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "AST validation is an early place to reject structurally problematic generic parameter forms before lowering. If duplicate const parameter names with a dependent default are not fully screened here, malformed items can leak into HIR/type collection and cause the later ICE."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "Even though the panic occurs before full checking completes, well-formedness checking is closely involved in validating trait/impl signatures with generics. A missing guard for invalid const-generic defaults or malformed generics environments could contribute to allowing `impl_trait_ref` to proceed on broken metadata."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 127.425,
+    "stage_times_sec": {
+      "checkout": 3.882,
+      "load_bug_context": 0.045,
+      "test_behavior_analysis": 6.099,
+      "test_failure_analysis": 12.829,
+      "load_file_candidates": 2.04,
+      "search_suspicious_files": 102.529
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 14,
+      "input_tokens": 302810,
+      "output_tokens": 5288,
+      "total_tokens": 308098,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.099,
+          "input_tokens": 345,
+          "output_tokens": 274,
+          "total_tokens": 619
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.829,
+          "input_tokens": 2179,
+          "output_tokens": 689,
+          "total_tokens": 2868
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.293,
+          "input_tokens": 27876,
+          "output_tokens": 345,
+          "total_tokens": 28221
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.209,
+          "input_tokens": 27589,
+          "output_tokens": 316,
+          "total_tokens": 27905
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.458,
+          "input_tokens": 27665,
+          "output_tokens": 304,
+          "total_tokens": 27969
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.821,
+          "input_tokens": 27614,
+          "output_tokens": 328,
+          "total_tokens": 27942
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.59,
+          "input_tokens": 27571,
+          "output_tokens": 341,
+          "total_tokens": 27912
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.808,
+          "input_tokens": 27675,
+          "output_tokens": 344,
+          "total_tokens": 28019
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.895,
+          "input_tokens": 27413,
+          "output_tokens": 293,
+          "total_tokens": 27706
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.166,
+          "input_tokens": 26893,
+          "output_tokens": 344,
+          "total_tokens": 27237
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.716,
+          "input_tokens": 27724,
+          "output_tokens": 323,
+          "total_tokens": 28047
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.542,
+          "input_tokens": 27370,
+          "output_tokens": 348,
+          "total_tokens": 27718
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.489,
+          "input_tokens": 14991,
+          "output_tokens": 321,
+          "total_tokens": 15312
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.521,
+          "input_tokens": 9905,
+          "output_tokens": 718,
+          "total_tokens": 10623
+        }
+      ]
+    }
+  }
+}

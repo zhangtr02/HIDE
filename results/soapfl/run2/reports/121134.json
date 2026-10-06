@@ -1,0 +1,251 @@
+{
+  "bug_id": "121134",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-15",
+    "resolved": "ee9c7c940c07d8b67c9a6b2ec930db70dcd23a46"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/astconv/generics.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_infer/src/infer/projection.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/relate/higher_ranked.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_parse/src/parser/generics.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait `Output<'a>` with an associated type, exercising trait resolution over lifetimes and associated type projections.",
+        "Uses an inherent method generic over `O` and `F`, testing method-level generic parameter handling during type checking.",
+        "Includes a malformed where-clause entry `FnOnce:,` to exercise parser recovery and invalid trait-bound diagnostics.",
+        "Uses a higher-ranked trait bound `for<'a> FnOnce(...)`, exercising HRTB parsing and binder handling for closure traits.",
+        "Projects `<F as Output<i32, _>>::Type`, intentionally supplying wrong generic arguments to a trait with one lifetime parameter.",
+        "The projection mixes a concrete type `i32` and inferred placeholder `_`, stressing generic-argument validation and error recovery.",
+        "Calls `do_something_wrapper::<i32, _>(|value| ())`, forcing explicit generic instantiation and closure-type inference despite invalid bounds.",
+        "The reproducer mainly tests rustc’s robustness when parsing and type-checking invalid trait projections inside HRTB closure bounds."
+      ],
+      "summary": "This reproducer constructs an invalid generic method signature around `FnOnce`, HRTBs, and an associated type projection. It intentionally misuses trait generic arguments and includes malformed where-clause syntax, then invokes the method with explicit turbofish and a closure. The goal is to exercise rustc parser recovery, trait-bound checking, projection validation, and inference robustness on erroneous code."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is an ICE during type-checking of `main` after rustc has already emitted ordinary user-facing diagnostics for invalid syntax/type usage. The reproducer combines multiple malformed constructs in a single bound: a recovered bad where-clause item (`FnOnce:,`), an HRTB over `FnOnce`, and an associated type projection `<F as Output<i32, _>>::Type` whose trait arguments are nonsensical for `Output<'a>` (a type supplied where a lifetime is expected, plus an inferred placeholder). The common theme is compiler error-recovery on invalid generic arguments and projection bounds inside a bindered closure-trait obligation. Because the query stack shows the panic in type checking `main`, the likely bug is not parsing itself but later semantic handling: rustc appears to continue processing a malformed projection/trait-ref created during recovery and reaches an internal assumption violation instead of preserving/reusing an error type. In short, invalid trait projection + HRTB + closure-trait bound + parser recovery likely produced an ill-formed `TraitRef`/projection predicate that later typeck/analysis code did not defensively reject.",
+      "possible_causes": [
+        "A defect in type-checking or trait-obligation construction for higher-ranked `FnOnce` bounds, where an error-recovered associated type projection (`<F as Output<i32, _>>::Type`) is still normalized or registered as if well-formed.",
+        "Missing validation/guard in generic-argument checking for trait projections: after detecting that `Output<'a>` received invalid arguments (`i32`, `_`), compiler code may still build a malformed `TraitRef`/alias term instead of replacing it with `Ty::new_error`/an error projection.",
+        "A bug in HRTB binder handling combined with projection predicates, where late-bound lifetime expectations are violated after parser recovery and an internal invariant is broken during typeck of the closure bound.",
+        "Improper recovery from the malformed where-clause entry `FnOnce:,` causing a corrupted or partially synthesized predicate list; later passes may iterate over recovered bounds assuming structurally valid trait bounds.",
+        "Defect in diagnostic recovery for closure traits (`FnOnce`) as traits/trait objects, where earlier E0782/E0191-style diagnostics are emitted but downstream code still attempts to elaborate or normalize the invalid `FnOnce`-based predicate.",
+        "A compiler bug in associated type projection validation under erroneous code paths, especially when `_` placeholders appear in path generic arguments where they are not permitted, leading to an unexpected internal state during analysis/typeck."
+      ],
+      "evidence": [
+        "The compiler emits multiple normal diagnostics first (including E0782 and others), so the source is intentionally invalid and rustc should recover rather than panic.",
+        "The query stack shows the panic during `type-checking main`, indicating the crash occurs in semantic processing after parsing/recovery.",
+        "The reproducer stresses exactly the combination of parser recovery, HRTB, closure traits, and associated type projection: `F: for<'a> FnOnce(<F as Output<i32, _>>::Type)`.",
+        "`Output<'a>` has one lifetime parameter, but the projection uses `Output<i32, _>`, demonstrating invalid generic-argument formation that recovery must handle safely.",
+        "The malformed where-clause item `FnOnce:,` is separately erroneous and suggests recovered predicates may be left in a partially invalid state.",
+        "The reproducer explicitly invokes the method with turbofish and a closure, ensuring rustc actually instantiates and type-checks the problematic signature instead of ignoring it."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1742,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/generics.rs",
+        "reason": "Most suspicious because the reproducer’s core invalidity is malformed generic arguments in a trait projection (`Output<i32, _>` for `Output<'a>`). This file specifically validates generic argument kinds/counts/order and contains recovery for wrong argument kinds and `_` misuse, so a bug here could let an ill-formed trait ref/projection escape into later type checking and ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "This is the main HIR-to-ty conversion path for type syntax, including associated type projections and trait paths. The ICE happens during type checking after diagnostics were emitted, which strongly suggests AST/HIR conversion may be constructing a malformed `ty` for `<F as Output<i32, _>>::Type` instead of substituting an error type."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The reproducer directly exercises associated type projection under erroneous input and inside a `for<'a> FnOnce(...)` bound. If error recovery still builds a projection obligation, projection normalization/selection here is a prime place for an invariant failure on malformed alias terms or trait refs."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "If the invalid projection survives AST conversion, normalization during type checking may recurse into it under a higher-ranked binder. This file handles normalization of foldable values and explicitly deals with escaping bound vars, making it highly relevant to an ICE involving HRTB plus projection."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/projection.rs",
+        "reason": "This file creates deferred projection obligations when an associated type cannot be normalized immediately. A bad recovered projection could be turned into an obligation here instead of being collapsed to an error, leading later inference/trait solving to hit an internal assumption."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "Inference-layer projection caching and normalization are likely involved if the malformed associated type projection is processed past diagnostics. This code is sensitive to projection state and rollback/in-progress invariants, which can ICE on structurally invalid projections from recovery paths."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/higher_ranked.rs",
+        "reason": "The bound `for<'a> FnOnce(...)` means higher-ranked binder instantiation is directly in play. If the malformed projection is embedded in a higher-ranked predicate, binder instantiation or leak-check logic here could mishandle the erroneous term and panic instead of tolerating an error type."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "The query stack points to type-checking `main`, and this file drives body checking and registration of obligations arising from function/method signatures and closure use. It is a plausible integration point where the bad recovered predicate from the method signature is forced and triggers the crash."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Well-formedness checking is a likely phase to touch the invalid trait projection and closure-trait bound after diagnostics. If WF obligation generation assumes the recovered generic arguments are structurally valid, it could ICE while computing obligations for the malformed projection/HRTB combination."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/generics.rs",
+        "reason": "Less likely than typeck/astconv, but still plausible because the malformed where-clause item `FnOnce:,` relies on parser recovery. If recovery synthesizes a partially corrupted predicate/bound list that later passes treat as valid, the root bug could begin here."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 155.041,
+    "stage_times_sec": {
+      "checkout": 0.239,
+      "load_bug_context": 0.05,
+      "test_behavior_analysis": 6.539,
+      "test_failure_analysis": 13.659,
+      "load_file_candidates": 0.11,
+      "search_suspicious_files": 134.444
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 421190,
+      "output_tokens": 6851,
+      "total_tokens": 428041,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.539,
+          "input_tokens": 411,
+          "output_tokens": 291,
+          "total_tokens": 702
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.659,
+          "input_tokens": 2196,
+          "output_tokens": 721,
+          "total_tokens": 2917
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.844,
+          "input_tokens": 27864,
+          "output_tokens": 347,
+          "total_tokens": 28211
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.374,
+          "input_tokens": 27868,
+          "output_tokens": 348,
+          "total_tokens": 28216
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.353,
+          "input_tokens": 27387,
+          "output_tokens": 381,
+          "total_tokens": 27768
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.317,
+          "input_tokens": 27624,
+          "output_tokens": 393,
+          "total_tokens": 28017
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.124,
+          "input_tokens": 27597,
+          "output_tokens": 311,
+          "total_tokens": 27908
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.87,
+          "input_tokens": 28006,
+          "output_tokens": 363,
+          "total_tokens": 28369
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.147,
+          "input_tokens": 27756,
+          "output_tokens": 355,
+          "total_tokens": 28111
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.164,
+          "input_tokens": 27747,
+          "output_tokens": 359,
+          "total_tokens": 28106
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.729,
+          "input_tokens": 27871,
+          "output_tokens": 340,
+          "total_tokens": 28211
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.178,
+          "input_tokens": 27630,
+          "output_tokens": 320,
+          "total_tokens": 27950
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.474,
+          "input_tokens": 27979,
+          "output_tokens": 343,
+          "total_tokens": 28322
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.661,
+          "input_tokens": 27884,
+          "output_tokens": 311,
+          "total_tokens": 28195
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.6,
+          "input_tokens": 28018,
+          "output_tokens": 282,
+          "total_tokens": 28300
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.589,
+          "input_tokens": 27797,
+          "output_tokens": 318,
+          "total_tokens": 28115
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.828,
+          "input_tokens": 15881,
+          "output_tokens": 309,
+          "total_tokens": 16190
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 15.158,
+          "input_tokens": 13674,
+          "output_tokens": 759,
+          "total_tokens": 14433
+        }
+      ]
+    }
+  }
+}

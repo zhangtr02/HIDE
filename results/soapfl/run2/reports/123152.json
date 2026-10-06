@@ -1,0 +1,250 @@
+{
+  "bug_id": "123152",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-03-27",
+    "resolved": "47ecded3525392b77843534bed69b4302f9af8d2"
+  },
+  "final_top10": [
+    "compiler/rustc_ty_utils/src/layout.rs",
+    "compiler/rustc_abi/src/layout.rs",
+    "compiler/rustc_middle/src/mir/tcx.rs",
+    "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+    "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+    "compiler/rustc_mir_dataflow/src/elaborate_drops.rs",
+    "compiler/rustc_const_eval/src/interpret/projection.rs",
+    "compiler/rustc_const_eval/src/interpret/place.rs",
+    "compiler/rustc_hir_analysis/src/check/check.rs",
+    "compiler/rustc_ty_utils/src/ty.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Imports `std::mem::offset_of` and invokes the `offset_of!` macro to compute a field byte offset at compile time.",
+        "Defines generic `C<T>` with two fields of the same type, exercising layout computation for monomorphized generic structs.",
+        "Defines `S` with leading `str`, making `S` a dynamically sized type (DST) because `str` is unsized.",
+        "Uses `Self` inside an inherent `impl S` method, testing name resolution of `Self` in a type argument position.",
+        "Instantiates `C::<Self>` where `Self = S`; this makes the generic struct itself unsized due to containing DST fields.",
+        "Requests the offset of field `w` in `C<S>`, forcing rustc to reason about field layout after an unsized field.",
+        "Exercises compiler checks around field offset computation on types whose layout may be invalid or not fully statically known.",
+        "Even though the method is never called, the item body is type-checked, so the compiler still evaluates the problematic `offset_of!` usage."
+      ],
+      "summary": "The reproducer builds a generic struct and a DST struct `S` containing `str`, then inside `impl S` asks `offset_of!(C::<Self>, w)`. This forces rustc to monomorphize `C<S>` and compute the offset of a field that follows unsized content. It stresses `offset_of!`, DST layout rules, `Self` type resolution, and compile-time type checking of unused methods."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is that the ICE is triggered when `offset_of!` is asked to compute the offset of a field in a monomorphized generic struct whose type argument is a DST (`Self = S`, where `S` contains `str`). This makes `C<S>` effectively invalid for normal sized layout reasoning because both fields become unsized, and the requested field `w` follows unsized content. The reproducer therefore stresses compiler logic that should reject or gracefully diagnose impossible field-offset/layout computation, but instead rustc continues far enough to panic during `mir_drops_elaborated_and_const_checked`. The fact that the failure occurs during MIR drop elaboration/const checking strongly suggests an earlier layout-validity error was not handled defensively, and later compiler code assumed a well-formed sized type/layout when processing the `offset_of!` expansion or generated temporary values.",
+      "possible_causes": [
+        "Missing validation in `offset_of!`/type-checking/layout computation for field offsets on structs instantiated with unsized type parameters, especially when the target field comes after an unsized field.",
+        "Compiler code may incorrectly accept `C<S>` as layout-computable even though substituting `T = S` yields unsized fields in non-tail positions, leading to invalid assumptions later in MIR construction or drop elaboration.",
+        "A bug in layout/query error propagation: rustc likely encounters an invalid or uncomputable layout for `C<Self>` but fails to emit a normal diagnostic and instead panics when later passes request drop elaboration or const evaluation data.",
+        "Incorrect handling of DST field offsets in generic ADTs, where code computing field offsets assumes all prior fields have statically known size and alignment.",
+        "A MIR/drop elaboration defect triggered by the `offset_of!` macro expansion, where temporaries or promoted constants involving an invalid unsized place are processed without guarding against `LayoutError`/unsized-place cases."
+      ],
+      "evidence": [
+        "The reproducer explicitly uses `offset_of!(C::<Self>, w)` where `Self = S` and `S` contains `str`, making the layout DST-related and not fully statically sized.",
+        "`C<T>` has two fields of type `T`; substituting `T = S` means the first field is unsized, so computing the offset of the second field requires impossible/invalid layout reasoning.",
+        "The test behavior explicitly says it forces rustc to reason about a field after unsized content, which is a strong indicator of a layout-validity bug rather than a reproducer bug.",
+        "The compiler output shows an ICE instead of a user-facing type/layout error: `error: the compiler unexpectedly panicked. this is a bug.`",
+        "The query stack ends in `mir_drops_elaborated_and_const_checked` for `offs_in_c_colon`, indicating the panic occurs after the body was accepted far enough for MIR/drop processing, consistent with missing earlier validation or bad error handling.",
+        "The method is never called, yet compilation still crashes while analyzing the item body, showing the fault lies in compile-time handling of the `offset_of!` expression itself."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1765,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_ty_utils/src/layout.rs",
+        "reason": "Most suspicious because the reproducer fundamentally asks rustc to compute layout/field offsets for `C<S>` where `S` is a DST and the queried field follows unsized content. This file is the `layout_of` query provider and is responsible for mapping invalid/unsupported layouts into `LayoutError` instead of letting later passes proceed with broken assumptions."
+      },
+      {
+        "path": "compiler/rustc_abi/src/layout.rs",
+        "reason": "Core low-level layout calculator for aggregates, field placement, and unsized-field rules. A bug here could incorrectly accept or mishandle a struct instantiation like `C<S>` with non-tail unsized fields, producing bogus layout data later consumed by `offset_of!` and MIR passes."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/tcx.rs",
+        "reason": "`offset_of!` lowering and later MIR analyses rely on correct MIR place projection and field-type reasoning. If field projection/type computation does not defensively reject projections into invalid DST layouts, it could feed malformed MIR into drop elaboration."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+        "reason": "The `offset_of!` macro eventually becomes MIR rvalues/constants. This file is a likely spot for incorrect MIR construction for `offset_of` expressions on unsized or layout-invalid types, especially if it assumes field offsets are always computable."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+        "reason": "The ICE happens during `mir_drops_elaborated_and_const_checked`, so this pass is directly on the failing path. It may be assuming well-formed sized layouts for temporaries/places produced by the `offset_of!` expansion and panicking when faced with an invalid unsized place."
+      },
+      {
+        "path": "compiler/rustc_mir_dataflow/src/elaborate_drops.rs",
+        "reason": "Drop elaboration logic in the dataflow layer also reasons about places, subfields, and drop behavior. If invalid MIR containing impossible DST field projections reaches this code, missing guards here could trigger the observed ICE."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/interpret/projection.rs",
+        "reason": "Field-offset computation and const evaluation of projections over DST-like layouts depend on correct projection rules. This file handles projection over fields and unsized metadata, so a bug here could mishandle projecting `w` after unsized content."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/interpret/place.rs",
+        "reason": "Const-eval place formation for unsized types is delicate. Since `offset_of!` is compile-time machinery and the failure happens before runtime, incorrect creation/manipulation of places for invalid unsized aggregate layouts is plausible here."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/check.rs",
+        "reason": "This file performs semantic validation of ADT layout/representation rules and should reject structurally invalid uses before MIR/drop elaboration. A missing legality check for the instantiated generic/DST combination could allow the bad case to escape into later phases."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/ty.rs",
+        "reason": "This file computes structural sizedness constraints for ADTs and is relevant because `C<S>` becomes unsized in a problematic way. If sizedness/unsized-tail reasoning is wrong or not enforced for this instantiated generic case, later layout and MIR code may see an invalid type as acceptable."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 165.962,
+    "stage_times_sec": {
+      "checkout": 1.495,
+      "load_bug_context": 0.093,
+      "test_behavior_analysis": 6.442,
+      "test_failure_analysis": 12.684,
+      "load_file_candidates": 0.11,
+      "search_suspicious_files": 145.138
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 424892,
+      "output_tokens": 6983,
+      "total_tokens": 431875,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.442,
+          "input_tokens": 379,
+          "output_tokens": 316,
+          "total_tokens": 695
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.684,
+          "input_tokens": 2179,
+          "output_tokens": 632,
+          "total_tokens": 2811
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.227,
+          "input_tokens": 27822,
+          "output_tokens": 395,
+          "total_tokens": 28217
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.826,
+          "input_tokens": 27690,
+          "output_tokens": 326,
+          "total_tokens": 28016
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.732,
+          "input_tokens": 27309,
+          "output_tokens": 350,
+          "total_tokens": 27659
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.419,
+          "input_tokens": 27496,
+          "output_tokens": 321,
+          "total_tokens": 27817
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.483,
+          "input_tokens": 27507,
+          "output_tokens": 340,
+          "total_tokens": 27847
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.074,
+          "input_tokens": 27892,
+          "output_tokens": 364,
+          "total_tokens": 28256
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.118,
+          "input_tokens": 27656,
+          "output_tokens": 327,
+          "total_tokens": 27983
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.158,
+          "input_tokens": 27641,
+          "output_tokens": 381,
+          "total_tokens": 28022
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.062,
+          "input_tokens": 27735,
+          "output_tokens": 386,
+          "total_tokens": 28121
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.876,
+          "input_tokens": 27575,
+          "output_tokens": 363,
+          "total_tokens": 27938
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.17,
+          "input_tokens": 27862,
+          "output_tokens": 375,
+          "total_tokens": 28237
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 10.7,
+          "input_tokens": 27698,
+          "output_tokens": 327,
+          "total_tokens": 28025
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 10.738,
+          "input_tokens": 27951,
+          "output_tokens": 347,
+          "total_tokens": 28298
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.738,
+          "input_tokens": 27690,
+          "output_tokens": 386,
+          "total_tokens": 28076
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.502,
+          "input_tokens": 20569,
+          "output_tokens": 335,
+          "total_tokens": 20904
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.287,
+          "input_tokens": 14241,
+          "output_tokens": 712,
+          "total_tokens": 14953
+        }
+      ]
+    }
+  }
+}

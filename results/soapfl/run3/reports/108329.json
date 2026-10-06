@@ -1,0 +1,244 @@
+{
+  "bug_id": "108329",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-02-20",
+    "resolved": "7aa413d59206fd511137728df3d9e0fd377429bd"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_middle/src/ty/abstract_const.rs",
+    "compiler/rustc_ty_utils/src/consts.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_hir_analysis/src/coherence/inherent_impls.rs",
+    "compiler/rustc_hir_analysis/src/impl_wf_check.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly `generic_const_exprs` to use const expressions in type and impl bounds, e.g. `Restriction<{ S > 0 }>: Valid`.",
+        "Implements a type-level boolean witness: only `Restriction<true>` implements `Valid`, encoding the invariant that buffer size `S` must be greater than zero.",
+        "Defines `CircularBuffer<T, const S: usize>` using const generics, storing runtime state in `Vec<T>` and a wraparound cursor index.",
+        "`new()` allocates `Vec::with_capacity(S)` and initializes `index` to `S - 1`, relying on the compile-time `S > 0` constraint.",
+        "`push()` exercises modular arithmetic and overflow-aware index updates with `checked_add(...).unwrap_or(0) % S`, then inserts or overwrites depending on fullness.",
+        "`pop()` tests error propagation with `Err(...)?`, removes the current element, and wraps backward using `checked_sub(...).unwrap_or(S - 1)`.",
+        "Provides separate inherent impl blocks, including a `T: Clone`-gated impl whose `take()` uses slice copying and whose methods depend on trait-bound method resolution.",
+        "The test instantiates `CircularBuffer<String, 5>`, validating const-generic monomorphization, method availability under trait bounds, underflow handling, and basic push/pop behavior."
+      ],
+      "summary": "The reproducer builds a const-generic circular buffer on nightly Rust and enforces `S > 0` through a type-level const-expression bound. It exercises unstable generic const expressions, inherent impl selection with where-clauses, runtime wraparound indexing derived from compile-time constants, and test-time monomorphization for `CircularBuffer<String, 5>`. The test checks capacity/count, `T: Clone`-gated methods, underflow error handling, and simple push/pop correctness."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is heavy interaction between unstable generic const expressions and inherent impl resolution. The code uses a type-level boolean witness `Restriction<{ S > 0 }>: Valid` to constrain an inherent impl for `CircularBuffer<T, S>`, while other inherent impls for the same type are unconstrained or gated by `T: Clone`. Methods inside the constrained impl depend on the const predicate to justify arithmetic like `S - 1` and `% S`. The test then instantiates `CircularBuffer<String, 5>`, forcing rustc to evaluate const expressions, normalize the where-clause predicate, merge method candidates across multiple inherent impl blocks, and monomorphize the impls. The compiler does not emit a normal type-check or const-eval diagnostic; instead it ICEs during the analysis phase with an empty query stack and then panics again while reporting the panic. That strongly suggests a compiler-internal bug in handling const-generic predicates on inherent impls rather than any issue in the reproducer itself.",
+      "possible_causes": [
+        "Bug in trait solving / predicate normalization for `generic_const_exprs` when evaluating an inherent impl where-clause like `Restriction<{ S > 0 }>: Valid`.",
+        "Defect in inherent impl candidate collection or method lookup when multiple impl blocks exist for the same const-generic type and one impl is guarded by a const-expression-based bound.",
+        "Compiler bug in const-evaluating or abstractly normalizing boolean const expressions involving generic parameters (`{ S > 0 }`) inside type arguments used as proof witnesses.",
+        "Failure in well-formedness checking for generic const expressions used to justify arithmetic such as `S - 1` and `% S`, causing an internal inconsistency instead of a user-facing error.",
+        "ICE in monomorphization or obligation fulfillment triggered by combining const-generic impl constraints with additional trait-bounded inherent impls (`T: Clone`) on the same type."
+      ],
+      "evidence": [
+        "The reproducer explicitly enables nightly `#![feature(generic_const_exprs)]`, so the failing path is in unstable const-generic compiler logic.",
+        "The key unusual construct is the inherent impl bound `where Restriction<{ S > 0 }>: Valid`, which requires evaluating and reasoning about a generic const boolean in type checking.",
+        "There are multiple inherent impl blocks for `CircularBuffer<T, {S}>`: one constrained by the const predicate, one unconstrained, and one gated by `T: Clone`, increasing pressure on impl/method resolution logic.",
+        "The code relies on the `S > 0` proof to make expressions like `index: S - 1`, `% S`, and `unwrap_or(S - 1)` meaningful, so rustc must propagate the const bound correctly through analysis.",
+        "The test uses `CircularBuffer<String, 5>` and calls methods from different impl blocks (`new`, `capacity`, `count`, `is_empty`, `pop`, `push`), forcing cross-impl selection and monomorphization.",
+        "Compiler output shows an ICE/abort during `analysis` rather than a regular borrow-check, type-check, or const-eval error, indicating a missing compiler case or broken invariant.",
+        "The query stack is empty and the compiler reports `thread panicked while panicking`, which is consistent with rustc hitting an unexpected internal state while processing diagnostics for the original failure."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1588,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "Most suspicious because the reproducer hinges on `#![feature(generic_const_exprs)]` and a const-expression predicate `Restriction<{ S > 0 }>: Valid`. This file is the trait-selection entry point for deciding whether generic const expressions are evaluatable under the current param-env, including abstract-const expansion and caller-bound matching, which directly matches the failure pattern."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/abstract_const.rs",
+        "reason": "The const predicate `{ S > 0 }` must be represented and expanded as an abstract const during analysis. Bugs in abstract-const expansion or handling of generic parameters inside boolean expressions can easily produce internal inconsistencies before a normal diagnostic is emitted."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This file builds and validates abstract constants from THIR for use by generic const evaluation. Since the reproducer uses a nontrivial abstract const (`S > 0`) inside a type argument and where-clause witness, any bug in constructing or validating that abstract const could surface as an ICE in analysis."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The constrained inherent impl `impl<T, const S: usize> ... where Restriction<{ S > 0 }>: Valid` should be checked for well-formedness during HIR analysis. This file is responsible for generating and normalizing WF obligations for bounds and impl headers, making it a strong candidate for mishandling this const-generic predicate."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Well-formedness obligation generation for types/consts is central to proving that the impl header and its const-expression bound are valid. The reproducer’s mix of generic const expressions and obligations on an inherent impl fits this file’s responsibility closely."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The bug may stem from computing or propagating the impl’s predicates incorrectly, especially the where-clause `Restriction<{ S > 0 }>: Valid`. This file builds generic predicates for items and impls, so an error here could poison later analysis and method resolution across multiple impl blocks."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/coherence/inherent_impls.rs",
+        "reason": "The reproducer stresses inherent impl handling by defining several impl blocks for the same const-generic type, one guarded by a const-expression bound. If inherent impl collection or indexing mishandles const-generic/self-type cases with such predicates, method lookup and analysis could ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/impl_wf_check.rs",
+        "reason": "This file performs early impl well-formedness checking and enforces constraints on impl parameters. Because the failure involves an impl header with a generic const predicate and multiple inherent impl blocks, an early impl-WF bug here is plausible."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "If the ICE arises not from raw const evaluation but from fulfilling the trait obligation `Restriction<{ S > 0 }>: Valid`, the main trait selection logic is a likely site. The reproducer forces obligation fulfillment during impl/method analysis and monomorphization."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+        "reason": "The witness trait obligation on a const-instantiated type may fail during candidate assembly, especially if const normalization or inference leaves the self type in an unexpected form. This file is therefore a secondary but still credible suspect in the trait-solving path."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 152.577,
+    "stage_times_sec": {
+      "checkout": 2.052,
+      "load_bug_context": 0.091,
+      "test_behavior_analysis": 6.674,
+      "test_failure_analysis": 14.531,
+      "load_file_candidates": 0.252,
+      "search_suspicious_files": 128.976
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 395453,
+      "output_tokens": 6799,
+      "total_tokens": 402252,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.674,
+          "input_tokens": 1210,
+          "output_tokens": 391,
+          "total_tokens": 1601
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.531,
+          "input_tokens": 2828,
+          "output_tokens": 695,
+          "total_tokens": 3523
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.252,
+          "input_tokens": 28265,
+          "output_tokens": 380,
+          "total_tokens": 28645
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.235,
+          "input_tokens": 28368,
+          "output_tokens": 316,
+          "total_tokens": 28684
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.505,
+          "input_tokens": 27859,
+          "output_tokens": 332,
+          "total_tokens": 28191
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.448,
+          "input_tokens": 28295,
+          "output_tokens": 350,
+          "total_tokens": 28645
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.49,
+          "input_tokens": 28242,
+          "output_tokens": 343,
+          "total_tokens": 28585
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.557,
+          "input_tokens": 28564,
+          "output_tokens": 371,
+          "total_tokens": 28935
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.456,
+          "input_tokens": 28408,
+          "output_tokens": 361,
+          "total_tokens": 28769
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.348,
+          "input_tokens": 28283,
+          "output_tokens": 344,
+          "total_tokens": 28627
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 13.719,
+          "input_tokens": 28452,
+          "output_tokens": 380,
+          "total_tokens": 28832
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.584,
+          "input_tokens": 27601,
+          "output_tokens": 371,
+          "total_tokens": 27972
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.801,
+          "input_tokens": 28538,
+          "output_tokens": 351,
+          "total_tokens": 28889
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.604,
+          "input_tokens": 28541,
+          "output_tokens": 361,
+          "total_tokens": 28902
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.857,
+          "input_tokens": 28405,
+          "output_tokens": 362,
+          "total_tokens": 28767
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.674,
+          "input_tokens": 9378,
+          "output_tokens": 322,
+          "total_tokens": 9700
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.416,
+          "input_tokens": 14216,
+          "output_tokens": 769,
+          "total_tokens": 14985
+        }
+      ]
+    }
+  }
+}

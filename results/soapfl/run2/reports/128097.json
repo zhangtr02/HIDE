@@ -1,0 +1,503 @@
+{
+  "bug_id": "128097",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-07-22",
+    "resolved": "92c6c03805408a1a261b98013304e9bbf59ee428"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_borrowck/src/lib.rs",
+    "compiler/rustc_borrowck/src/type_check/liveness/mod.rs",
+    "compiler/rustc_borrowck/src/dataflow.rs",
+    "compiler/rustc_mir_build/src/build/scope.rs",
+    "compiler/rustc_mir_build/src/build/matches/mod.rs",
+    "compiler/rustc_middle/src/mir/syntax.rs",
+    "compiler/rustc_mir_transform/src/validate.rs",
+    "compiler/rustc_middle/src/mir/mod.rs",
+    "compiler/rustc_mir_transform/src/simplify.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `explicit_tail_calls`, allowing the experimental `become` syntax for guaranteed tail calls.",
+        "Defines `cut(x: &mut ())`, a recursive function taking a mutable unit reference and returning `()`.",
+        "Creates and immediately pattern-matches `Some(Box::new(()))`, forcing heap allocation and a successful `if let` branch.",
+        "Because the pattern always matches, the branch is unconditional and recursion always continues.",
+        "Uses `become cut(x);` as a tail call, reusing the current frame instead of ordinary recursive call semantics.",
+        "Exercises borrow checking across a tail call by forwarding the same `&mut ()` argument into the recursive invocation.",
+        "Combines control-flow lowering for `if let` with tail-call lowering, testing MIR/codegen handling of an always-taken branch.",
+        "Stresses compiler support for tail-recursive functions with allocations and pattern matching in nightly feature-gated code."
+      ],
+      "summary": "The reproducer is a tiny nightly program that always allocates a boxed unit, matches it with `if let`, and then performs an explicit tail call back into the same function using `become`. It exercises the unstable tail-call feature, recursive control-flow lowering, borrow checking of a reused mutable reference, and compiler handling of tail-call optimization in the presence of pattern matching and heap allocation."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an internal compiler error during the MIR borrow-checking phase, specifically while analyzing `cut`. The reproducer combines several unusual MIR features at once: unstable `explicit_tail_calls`/`become`, self-recursive tail call, forwarding an existing `&mut` borrow into the tail call, and an `if let` on a temporary `Some(Box::new(()))` that creates/destructs temporaries before the tail jump. The query stack shows the panic occurs in `mir_borrowck`, so the bug is most likely not in parsing or codegen but in MIR construction/normalization or borrow-checker handling of tail-call terminators and their interaction with drops, scopes, and mutable borrows. A common theme is that `become` likely introduces a nonstandard control-flow terminator that borrowck or MIR validation does not fully model when temporaries from pattern matching/allocation are still in scope. The recursive forwarding of the same `&mut ()` also suggests a possible aliasing/liveness accounting defect: the current call's mutable borrow may need to be considered consumed/transferred across the tail call, but borrowck may instead treat it as conflicting with local temporaries or as requiring impossible post-dominator/drop semantics. Since the branch is always taken, simplification/CFG assumptions around an always-matching `if let` may also expose an unhandled MIR shape specific to tail-call lowering.",
+      "possible_causes": [
+        "Bug in MIR borrow checker support for the `TailCall`/`become` terminator, especially when reusing an existing `&mut` argument in a self-recursive tail call.",
+        "Incorrect MIR lowering or drop-scope construction for `if let Some(_) = Some(Box::new(()))` combined with `become`, leaving temporaries or drop flags in an inconsistent state before borrow checking.",
+        "Borrowck/liveness analysis does not correctly model that a tail call ends the current frame, causing invalid conflict checks between the forwarded mutable borrow and locals/temporaries from the current frame.",
+        "Defect in region/invalidation analysis for explicit tail calls where a mutable reference passed to `become` is treated like an ordinary call argument rather than a frame-replacing transfer.",
+        "Unimplemented or partially implemented interaction between pattern-match lowering, temporary destruction, and explicit tail-call MIR, leading to ICE instead of a proper diagnostic or successful compilation.",
+        "Possible CFG/postdominator assumption bug triggered by an always-taken `if let` branch ending in `become`, producing MIR borrowck cannot handle."
+      ],
+      "evidence": [
+        "Query stack explicitly says the panic occurs in `mir_borrowck` for `cut`, narrowing the defect to MIR borrow checking or MIR it consumes.",
+        "The reproducer uses nightly-only `#![feature(explicit_tail_calls)]` and `become`, an unstable area likely to have incomplete compiler support.",
+        "`cut(x: &mut ())` forwards the same mutable reference into `become cut(x)`, directly exercising borrow/aliasing rules across a tail call.",
+        "`if let Some(_) = Some(Box::new(()))` introduces a temporary allocation, pattern matching, and drop behavior immediately before the tail call.",
+        "The branch always matches, so the MIR shape is a simplified/unconditional tail-recursive path, which can expose incorrect control-flow or cleanup-edge assumptions.",
+        "No user-code type error is apparent; instead rustc panics internally and asks for an ICE report, indicating a compiler defect rather than reproducer misuse."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1818,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "Most suspicious because the ICE happens during `mir_borrowck`, and this module type-checks MIR terminators/statements while gathering NLL constraints. `become`/tail-call MIR is an unusual terminator shape, and the crash is likely from borrowck MIR type/liveness handling not fully supporting explicit tail calls mixed with temporaries from `if let`."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/lib.rs",
+        "reason": "This is the `mir_borrowck` query entry point named directly in the query stack. If the failure arises while wiring borrow checking over the promoted/body MIR for `cut`, the top-level orchestration here is a prime suspect."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/liveness/mod.rs",
+        "reason": "The reproducer stresses liveness of a forwarded `&mut ()` across a tail call that semantically ends the current frame, while also introducing temporaries from `Some(Box::new(()))`. Incorrect region/live-local computation for call arguments or tail-call exits could ICE here."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/dataflow.rs",
+        "reason": "Borrowck’s composite dataflow must model terminator effects. A `become` terminator may be incompletely integrated, especially regarding active borrows, initialization, and edge effects when the current frame is replaced instead of returning normally."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/scope.rs",
+        "reason": "The `if let Some(_) = Some(Box::new(()))` creates temporaries and drop scopes immediately before `become`. If MIR build constructs incorrect cleanup/drop scope structure for this combination, borrowck can later panic on malformed MIR."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/mod.rs",
+        "reason": "`if let` lowering is handled here. Since the branch is always taken and ends in a tail call, this file is a good candidate for producing an unusual CFG or temporary/drop arrangement that borrowck cannot handle."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/syntax.rs",
+        "reason": "Explicit tail calls require MIR syntax support for a nonstandard terminator. If the MIR representation or invariants around tail-call terminators are incomplete or inconsistent with borrowck expectations, the root bug could be here."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/validate.rs",
+        "reason": "If invalid MIR involving `become` plus scoped temporaries is being produced, validator support may be missing or outdated, allowing bad MIR to reach borrowck and ICE instead of being rejected earlier."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/mod.rs",
+        "reason": "As the central MIR hub, this is plausible if shared MIR helpers, phase assumptions, or body/terminator utilities do not correctly account for explicit tail calls, leading downstream borrowck analyses to mis-handle the body."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/simplify.rs",
+        "reason": "The reproducer’s always-matching `if let` can simplify into a very small CFG ending in `become`. A simplification pass that mishandles successor structure, cleanup edges, or block shape for tail-call terminators could expose borrowck to an unsupported MIR form."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 296.695,
+    "stage_times_sec": {
+      "checkout": 1.551,
+      "load_bug_context": 0.078,
+      "test_behavior_analysis": 5.591,
+      "test_failure_analysis": 13.145,
+      "load_file_candidates": 142.137,
+      "search_suspicious_files": 134.193
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 54,
+      "input_tokens": 462012,
+      "output_tokens": 14794,
+      "total_tokens": 476806,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.59,
+          "input_tokens": 334,
+          "output_tokens": 274,
+          "total_tokens": 608
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.145,
+          "input_tokens": 2080,
+          "output_tokens": 711,
+          "total_tokens": 2791
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_mod_rs",
+          "latency_sec": 5.209,
+          "input_tokens": 1300,
+          "output_tokens": 220,
+          "total_tokens": 1520
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_mod_rs_repair",
+          "latency_sec": 3.246,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:r_rustc_infer_src_error_reporting_infer_nice_region_error_different_lifetimes_rs",
+          "latency_sec": 5.049,
+          "input_tokens": 1374,
+          "output_tokens": 220,
+          "total_tokens": 1594
+        },
+        {
+          "stage": "file_summary:r_rustc_infer_src_error_reporting_infer_nice_region_error_different_lifetimes_rs_repair",
+          "latency_sec": 2.743,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:mpiler_rustc_infer_src_error_reporting_infer_nice_region_error_find_anon_type_rs",
+          "latency_sec": 4.845,
+          "input_tokens": 1356,
+          "output_tokens": 220,
+          "total_tokens": 1576
+        },
+        {
+          "stage": "file_summary:mpiler_rustc_infer_src_error_reporting_infer_nice_region_error_find_anon_type_rs_repair",
+          "latency_sec": 2.897,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:_infer_src_error_reporting_infer_nice_region_error_mismatched_static_lifetime_rs",
+          "latency_sec": 4.369,
+          "input_tokens": 1242,
+          "output_tokens": 220,
+          "total_tokens": 1462
+        },
+        {
+          "stage": "file_summary:_infer_src_error_reporting_infer_nice_region_error_mismatched_static_lifetime_rs_repair",
+          "latency_sec": 2.796,
+          "input_tokens": 255,
+          "output_tokens": 225,
+          "total_tokens": 480
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_nice_region_error_mod_rs",
+          "latency_sec": 4.319,
+          "input_tokens": 1210,
+          "output_tokens": 220,
+          "total_tokens": 1430
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_nice_region_error_mod_rs_repair",
+          "latency_sec": 2.811,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:r_rustc_infer_src_error_reporting_infer_nice_region_error_named_anon_conflict_rs",
+          "latency_sec": 6.164,
+          "input_tokens": 1205,
+          "output_tokens": 220,
+          "total_tokens": 1425
+        },
+        {
+          "stage": "file_summary:r_rustc_infer_src_error_reporting_infer_nice_region_error_named_anon_conflict_rs_repair",
+          "latency_sec": 5.936,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:ler_rustc_infer_src_error_reporting_infer_nice_region_error_placeholder_error_rs",
+          "latency_sec": 3.961,
+          "input_tokens": 1274,
+          "output_tokens": 220,
+          "total_tokens": 1494
+        },
+        {
+          "stage": "file_summary:ler_rustc_infer_src_error_reporting_infer_nice_region_error_placeholder_error_rs_repair",
+          "latency_sec": 2.68,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:_rustc_infer_src_error_reporting_infer_nice_region_error_placeholder_relation_rs",
+          "latency_sec": 4.341,
+          "input_tokens": 976,
+          "output_tokens": 220,
+          "total_tokens": 1196
+        },
+        {
+          "stage": "file_summary:_rustc_infer_src_error_reporting_infer_nice_region_error_placeholder_relation_rs_repair",
+          "latency_sec": 3.846,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:ler_rustc_infer_src_error_reporting_infer_nice_region_error_static_impl_trait_rs",
+          "latency_sec": 4.061,
+          "input_tokens": 1183,
+          "output_tokens": 220,
+          "total_tokens": 1403
+        },
+        {
+          "stage": "file_summary:ler_rustc_infer_src_error_reporting_infer_nice_region_error_static_impl_trait_rs_repair",
+          "latency_sec": 3.609,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:rustc_infer_src_error_reporting_infer_nice_region_error_trait_impl_difference_rs",
+          "latency_sec": 4.588,
+          "input_tokens": 1257,
+          "output_tokens": 220,
+          "total_tokens": 1477
+        },
+        {
+          "stage": "file_summary:rustc_infer_src_error_reporting_infer_nice_region_error_trait_impl_difference_rs_repair",
+          "latency_sec": 4.31,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_nice_region_error_util_rs",
+          "latency_sec": 4.087,
+          "input_tokens": 1284,
+          "output_tokens": 220,
+          "total_tokens": 1504
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_nice_region_error_util_rs_repair",
+          "latency_sec": 2.826,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_note_rs",
+          "latency_sec": 5.034,
+          "input_tokens": 1206,
+          "output_tokens": 220,
+          "total_tokens": 1426
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_note_rs_repair",
+          "latency_sec": 3.351,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_note_and_explain_rs",
+          "latency_sec": 4.249,
+          "input_tokens": 1139,
+          "output_tokens": 220,
+          "total_tokens": 1359
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_note_and_explain_rs_repair",
+          "latency_sec": 5.091,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_region_rs",
+          "latency_sec": 5.269,
+          "input_tokens": 1153,
+          "output_tokens": 220,
+          "total_tokens": 1373
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_region_rs_repair",
+          "latency_sec": 3.082,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_sub_relations_rs",
+          "latency_sec": 4.591,
+          "input_tokens": 1049,
+          "output_tokens": 220,
+          "total_tokens": 1269
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_sub_relations_rs_repair",
+          "latency_sec": 4.189,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_suggest_rs",
+          "latency_sec": 4.707,
+          "input_tokens": 1284,
+          "output_tokens": 220,
+          "total_tokens": 1504
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_infer_suggest_rs_repair",
+          "latency_sec": 3.374,
+          "input_tokens": 255,
+          "output_tokens": 208,
+          "total_tokens": 463
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_error_reporting_mod_rs",
+          "latency_sec": 2.636,
+          "input_tokens": 216,
+          "output_tokens": 117,
+          "total_tokens": 333
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_need_type_info_rs",
+          "latency_sec": 4.757,
+          "input_tokens": 1388,
+          "output_tokens": 220,
+          "total_tokens": 1608
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_need_type_info_rs_repair",
+          "latency_sec": 2.952,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.375,
+          "input_tokens": 27769,
+          "output_tokens": 391,
+          "total_tokens": 28160
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.724,
+          "input_tokens": 27694,
+          "output_tokens": 388,
+          "total_tokens": 28082
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.14,
+          "input_tokens": 27231,
+          "output_tokens": 344,
+          "total_tokens": 27575
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.283,
+          "input_tokens": 27561,
+          "output_tokens": 321,
+          "total_tokens": 27882
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.784,
+          "input_tokens": 27508,
+          "output_tokens": 398,
+          "total_tokens": 27906
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.566,
+          "input_tokens": 27815,
+          "output_tokens": 329,
+          "total_tokens": 28144
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.83,
+          "input_tokens": 27580,
+          "output_tokens": 366,
+          "total_tokens": 27946
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.319,
+          "input_tokens": 27626,
+          "output_tokens": 324,
+          "total_tokens": 27950
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.687,
+          "input_tokens": 27690,
+          "output_tokens": 349,
+          "total_tokens": 28039
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.706,
+          "input_tokens": 27714,
+          "output_tokens": 342,
+          "total_tokens": 28056
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.509,
+          "input_tokens": 27437,
+          "output_tokens": 350,
+          "total_tokens": 27787
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.689,
+          "input_tokens": 27763,
+          "output_tokens": 341,
+          "total_tokens": 28104
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.56,
+          "input_tokens": 27843,
+          "output_tokens": 309,
+          "total_tokens": 28152
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.241,
+          "input_tokens": 27846,
+          "output_tokens": 306,
+          "total_tokens": 28152
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.875,
+          "input_tokens": 27705,
+          "output_tokens": 351,
+          "total_tokens": 28056
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 6.438,
+          "input_tokens": 6574,
+          "output_tokens": 331,
+          "total_tokens": 6905
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.436,
+          "input_tokens": 12811,
+          "output_tokens": 684,
+          "total_tokens": 13495
+        }
+      ]
+    }
+  }
+}

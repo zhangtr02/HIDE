@@ -1,0 +1,3973 @@
+{
+  "bug_id": "129811",
+  "checkout": {
+    "requested": "nightly-2024-08-29",
+    "resolved": "100fde5246bf56f22fb5cc85374dd841296fce0e"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/inline/cycle.rs",
+    "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+    "compiler/rustc_mir_transform/src/coroutine.rs",
+    "compiler/rustc_mir_transform/src/inline.rs",
+    "compiler/rustc_mir_transform/src/shim.rs",
+    "compiler/rustc_ty_utils/src/layout.rs",
+    "compiler/rustc_ty_utils/src/instance.rs",
+    "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+    "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+    "compiler/rustc_middle/src/ty/closure.rs"
+  ],
+  "final_method_top10": [
+    "compiler/rustc_mir_transform/src/coroutine.rs::mir_coroutine_witnesses@1558-1589",
+    "compiler/rustc_ty_utils/src/layout.rs::coroutine_layout@811-1012",
+    "compiler/rustc_mir_transform/src/coroutine.rs::compute_layout@1023-1129",
+    "compiler/rustc_mir_transform/src/coroutine.rs::impl<'tcx> MirPass<'tcx> for StateTransform::run_pass@1626-1799",
+    "compiler/rustc_ty_utils/src/layout.rs::layout_of_uncached@105-685",
+    "compiler/rustc_mir_transform/src/inline.rs::inline@78-112",
+    "compiler/rustc_mir_transform/src/inline.rs::impl<'tcx> Inliner<'tcx>::check_mir_is_available@301-383",
+    "compiler/rustc_mir_transform/src/shim.rs::make_shim@32-166",
+    "compiler/rustc_mir_transform/src/shim.rs::build_drop_shim@214-297",
+    "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::coroutine_by_move_body_def_id@85-233"
+  ],
+  "evidence": {
+    "bug_id": "129811",
+    "execution": {
+      "toolchain": "nightly-2024-08-29",
+      "return_code": 101,
+      "kind": "diagnostic_error",
+      "command": "rustup run nightly-2024-08-29 cargo build",
+      "rustflags": []
+    },
+    "log": {
+      "error_codes": [
+        "E0391"
+      ],
+      "diagnostic_messages": [
+        "cycle detected when optimizing MIR for `orchestrate_simple_crud::{closure#0}::{closure#0}::{closure#0}::{closure#1}`"
+      ],
+      "ice_message": "",
+      "panic_messages": [],
+      "panic_modes": [],
+      "query_stack": [],
+      "compiler_paths_mentioned": [],
+      "source_spans": [
+        {
+          "path": "src/main.rs",
+          "line": 10,
+          "column": 39
+        }
+      ],
+      "rustc_symbols": [],
+      "raw_tail": "=== START 2026-02-02 19:02:15 ===\nBug ID: 129811\nToolchain: nightly-2024-08-29\nSource: /data/zhangtianrong/projects/rustc-cbl/rustcbugs/129811\nRun dir: /data/zhangtianrong/projects/rustc-cbl/run/129811\nCMD: rustup run nightly-2024-08-29 cargo build\n------------------------------------------------------------\n   Compiling bug_129811 v0.1.0 (/data/zhangtianrong/projects/rustc-cbl/run/129811)\nerror[E0391]: cycle detected when optimizing MIR for `orchestrate_simple_crud::{closure#0}::{closure#0}::{closure#0}::{closure#1}`\n  --> src/main.rs:10:39\n   |\n10 |     orchestrate_memd_routing(async || async {}.await).await;\n   |                                       ^^^^^^^^^^^^^^\n   |\n   = note: ...which immediately requires optimizing MIR for `orchestrate_simple_crud::{closure#0}::{closure#0}::{closure#0}::{closure#1}` again\n   = note: cycle used when computing layout of `{async closure body@src/main.rs:10:39: 10:53}`\n   = note: see https://rustc-dev-guide.rust-lang.org/overview.html#queries and https://rustc-dev-guide.rust-lang.org/query.html for more information\n\nFor more information about this error, try `rustc --explain E0391`.\nerror: could not compile `bug_129811` (bin \"bug_129811\") due to 1 previous error\n------------------------------------------------------------\nReturn code: 101\n"
+    },
+    "query_trace": {
+      "availability": "unknown_only",
+      "queries": [],
+      "query_key_samples": [],
+      "query_key_terms": {
+        "def_paths": [],
+        "item_names": [],
+        "type_terms": []
+      },
+      "metadata": {
+        "status": "ok",
+        "event_count": 4408,
+        "named_event_count": 0,
+        "unknown_event_count": 4408,
+        "summary_available": true
+      }
+    }
+  },
+  "stage1": {
+    "candidate_universe_size": 72,
+    "selected_crates": [
+      {
+        "id": "rustc_mir_transform",
+        "reason": "Top match to the observed failure text: the diagnostic is explicitly 'cycle detected when optimizing MIR', and the issue is labeled A-mir-opt. This crate owns MIR-to-MIR processing after MIR construction and assembles the optimization pipeline and related MIR queries, making it the most direct surface trigger for a cycle during MIR optimization of an async-closure body."
+      },
+      {
+        "id": "rustc_mir_build",
+        "reason": "The reproducer is centered on async closures (`#![feature(async_closure)]`) and nested async bodies. This crate builds THIR and lowers typed HIR into MIR, including lowering of closures/async constructs before MIR optimization. If the optimized MIR cycle is caused by malformed or self-referential MIR shape produced for async closures, the bug could originate here upstream of the optimizer."
+      },
+      {
+        "id": "rustc_middle",
+        "reason": "The error note says the optimization cycle is 'used when computing layout of {async closure body ...}', indicating interaction between MIR optimization queries and shared middle-layer queries/types such as MIR ownership, query definitions, and layout-related middle representations. `rustc_middle` is the central crate for MIR, query declarations, and shared semantic structures that connect optimization and layout computation."
+      },
+      {
+        "id": "rustc_ty_utils",
+        "reason": "The diagnostic specifically mentions 'computing layout' of the async closure body. This crate provides type layout and related utility queries, so it is a plausible intermediate layer involved in the cycle between MIR optimization and layout computation for the async-closure-generated type."
+      }
+    ]
+  },
+  "stage2": {
+    "skipped": true,
+    "ablation": "w/o module localization",
+    "candidate_universe_size": 101,
+    "selection_mode": "skipped_module_localization_all_modules_in_selected_crates",
+    "selected_modules": [],
+    "expanded_modules_for_stage3_count": 101,
+    "note": "Stage2 module localization is skipped. Stage3 receives all modules under Stage1-selected crates."
+  },
+  "stage3": {
+    "candidate_universe_size": 252,
+    "candidate_root_files": [
+      "compiler/rustc_mir_transform/src/abort_unwinding_calls.rs",
+      "compiler/rustc_mir_transform/src/add_call_guards.rs",
+      "compiler/rustc_mir_transform/src/add_moves_for_packed_drops.rs",
+      "compiler/rustc_mir_transform/src/add_retag.rs",
+      "compiler/rustc_mir_transform/src/add_subtyping_projections.rs",
+      "compiler/rustc_mir_transform/src/check_alignment.rs",
+      "compiler/rustc_mir_transform/src/check_const_item_mutation.rs",
+      "compiler/rustc_mir_transform/src/check_packed_ref.rs",
+      "compiler/rustc_mir_transform/src/cleanup_post_borrowck.rs",
+      "compiler/rustc_mir_transform/src/copy_prop.rs",
+      "compiler/rustc_mir_transform/src/coroutine.rs",
+      "compiler/rustc_mir_transform/src/cost_checker.rs",
+      "compiler/rustc_mir_transform/src/cross_crate_inline.rs",
+      "compiler/rustc_mir_transform/src/ctfe_limit.rs",
+      "compiler/rustc_mir_transform/src/dataflow_const_prop.rs",
+      "compiler/rustc_mir_transform/src/dead_store_elimination.rs",
+      "compiler/rustc_mir_transform/src/deduce_param_attrs.rs",
+      "compiler/rustc_mir_transform/src/deduplicate_blocks.rs",
+      "compiler/rustc_mir_transform/src/deref_separator.rs",
+      "compiler/rustc_mir_transform/src/dest_prop.rs",
+      "compiler/rustc_mir_transform/src/dump_mir.rs",
+      "compiler/rustc_mir_transform/src/early_otherwise_branch.rs",
+      "compiler/rustc_mir_transform/src/elaborate_box_derefs.rs",
+      "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+      "compiler/rustc_mir_transform/src/errors.rs",
+      "compiler/rustc_mir_transform/src/ffi_unwind_calls.rs",
+      "compiler/rustc_mir_transform/src/function_item_references.rs",
+      "compiler/rustc_mir_transform/src/gvn.rs",
+      "compiler/rustc_mir_transform/src/inline.rs",
+      "compiler/rustc_mir_transform/src/instsimplify.rs",
+      "compiler/rustc_mir_transform/src/jump_threading.rs",
+      "compiler/rustc_mir_transform/src/known_panics_lint.rs",
+      "compiler/rustc_mir_transform/src/large_enums.rs",
+      "compiler/rustc_mir_transform/src/lib.rs",
+      "compiler/rustc_mir_transform/src/lint.rs",
+      "compiler/rustc_mir_transform/src/lower_intrinsics.rs",
+      "compiler/rustc_mir_transform/src/lower_slice_len.rs",
+      "compiler/rustc_mir_transform/src/match_branches.rs",
+      "compiler/rustc_mir_transform/src/mentioned_items.rs",
+      "compiler/rustc_mir_transform/src/multiple_return_terminators.rs",
+      "compiler/rustc_mir_transform/src/nrvo.rs",
+      "compiler/rustc_mir_transform/src/pass_manager.rs",
+      "compiler/rustc_mir_transform/src/prettify.rs",
+      "compiler/rustc_mir_transform/src/promote_consts.rs",
+      "compiler/rustc_mir_transform/src/ref_prop.rs",
+      "compiler/rustc_mir_transform/src/remove_noop_landing_pads.rs",
+      "compiler/rustc_mir_transform/src/remove_place_mention.rs",
+      "compiler/rustc_mir_transform/src/remove_storage_markers.rs",
+      "compiler/rustc_mir_transform/src/remove_uninit_drops.rs",
+      "compiler/rustc_mir_transform/src/remove_unneeded_drops.rs",
+      "compiler/rustc_mir_transform/src/remove_zsts.rs",
+      "compiler/rustc_mir_transform/src/required_consts.rs",
+      "compiler/rustc_mir_transform/src/reveal_all.rs",
+      "compiler/rustc_mir_transform/src/shim.rs",
+      "compiler/rustc_mir_transform/src/simplify.rs",
+      "compiler/rustc_mir_transform/src/simplify_branches.rs",
+      "compiler/rustc_mir_transform/src/simplify_comparison_integral.rs",
+      "compiler/rustc_mir_transform/src/single_use_consts.rs",
+      "compiler/rustc_mir_transform/src/sroa.rs",
+      "compiler/rustc_mir_transform/src/ssa.rs",
+      "compiler/rustc_mir_transform/src/unreachable_enum_branching.rs",
+      "compiler/rustc_mir_transform/src/unreachable_prop.rs",
+      "compiler/rustc_mir_transform/src/validate.rs",
+      "compiler/rustc_mir_build/src/check_unsafety.rs",
+      "compiler/rustc_mir_build/src/errors.rs",
+      "compiler/rustc_mir_build/src/lib.rs",
+      "compiler/rustc_mir_build/src/lints.rs",
+      "compiler/rustc_middle/src/arena.rs",
+      "compiler/rustc_middle/src/error.rs",
+      "compiler/rustc_middle/src/lib.rs",
+      "compiler/rustc_middle/src/lint.rs",
+      "compiler/rustc_middle/src/macros.rs",
+      "compiler/rustc_middle/src/metadata.rs",
+      "compiler/rustc_middle/src/tests.rs",
+      "compiler/rustc_middle/src/thir.rs",
+      "compiler/rustc_middle/src/values.rs",
+      "compiler/rustc_ty_utils/src/abi.rs",
+      "compiler/rustc_ty_utils/src/assoc.rs",
+      "compiler/rustc_ty_utils/src/common_traits.rs",
+      "compiler/rustc_ty_utils/src/consts.rs",
+      "compiler/rustc_ty_utils/src/errors.rs",
+      "compiler/rustc_ty_utils/src/implied_bounds.rs",
+      "compiler/rustc_ty_utils/src/instance.rs",
+      "compiler/rustc_ty_utils/src/layout.rs",
+      "compiler/rustc_ty_utils/src/layout_sanity_check.rs",
+      "compiler/rustc_ty_utils/src/lib.rs",
+      "compiler/rustc_ty_utils/src/needs_drop.rs",
+      "compiler/rustc_ty_utils/src/opaque_types.rs",
+      "compiler/rustc_ty_utils/src/representability.rs",
+      "compiler/rustc_ty_utils/src/sig_types.rs",
+      "compiler/rustc_ty_utils/src/structural_match.rs",
+      "compiler/rustc_ty_utils/src/ty.rs"
+    ],
+    "doc_screening_mode": "per_group_doc_screening",
+    "doc_screened_groups": [
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::abort_unwinding_calls",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/abort_unwinding_calls.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::add_call_guards",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/add_call_guards.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::add_moves_for_packed_drops",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/add_moves_for_packed_drops.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::add_retag",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/add_retag.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::add_subtyping_projections",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/add_subtyping_projections.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::check_alignment",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/check_alignment.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::check_const_item_mutation",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/check_const_item_mutation.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::check_packed_ref",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/check_packed_ref.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::cleanup_post_borrowck",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/cleanup_post_borrowck.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::copy_prop",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/copy_prop.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::coroutine",
+        "candidate_count": 2,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::cost_checker",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/cost_checker.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::coverage",
+        "candidate_count": 9,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/coverage/mod.rs",
+            "reason": "Top candidate because it coordinates the full MIR coverage pass: gathering HIR context, building the coverage graph, extracting spans, computing counters, and injecting MIR statements. Since the failure is a MIR-optimization cycle on an async-closure body, the pass entry point is the most likely place where coverage instrumentation could interact badly with that body shape or trigger the cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coverage/query.rs",
+            "reason": "This file implements coverage-related queries and hooks that decide whether a local definition is instrumented. A query-level hook is a plausible source of recursive compiler activity, especially when the diagnostic says the cycle is hit during MIR optimization and layout computation for the async closure body."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coverage/spans/from_mir.rs",
+            "reason": "This stage reads coverage-relevant spans directly from MIR statements and terminators. Because the bug involves an async closure MIR body, the raw MIR span extraction path is a strong candidate for mishandling that body shape or causing unexpected query interaction while MIR is being optimized."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coverage/spans.rs",
+            "reason": "This file refines MIR-derived spans into final mappings, including closure-hole handling and deduplication. Async closures are exactly the kind of construct that stress span carving and closure-specific span processing, so it is a plausible downstream source of the bad instrumentation that feeds the cycle."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::cross_crate_inline",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/cross_crate_inline.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::ctfe_limit",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/ctfe_limit.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::dataflow_const_prop",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/dataflow_const_prop.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::dead_store_elimination",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/dead_store_elimination.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::deduce_param_attrs",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/deduce_param_attrs.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::deduplicate_blocks",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/deduplicate_blocks.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::deref_separator",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/deref_separator.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::dest_prop",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/dest_prop.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::dump_mir",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/dump_mir.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::early_otherwise_branch",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/early_otherwise_branch.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::elaborate_box_derefs",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/elaborate_box_derefs.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::elaborate_drops",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::errors",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/errors.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::ffi_unwind_calls",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/ffi_unwind_calls.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::function_item_references",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/function_item_references.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::gvn",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/gvn.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::inline",
+        "candidate_count": 2,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/inline.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/inline/cycle.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::instsimplify",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/instsimplify.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::jump_threading",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/jump_threading.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::known_panics_lint",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/known_panics_lint.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::large_enums",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/large_enums.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::lint",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/lint.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::lower_intrinsics",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/lower_intrinsics.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::lower_slice_len",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/lower_slice_len.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::match_branches",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/match_branches.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::mentioned_items",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/mentioned_items.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::multiple_return_terminators",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/multiple_return_terminators.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::nrvo",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/nrvo.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::pass_manager",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/pass_manager.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::prettify",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/prettify.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::promote_consts",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/promote_consts.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::ref_prop",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/ref_prop.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::remove_noop_landing_pads",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/remove_noop_landing_pads.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::remove_place_mention",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/remove_place_mention.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::remove_storage_markers",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/remove_storage_markers.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::remove_uninit_drops",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/remove_uninit_drops.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::remove_unneeded_drops",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/remove_unneeded_drops.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::remove_zsts",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/remove_zsts.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::required_consts",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/required_consts.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::reveal_all",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/reveal_all.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::shim",
+        "candidate_count": 2,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/shim.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/shim/async_destructor_ctor.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::simplify",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/simplify.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::simplify_branches",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/simplify_branches.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::simplify_comparison_integral",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/simplify_comparison_integral.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::single_use_consts",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/single_use_consts.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::sroa",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/sroa.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::ssa",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/ssa.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::unreachable_enum_branching",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/unreachable_enum_branching.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::unreachable_prop",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/unreachable_prop.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::validate",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/validate.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_build::build",
+        "candidate_count": 24,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+            "reason": "Best match for the failing site: this file lowers value-producing THIR expressions into MIR and explicitly handles closure capture borrowing and aggregates. The reproducer fails on an `async || ...` expression, so the async-closure construction path is the most likely place where MIR is shaped into the self-referential form that later cycles during MIR optimization/layout."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+            "reason": "Very relevant to async closures because it resolves upvars and precise capture for closures. The bug involves an async closure body and a layout cycle, so capture-set construction and place projection for closure inputs are a plausible upstream source of the malformed MIR/type interaction."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/scope.rs",
+            "reason": "This file owns scope/drop-tree handling, including coroutine-drop trees for async bodies. Since the diagnostic mentions the cycle is used when computing layout of an async closure body, cleanup and coroutine scope bookkeeping are a plausible contributor to the body shape that feeds layout and optimization queries."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/mod.rs",
+            "reason": "Top-level MIR builder orchestration is less specific than the expression-lowering files, but it wires together the standard lowering pipeline for async closures and decides which subpath constructs the body. If the cycle is introduced by how the builder assembles the async-closure MIR, this is the most likely coordinating entry point."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_build::check_unsafety",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_build/src/check_unsafety.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_build::errors",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_build/src/errors.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_build::lints",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_build/src/lints.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_build::thir",
+        "candidate_count": 10,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+            "reason": "Most likely within this THIR group because the reproducer is entirely expression-driven and centers on nested `async || async {}.await` closure/future construction. This file lowers HIR expressions into THIR, explicitly including closure capture lowering and expression forms needed by MIR construction, so it is the strongest upstream source for malformed/self-referential THIR feeding the later MIR optimization cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+            "reason": "This is the THIR construction entry point for a body (`thir_body`) and coordinates typed HIR-to-THIR lowering for the whole async closure body mentioned in the diagnostic. If the cycle arises from how the async closure body is assembled as a THIR body or from body-wide typing/scope context, this driver is a plausible root file immediately around the expression lowering."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/thir/cx/block.rs",
+            "reason": "The failing span is an async closure body, and this file lowers HIR blocks/statements into THIR blocks/statements. Although the reproducer is simpler than a heavy statement/block case, async bodies still have block structure, so incorrect block/scope lowering could contribute to problematic MIR shape consumed by optimization and layout queries."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/thir/util.rs",
+            "reason": "Less direct than expression/body lowering, but still a plausible intermediate THIR-side contributor because it recovers user-annotated types from typeck results. Since the observed cycle involves optimizing MIR and computing layout of an async closure body, any incorrect type reconstruction feeding THIR for that body could indirectly affect the generated MIR and layout interactions."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::arena",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/arena.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::dep_graph",
+        "candidate_count": 2,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/dep_graph/dep_node.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_middle/src/dep_graph/mod.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::error",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/error.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::hir",
+        "candidate_count": 4,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/hir/map/mod.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_middle/src/hir/mod.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_middle/src/hir/nested_filter.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_middle/src/hir/place.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::hooks",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/hooks/mod.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::infer",
+        "candidate_count": 3,
+        "selection_count": 3,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/infer/canonical.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_middle/src/infer/mod.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_middle/src/infer/unify_key.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::lint",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/lint.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::macros",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/macros.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::metadata",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/metadata.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::middle",
+        "candidate_count": 11,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/middle/lang_items.rs",
+            "reason": "Most relevant within this module group because async closures and MIR lowering depend on closure-kind and Fn-family lang-item plumbing. The bug centers on an async closure body, so helpers that map closure kinds and identify built-in call traits are the closest middle-layer logic to that semantics."
+          },
+          {
+            "id": "compiler/rustc_middle/src/middle/resolve_bound_vars.rs",
+            "reason": "Async closures and their nested async bodies involve late-bound lifetimes, captured lifetime mappings, and opaque-type-related resolution. This file owns the compiler-side results for those bindings, making it a plausible middle-layer participant in a layout/MIR query cycle for an async closure body."
+          },
+          {
+            "id": "compiler/rustc_middle/src/middle/region.rs",
+            "reason": "This file models HIR scope and lifetime relationships used by borrow-checking-style analysis. While not a direct MIR optimization site, async closures introduce complex scope and lifetime interactions, so it is the next most plausible middle-layer file for a cycle involving the body's computed layout."
+          },
+          {
+            "id": "compiler/rustc_middle/src/middle/mod.rs",
+            "reason": "This is the module hub that wires middle-layer providers together, so it is less specific but still relevant as the place where shared middle queries and submodules are registered. If the cycle is exposed through a middle query boundary rather than a single responsibility file, this is the broadest candidate in the group."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::mir",
+        "candidate_count": 27,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/mir/tcx.rs",
+            "reason": "Best fit for the reported MIR cycle because it computes MIR place/rvalue/operator types and spans through `TyCtxt`; those type queries are a plausible path back into layout computation while optimizing the async-closure body, creating the observed query recursion."
+          },
+          {
+            "id": "compiler/rustc_middle/src/mir/query.rs",
+            "reason": "This file defines MIR-derived query result containers, including coroutine layouts and closure region requirements. The bug mentions layout of an async closure body, so MIR query metadata around coroutine/closure analysis is a strong candidate surface for the cycle."
+          },
+          {
+            "id": "compiler/rustc_middle/src/mir/mod.rs",
+            "reason": "Central MIR module wiring and shared IR definitions used throughout optimization. It is less specific than `tcx.rs` or `query.rs`, but it is the main hub for MIR body/phase data that optimization and layout-related queries build on."
+          },
+          {
+            "id": "compiler/rustc_middle/src/mir/traversal.rs",
+            "reason": "MIR optimizations commonly walk CFGs through the standard traversal utilities here, including reverse postorder and reachability. If the cycle is triggered during optimization of the async-closure MIR body, this infrastructure is the next most relevant MIR-side file."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::query",
+        "candidate_count": 5,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/query/plumbing.rs",
+            "reason": "Most directly tied to the observed E0391 cycle: this file provides the runtime query infrastructure, including cycle handling, dep-graph tracking, provider dispatch, and the `TyCtxt` query wrappers that execute and re-enter queries like MIR optimization and layout computation."
+          },
+          {
+            "id": "compiler/rustc_middle/src/query/mod.rs",
+            "reason": "Declares the `rustc_middle` query interface and query metadata. Since the failure is a query cycle while optimizing MIR and computing layout, the query declarations that wire those computations together are a plausible localization point."
+          },
+          {
+            "id": "compiler/rustc_middle/src/query/keys.rs",
+            "reason": "Defines query key types and dep-node construction, plus default spans for diagnostics and cycle reporting. That makes it relevant to a cycle error whose note points at the async-closure body span during query re-entry."
+          },
+          {
+            "id": "compiler/rustc_middle/src/query/erase.rs",
+            "reason": "Implements query result type erasure, including cycle-placeholder-compatible cached forms. It is less directly implicated than query execution or declaration, but still part of the shared query machinery that must represent results during cycles."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::tests",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/tests.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::thir",
+        "candidate_count": 2,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/thir.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_middle/src/thir/visit.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::traits",
+        "candidate_count": 6,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/traits/query.rs",
+            "reason": "Most directly tied to compiler queries in this module: it defines the trait-query payloads and canonical goal aliases for normalization, outlives, and dropck. The reported failure is a query cycle while optimizing MIR and computing layout for an async-closure body, so the query-facing trait payloads are the closest traits-layer surface that could participate in a recursive query path."
+          },
+          {
+            "id": "compiler/rustc_middle/src/traits/solve.rs",
+            "reason": "This file adapts the generic trait-solver API to `TyCtxt` and stores solver-produced constraints. Because the repro involves async closure type inference and an `impl Fn() -> Fut` call that can trigger trait solving and normalization during MIR-related queries, this is the next most plausible traits-layer participant in the cycle."
+          },
+          {
+            "id": "compiler/rustc_middle/src/traits/mod.rs",
+            "reason": "It defines the shared trait-resolution data model and re-exports selection-side results, making it the central traits-layer container for obligation causes and trait-resolution state. It is less query-specific than `query.rs`, but still a plausible place for shared invariants involved in a recursive trait/query interaction."
+          },
+          {
+            "id": "compiler/rustc_middle/src/traits/select.rs",
+            "reason": "This file owns the classic selection-layer result lattice and caching for trait evaluation. That is farther from the reported MIR-layout cycle than the query and solver interfaces, but still relevant because async closure lowering and `Fn`-trait obligations can flow through selection during type checking."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::ty",
+        "candidate_count": 48,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/ty/layout.rs",
+            "reason": "Most direct match to the failure note: the cycle is reported while 'computing layout' of the async closure body. This file owns the rustc-side layout and `FnAbi` query interfaces, so it is the most likely place where a layout query is re-entering through the MIR optimization path."
+          },
+          {
+            "id": "compiler/rustc_middle/src/ty/sty.rs",
+            "reason": "Async closures and coroutine-closure bodies are represented in the core `Ty`/`TyKind` layer, and this file defines many of those type-system structures plus semantic queries on `Ty`. A malformed or self-referential type shape here could feed the layout query into a cycle."
+          },
+          {
+            "id": "compiler/rustc_middle/src/ty/closure.rs",
+            "reason": "The reproducer is specifically about `async_closure`, and this file owns closure and coroutine-closure capture structure, upvar identities, and capture minimization. Bugs in how async-closure captures are modeled can propagate into recursive body types that later trigger layout cycles."
+          },
+          {
+            "id": "compiler/rustc_middle/src/ty/generic_args.rs",
+            "reason": "Async closures rely on synthetic generic arguments and internal argument splitting, and this file implements the packed `GenericArg` machinery plus closure/coroutine synthetic-argument handling. If the async closure's args are assembled incorrectly, the resulting type structure can become self-referential during layout computation."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::util",
+        "candidate_count": 6,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/util/find_self_call.rs",
+            "reason": "Among the `rustc_middle::util` files, this is the only one tied directly to MIR structure: it inspects MIR basic-block terminators and recognizes associated method-call receivers. The bug is a cycle while optimizing MIR for nested async-closure bodies, with the cycle later used during layout computation, so MIR call-shape analysis is the only responsibility here that plausibly participates in async/await closure handling rather than being generic utility or diagnostics plumbing."
+          },
+          {
+            "id": "compiler/rustc_middle/src/util/call_kind.rs",
+            "reason": "This file classifies resolved calls including language-desugared calls such as `await` and carries semantic call information for later consumers. The reproducer is specifically `async || async {}.await`, so desugared-call categorization around `await` is more semantically adjacent to the failing async-closure MIR cycle than the remaining formatting or bug-reporting helpers."
+          },
+          {
+            "id": "compiler/rustc_middle/src/util/mod.rs",
+            "reason": "Although mostly an aggregator, its documented role includes bundling query, extern-query, and hook provider sets. Because the observed failure is an E0391 query cycle involving MIR optimization and layout computation, provider wiring is more relevant than the pure utility files, even if this is still indirect compared with MIR call-analysis helpers."
+          },
+          {
+            "id": "compiler/rustc_middle/src/util/bug.rs",
+            "reason": "This file touches query-system behavior through delayed-bug triggering and diagnostic routing, which gives it a weak connection to cycle reporting. However, the observed issue is a normal compiler query cycle diagnostic rather than an internal bug/panic path, so this is less likely than the MIR and call-classification utilities but still more relevant than unrelated formatting tests/helpers."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_middle::values",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/values.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::abi",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/abi.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::assoc",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/assoc.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::common_traits",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/common_traits.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::consts",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/consts.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::errors",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/errors.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::implied_bounds",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/implied_bounds.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::instance",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/instance.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::layout",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::layout_sanity_check",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/layout_sanity_check.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::needs_drop",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/needs_drop.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::opaque_types",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/opaque_types.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::representability",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/representability.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::sig_types",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/sig_types.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::structural_match",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/structural_match.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::ty",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/ty.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "root",
+        "id": "rustc_mir_transform",
+        "candidate_count": 63,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "reason": "Best match for the async-closure-specific failure. The reproducer is entirely about nested `async ||` bodies, and this pass owns coroutine/async lowering, computes what lives across suspension points, and coordinates coroutine layout semantics. That makes it the most likely place where an async-closure body could trigger a self-referential optimization/layout query cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/inline.rs",
+            "reason": "Secondary candidate because the error is reported while optimizing MIR, and this pass is the main optimization that can re-enter body processing through callsite expansion. Its doc explicitly mentions preventing recursive and cyclic inlining, so it is a plausible surface for a MIR-optimization cycle even if the async-closure/layout wording points more strongly at coroutine lowering."
+          }
+        ]
+      },
+      {
+        "type": "root",
+        "id": "rustc_mir_build",
+        "candidate_count": 4,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_build/src/lib.rs",
+            "reason": "Best upstream match in this group: the bug is a MIR-cycle during optimization on an async closure, and `lib.rs` is the crate entry point that wires MIR construction, THIR lowering, and query providers/hooks together. If the cycle is introduced before `rustc_mir_transform` sees the body, this is the only listed file that plausibly controls the MIR-building pipeline that feeds the optimizer."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/lints.rs",
+            "reason": "Second-best only by proximity to MIR: this file analyzes completed MIR control-flow graphs, so it is the only other candidate here that operates on MIR rather than diagnostics or unsafety checks. It is still less likely than `lib.rs` because the observed failure is a query cycle during MIR optimization, not a MIR lint or recursion analysis issue."
+          }
+        ]
+      },
+      {
+        "type": "root",
+        "id": "rustc_middle",
+        "candidate_count": 9,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_middle/src/values.rs",
+            "reason": "Most directly matches the failure mode: this file implements `Value<TyCtxt>` fallback and the shared logic for reporting recursive type and layout-style cycle errors. The bug message is an `E0391` cycle noted while computing layout of an async-closure body, so this is the `rustc_middle` file most semantically tied to cycle recovery and layout-cycle handling."
+          },
+          {
+            "id": "compiler/rustc_middle/src/lib.rs",
+            "reason": "Crate root for `rustc_middle`, which exposes the shared MIR/query/type infrastructure involved in both MIR optimization and layout computation. It is broader and less specific than `values.rs`, but still plausible because the observed cycle crosses middle-layer query boundaries rather than a single narrow subsystem."
+          }
+        ]
+      },
+      {
+        "type": "root",
+        "id": "rustc_ty_utils",
+        "candidate_count": 16,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs",
+            "reason": "Most direct match to the failure note: the cycle is explicitly reported as being used when computing layout of the async closure body. This file owns Rust type layout computation/validation, so it is the most plausible place where a query dependency or recursive layout path for async closures could be introduced."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/abi.rs",
+            "reason": "Async closures and coroutine-closures are explicitly in this file's scope, and it derives callable signatures from type layout. If the layout cycle is triggered through call-signature computation for the async closure machinery, this is the next most relevant ty-utils file after `layout.rs`."
+          }
+        ]
+      }
+    ],
+    "doc_screened_merged_count": 140,
+    "doc_screened_files": [
+      {
+        "id": "compiler/rustc_mir_transform/src/inline/cycle.rs",
+        "reason": "Most directly aligned with the failure mode: its responsibility is to compute MIR call relationships specifically to avoid query and inlining cycles. The bug is an E0391 cycle while optimizing MIR, so this is the closest cycle-specific surface in the selected scope."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "reason": "Highly relevant to the reproducer’s `async_closure` path. This file builds the synthetic by-move MIR body for `AsyncFnOnce`/`FnOnce` coroutine-closures, which is exactly the kind of async-closure body machinery that can feed a MIR optimization cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "reason": "Owns the main coroutine transformation, including async-closure lowering, suspension-state computation, and coroutine-specific cleanup. Since the diagnostic names an async closure body in the cycle, this pass is a strong upstream candidate."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/inline.rs",
+        "reason": "The main MIR inliner is a common trigger for `optimized_mir` query cycles, and its docs explicitly mention preventing recursive and cyclic inlining through call-history and cycle analysis. That matches the reported cycle during MIR optimization."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/shim.rs",
+        "reason": "Builds synthetic MIR shim bodies, including coroutine-construction shims. Async closures and coroutine-closure lowering often route through shim generation, so this is a plausible source of the body shape that later cycles in optimization."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs",
+        "reason": "The diagnostic says the cycle is used when computing layout of the async closure body. This file is the type-layout computation layer in `rustc_ty_utils`, so it is a direct participant in the reported layout-related cycle."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/instance.rs",
+        "reason": "Resolves monomorphic callable instances for closures, coroutine-closures, and shimmed callables. Because the reproducer is an async closure and the bug involves downstream optimization/layout of that closure body, this is a plausible upstream driver."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+        "reason": "Lowers THIR expressions into MIR rvalues, including closure-related and async-related expression forms. If the async closure body is malformed in a way that later optimization cycles, this lowering path is a likely upstream origin."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+        "reason": "Handles place construction and precise capture resolution for closures. Async closure capture lowering affects the generated MIR body and therefore sits upstream of the optimization-time cycle."
+      },
+      {
+        "id": "compiler/rustc_middle/src/ty/closure.rs",
+        "reason": "Defines the closure and coroutine-closure capture data structures and relationships. Since the issue is specific to async closures and their body layout/optimization, this type-level closure machinery is a reasonable late candidate in the chain."
+      }
+    ],
+    "file_eval_top_k": 10,
+    "method_input_files": [
+      "compiler/rustc_mir_transform/src/inline/cycle.rs",
+      "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+      "compiler/rustc_mir_transform/src/coroutine.rs",
+      "compiler/rustc_mir_transform/src/inline.rs",
+      "compiler/rustc_mir_transform/src/shim.rs",
+      "compiler/rustc_ty_utils/src/layout.rs",
+      "compiler/rustc_ty_utils/src/instance.rs",
+      "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+      "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+      "compiler/rustc_middle/src/ty/closure.rs"
+    ]
+  },
+  "stage4": {
+    "candidate_universe_size": 195,
+    "method_input_files": [
+      "compiler/rustc_mir_transform/src/inline/cycle.rs",
+      "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+      "compiler/rustc_mir_transform/src/coroutine.rs",
+      "compiler/rustc_mir_transform/src/inline.rs",
+      "compiler/rustc_mir_transform/src/shim.rs",
+      "compiler/rustc_ty_utils/src/layout.rs",
+      "compiler/rustc_ty_utils/src/instance.rs",
+      "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+      "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+      "compiler/rustc_middle/src/ty/closure.rs"
+    ],
+    "method_groups": [
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_transform/src/inline/cycle.rs",
+        "group_index": 1,
+        "candidate_count": 2,
+        "selection_count": 2,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_transform/src/inline/cycle.rs::mir_callgraph_reachable@12-148",
+            "file": "compiler/rustc_mir_transform/src/inline/cycle.rs",
+            "item_type": "function",
+            "item_name": "mir_callgraph_reachable",
+            "qualified_name": "mir_callgraph_reachable",
+            "signature": "pub(crate) fn mir_callgraph_reachable<'tcx>( tcx: TyCtxt<'tcx>, (root, target): (ty::Instance<'tcx>, LocalDefId), ) -> bool {",
+            "parent_signature": "",
+            "start_line": 12,
+            "end_line": 148,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 5421,
+              "selected_line_ranges": [
+                "12-148"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/inline/cycle.rs::mir_inliner_callees@150-187",
+            "file": "compiler/rustc_mir_transform/src/inline/cycle.rs",
+            "item_type": "function",
+            "item_name": "mir_inliner_callees",
+            "qualified_name": "mir_inliner_callees",
+            "signature": "pub(crate) fn mir_inliner_callees<'tcx>( tcx: TyCtxt<'tcx>, instance: ty::InstanceKind<'tcx>, ) -> &'tcx [(DefId, GenericArgsRef<'tcx>)] {",
+            "parent_signature": "",
+            "start_line": 150,
+            "end_line": 187,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1415,
+              "selected_line_ranges": [
+                "150-187"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "group_index": 2,
+        "candidate_count": 4,
+        "selection_count": 4,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::coroutine_by_move_body_def_id@85-233",
+            "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+            "item_type": "function",
+            "item_name": "coroutine_by_move_body_def_id",
+            "qualified_name": "coroutine_by_move_body_def_id",
+            "signature": "pub fn coroutine_by_move_body_def_id<'tcx>( tcx: TyCtxt<'tcx>, coroutine_def_id: LocalDefId, ) -> DefId {",
+            "parent_signature": "",
+            "start_line": 85,
+            "end_line": 233,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 6653,
+              "selected_line_ranges": [
+                "85-233"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::tcx@241-244",
+            "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+            "item_type": "method",
+            "item_name": "tcx",
+            "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::tcx",
+            "signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx> { fn tcx(&self) -> TyCtxt<'tcx> {",
+            "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+            "start_line": 241,
+            "end_line": 244,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 113,
+              "selected_line_ranges": [
+                "241-244"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_place@246-307",
+            "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+            "item_type": "method",
+            "item_name": "visit_place",
+            "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_place",
+            "signature": "fn visit_place( &mut self, place: &mut mir::Place<'tcx>, context: mir::visit::PlaceContext, location: mir::Location, ) {",
+            "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+            "start_line": 246,
+            "end_line": 307,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3241,
+              "selected_line_ranges": [
+                "246-307"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_local_decl@309-314",
+            "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+            "item_type": "method",
+            "item_name": "visit_local_decl",
+            "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_local_decl",
+            "signature": "fn visit_local_decl(&mut self, local: mir::Local, local_decl: &mut mir::LocalDecl<'tcx>) {",
+            "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+            "start_line": 309,
+            "end_line": 314,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 257,
+              "selected_line_ranges": [
+                "309-314"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "group_index": 3,
+        "candidate_count": 58,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs::mir_coroutine_witnesses@1558-1589",
+            "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "item_type": "function",
+            "item_name": "mir_coroutine_witnesses",
+            "qualified_name": "mir_coroutine_witnesses",
+            "signature": "pub(crate) fn mir_coroutine_witnesses<'tcx>( tcx: TyCtxt<'tcx>, def_id: LocalDefId, ) -> Option<CoroutineLayout<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 1558,
+            "end_line": 1589,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1330,
+              "selected_line_ranges": [
+                "1558-1589"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Best match to the reported failure note about computing layout of the async closure body: this is the public entry point that gathers coroutine liveness, calls `compute_layout`, and returns the `CoroutineLayout` used by later MIR transform steps."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs::compute_layout@1023-1129",
+            "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "item_type": "function",
+            "item_name": "compute_layout",
+            "qualified_name": "compute_layout",
+            "signature": "fn compute_layout<'tcx>( liveness: LivenessInfo, body: &Body<'tcx>, ) -> ( IndexVec<Local, Option<(Ty<'tcx>, VariantIdx, FieldIdx)>>, CoroutineLayout<'tcx>, IndexVec<BasicBlock, Option<BitSet<Local>>>, ) {",
+            "parent_signature": "",
+            "start_line": 1023,
+            "end_line": 1129,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 4535,
+              "selected_line_ranges": [
+                "1023-1129"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Directly performs coroutine layout construction from liveness info, building the field remap and variant layout that the diagnostic says is involved in the cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs::locals_live_across_suspend_points@752-864",
+            "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "item_type": "function",
+            "item_name": "locals_live_across_suspend_points",
+            "qualified_name": "locals_live_across_suspend_points",
+            "signature": "fn locals_live_across_suspend_points<'tcx>( tcx: TyCtxt<'tcx>, body: &Body<'tcx>, always_live_locals: &BitSet<Local>, movable: bool, ) -> LivenessInfo {",
+            "parent_signature": "",
+            "start_line": 752,
+            "end_line": 864,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 5138,
+              "selected_line_ranges": [
+                "752-864"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Core analysis feeding the layout computation: it runs MIR dataflow to determine which locals stay live across suspension points, so any layout-related cycle would pass through here."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs::impl<'tcx> MirPass<'tcx> for StateTransform::run_pass@1626-1799",
+            "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "item_type": "method",
+            "item_name": "run_pass",
+            "qualified_name": "impl<'tcx> MirPass<'tcx> for StateTransform::run_pass",
+            "signature": "impl<'tcx> MirPass<'tcx> for StateTransform { fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {",
+            "parent_signature": "impl<'tcx> MirPass<'tcx> for StateTransform",
+            "start_line": 1626,
+            "end_line": 1799,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 8005,
+              "selected_line_ranges": [
+                "1626-1799"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Top-level MIR optimization pass for coroutines/async bodies; it orchestrates the exact pipeline that the error says is cycling during MIR optimization, including witness/layout computation and later coroutine rewriting."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs::create_coroutine_resume_function@1377-1465",
+            "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "item_type": "function",
+            "item_name": "create_coroutine_resume_function",
+            "qualified_name": "create_coroutine_resume_function",
+            "signature": "fn create_coroutine_resume_function<'tcx>( tcx: TyCtxt<'tcx>, transform: TransformVisitor<'tcx>, body: &mut Body<'tcx>, can_return: bool, ) {",
+            "parent_signature": "",
+            "start_line": 1377,
+            "end_line": 1465,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3488,
+              "selected_line_ranges": [
+                "1377-1465"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Relevant later-stage coroutine body rewriting that consumes the computed transform/layout state to synthesize the resume function for async coroutines; less direct than the layout helpers, but still part of the same optimization pipeline."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_transform/src/inline.rs",
+        "group_index": 4,
+        "candidate_count": 27,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_transform/src/inline.rs::inline@78-112",
+            "file": "compiler/rustc_mir_transform/src/inline.rs",
+            "item_type": "function",
+            "item_name": "inline",
+            "qualified_name": "inline",
+            "signature": "fn inline<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) -> bool {",
+            "parent_signature": "",
+            "start_line": 78,
+            "end_line": 112,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1160,
+              "selected_line_ranges": [
+                "78-112"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Most directly relevant: it contains the explicit guard that skips inlining into coroutines because their `optimized_mir` is used for layout computation and can create a cycle, which matches the reported MIR-cycle-on-async-closure failure."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/inline.rs::impl<'tcx> Inliner<'tcx>::check_mir_is_available@301-383",
+            "file": "compiler/rustc_mir_transform/src/inline.rs",
+            "item_type": "method",
+            "item_name": "check_mir_is_available",
+            "qualified_name": "impl<'tcx> Inliner<'tcx>::check_mir_is_available",
+            "signature": "fn check_mir_is_available( &self, caller_body: &Body<'tcx>, callee: Instance<'tcx>, ) -> Result<(), &'static str> {",
+            "parent_signature": "impl<'tcx> Inliner<'tcx>",
+            "start_line": 301,
+            "end_line": 383,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3884,
+              "selected_line_ranges": [
+                "301-383"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This method is the inliner’s cycle-avoidance gate. It explicitly handles `caller might be reachable from callee (query cycle avoidance)` and special-cases coroutine-related shims, making it a strong match for an E0391 optimized-MIR cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/inline.rs::impl<'tcx> Inliner<'tcx>::try_inlining@181-299",
+            "file": "compiler/rustc_mir_transform/src/inline.rs",
+            "item_type": "method",
+            "item_name": "try_inlining",
+            "qualified_name": "impl<'tcx> Inliner<'tcx>::try_inlining",
+            "signature": "fn try_inlining( &self, caller_body: &mut Body<'tcx>, callsite: &CallSite<'tcx>, ) -> Result<std::ops::Range<BasicBlock>, &'static str> {",
+            "parent_signature": "impl<'tcx> Inliner<'tcx>",
+            "start_line": 181,
+            "end_line": 299,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 5353,
+              "selected_line_ranges": [
+                "181-299"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Core inlining path: it requests callee MIR via `try_instance_mir`, checks availability, and then inlines. Any recursive optimized-MIR query or cycle around an async closure body would pass through here."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/inline.rs::impl<'tcx> Inliner<'tcx>::process_blocks@132-176",
+            "file": "compiler/rustc_mir_transform/src/inline.rs",
+            "item_type": "method",
+            "item_name": "process_blocks",
+            "qualified_name": "impl<'tcx> Inliner<'tcx>::process_blocks",
+            "signature": "impl<'tcx> Inliner<'tcx> { fn process_blocks(&mut self, caller_body: &mut Body<'tcx>, blocks: Range<BasicBlock>) {",
+            "parent_signature": "impl<'tcx> Inliner<'tcx>",
+            "start_line": 132,
+            "end_line": 176,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1645,
+              "selected_line_ranges": [
+                "132-176"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This drives recursive inlining over the caller body and can re-enter the inliner on newly inlined blocks. It is part of the control flow that could amplify or expose a cycle during MIR optimization."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/inline.rs::impl<'tcx> Inliner<'tcx>::resolve_callsite@385-430",
+            "file": "compiler/rustc_mir_transform/src/inline.rs",
+            "item_type": "method",
+            "item_name": "resolve_callsite",
+            "qualified_name": "impl<'tcx> Inliner<'tcx>::resolve_callsite",
+            "signature": "fn resolve_callsite( &self, caller_body: &Body<'tcx>, bb: BasicBlock, bb_data: &BasicBlockData<'tcx>, ) -> Option<CallSite<'tcx>> {",
+            "parent_signature": "impl<'tcx> Inliner<'tcx>",
+            "start_line": 385,
+            "end_line": 430,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1946,
+              "selected_line_ranges": [
+                "385-430"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the callsite discovery step before inlining. It normalizes and resolves callable instances and filters history, so it is upstream of the recursive MIR query path implicated by the cycle."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_transform/src/shim.rs",
+        "group_index": 5,
+        "candidate_count": 35,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_transform/src/shim.rs::make_shim@32-166",
+            "file": "compiler/rustc_mir_transform/src/shim.rs",
+            "item_type": "function",
+            "item_name": "make_shim",
+            "qualified_name": "make_shim",
+            "signature": "fn make_shim<'tcx>(tcx: TyCtxt<'tcx>, instance: ty::InstanceKind<'tcx>) -> Body<'tcx> {",
+            "parent_signature": "",
+            "start_line": 32,
+            "end_line": 166,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 6348,
+              "selected_line_ranges": [
+                "32-166"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Top-level shim dispatcher for MIR optimization inputs. It selects the coroutine-closure and drop-glue shim paths, and the drop-glue arm explicitly queries `tcx.optimized_mir(...)`, which is the kind of self-referential MIR query pattern implicated by an E0391 cycle during async-closure optimization."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/shim.rs::build_construct_coroutine_by_move_shim@1025-1132",
+            "file": "compiler/rustc_mir_transform/src/shim.rs",
+            "item_type": "function",
+            "item_name": "build_construct_coroutine_by_move_shim",
+            "qualified_name": "build_construct_coroutine_by_move_shim",
+            "signature": "fn build_construct_coroutine_by_move_shim<'tcx>( tcx: TyCtxt<'tcx>, coroutine_closure_def_id: DefId, receiver_by_ref: bool, ) -> Body<'tcx> {",
+            "parent_signature": "",
+            "start_line": 1025,
+            "end_line": 1132,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3990,
+              "selected_line_ranges": [
+                "1025-1132"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Most directly tied to async closures: it constructs the synthetic coroutine-closure MIR body for `ConstructCoroutineInClosureShim`. The reproducer is an `async closure`, so this is the most plausible place where the body shape feeding MIR optimization is created."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/shim.rs::build_call_shim@691-913",
+            "file": "compiler/rustc_mir_transform/src/shim.rs",
+            "item_type": "function",
+            "item_name": "build_call_shim",
+            "qualified_name": "build_call_shim",
+            "signature": "fn build_call_shim<'tcx>( tcx: TyCtxt<'tcx>, instance: ty::InstanceKind<'tcx>, rcvr_adjustment: Option<Adjustment>, call_kind: CallKind<'tcx>, ) -> Body<'tcx> {",
+            "parent_signature": "",
+            "start_line": 691,
+            "end_line": 913,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 8418,
+              "selected_line_ranges": [
+                "691-913"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Builds call shims for `Fn`/`FnMut`/`FnOnce` and related indirect/direct call paths, including async-fn trait handling. Async closures route through these callable-instance shims, so this is a strong upstream candidate for the body and signature that later cycles in MIR optimization."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/shim.rs::build_drop_shim@214-297",
+            "file": "compiler/rustc_mir_transform/src/shim.rs",
+            "item_type": "function",
+            "item_name": "build_drop_shim",
+            "qualified_name": "build_drop_shim",
+            "signature": "fn build_drop_shim<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, ty: Option<Ty<'tcx>>) -> Body<'tcx> {",
+            "parent_signature": "",
+            "start_line": 214,
+            "end_line": 297,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3180,
+              "selected_line_ranges": [
+                "214-297"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Handles `DropGlue`, and for coroutine types it explicitly fetches `tcx.optimized_mir(coroutine_def_id)` before elaborating drops. That makes it a direct participant in optimized-MIR query recursion and a plausible contributor to the reported cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/shim.rs::build_clone_shim@429-452",
+            "file": "compiler/rustc_mir_transform/src/shim.rs",
+            "item_type": "function",
+            "item_name": "build_clone_shim",
+            "qualified_name": "build_clone_shim",
+            "signature": "fn build_clone_shim<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, self_ty: Ty<'tcx>) -> Body<'tcx> {",
+            "parent_signature": "",
+            "start_line": 429,
+            "end_line": 452,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1107,
+              "selected_line_ranges": [
+                "429-452"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Creates clone shims for closures and coroutine closures, delegating to `coroutine_shim` for coroutine types. While less direct than the call/drop paths, it still operates on the same synthetic coroutine bodies and closure state that are central to the async-closure cycle."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_ty_utils/src/layout.rs",
+        "group_index": 6,
+        "candidate_count": 10,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs::layout_of_uncached@105-685",
+            "file": "compiler/rustc_ty_utils/src/layout.rs",
+            "item_type": "function",
+            "item_name": "layout_of_uncached",
+            "qualified_name": "layout_of_uncached",
+            "signature": "fn layout_of_uncached<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 105,
+            "end_line": 685,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 24029,
+              "selected_line_ranges": [
+                "105-685"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Core layout-computation dispatcher. The diagnostic says the cycle is encountered while computing layout of an async closure body, and this function is where `ty::Coroutine`/closure-like types are routed into specialized layout logic and where recursive `layout_of` calls are made."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs::coroutine_layout@811-1012",
+            "file": "compiler/rustc_ty_utils/src/layout.rs",
+            "item_type": "function",
+            "item_name": "coroutine_layout",
+            "qualified_name": "coroutine_layout",
+            "signature": "fn coroutine_layout<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, def_id: hir::def_id::DefId, args: GenericArgsRef<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 811,
+            "end_line": 1012,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 8748,
+              "selected_line_ranges": [
+                "811-1012"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Most directly tied to the reported async-closure path. It constructs the layout for coroutine/async-closure bodies, which matches the error note that the cycle is used when computing layout of `{async closure body ...}`."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs::layout_of@35-80",
+            "file": "compiler/rustc_ty_utils/src/layout.rs",
+            "item_type": "function",
+            "item_name": "layout_of",
+            "qualified_name": "layout_of",
+            "signature": "fn layout_of<'tcx>( tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>, ) -> Result<TyAndLayout<'tcx>, &'tcx LayoutError<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 35,
+            "end_line": 80,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1676,
+              "selected_line_ranges": [
+                "35-80"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Public query entry point for type layout. Even though it is a thin wrapper, the reported failure is a layout query cycle, so this is the top-level method that can re-enter cached layout computation and surface the recursion."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs::univariant_uninterned@89-103",
+            "file": "compiler/rustc_ty_utils/src/layout.rs",
+            "item_type": "function",
+            "item_name": "univariant_uninterned",
+            "qualified_name": "univariant_uninterned",
+            "signature": "fn univariant_uninterned<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, fields: &IndexSlice<FieldIdx, Layout<'_>>, repr: &ReprOptions, kind: StructKind, ) -> Result<LayoutS<FieldIdx, VariantIdx>, &'tcx LayoutError<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 89,
+            "end_line": 103,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 528,
+              "selected_line_ranges": [
+                "89-103"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Shared helper used by `layout_of_uncached` and `coroutine_layout` to build packed field layouts. It sits on the direct path that assembles the coroutine body layout and can participate in recursive field-layout evaluation."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs::coroutine_saved_local_eligibility@715-808",
+            "file": "compiler/rustc_ty_utils/src/layout.rs",
+            "item_type": "function",
+            "item_name": "coroutine_saved_local_eligibility",
+            "qualified_name": "coroutine_saved_local_eligibility",
+            "signature": "fn coroutine_saved_local_eligibility( info: &CoroutineLayout<'_>, ) -> (BitSet<CoroutineSavedLocal>, IndexVec<CoroutineSavedLocal, SavedLocalEligibility>) {",
+            "parent_signature": "",
+            "start_line": 715,
+            "end_line": 808,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3992,
+              "selected_line_ranges": [
+                "715-808"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Coroutine-layout helper used to decide which saved locals are promoted or overlapped. It is part of the async-coroutine layout pipeline that feeds the failing layout computation, so it is the next most relevant method in this file."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_ty_utils/src/instance.rs",
+        "group_index": 7,
+        "candidate_count": 3,
+        "selection_count": 3,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_ty_utils/src/instance.rs::resolve_instance_raw@18-92",
+            "file": "compiler/rustc_ty_utils/src/instance.rs",
+            "item_type": "function",
+            "item_name": "resolve_instance_raw",
+            "qualified_name": "resolve_instance_raw",
+            "signature": "fn resolve_instance_raw<'tcx>( tcx: TyCtxt<'tcx>, key: ty::ParamEnvAnd<'tcx, (DefId, GenericArgsRef<'tcx>)>, ) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {",
+            "parent_signature": "",
+            "start_line": 18,
+            "end_line": 92,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 2921,
+              "selected_line_ranges": [
+                "18-92"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/instance.rs::resolve_associated_item@94-379",
+            "file": "compiler/rustc_ty_utils/src/instance.rs",
+            "item_type": "function",
+            "item_name": "resolve_associated_item",
+            "qualified_name": "resolve_associated_item",
+            "signature": "fn resolve_associated_item<'tcx>( tcx: TyCtxt<'tcx>, trait_item_id: DefId, param_env: ty::ParamEnv<'tcx>, trait_id: DefId, rcvr_args: GenericArgsRef<'tcx>, ) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {",
+            "parent_signature": "",
+            "start_line": 94,
+            "end_line": 379,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 14125,
+              "selected_line_ranges": [
+                "94-379"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/instance.rs::provide@381-383",
+            "file": "compiler/rustc_ty_utils/src/instance.rs",
+            "item_type": "function",
+            "item_name": "provide",
+            "qualified_name": "provide",
+            "signature": "pub(crate) fn provide(providers: &mut Providers) {",
+            "parent_signature": "",
+            "start_line": 381,
+            "end_line": 383,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 119,
+              "selected_line_ranges": [
+                "381-383"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+        "group_index": 8,
+        "candidate_count": 7,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::as_rvalue@40-551",
+            "file": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+            "item_type": "method",
+            "item_name": "as_rvalue",
+            "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::as_rvalue",
+            "signature": "pub(crate) fn as_rvalue( &mut self, mut block: BasicBlock, scope: Option<region::Scope>, expr_id: ExprId, ) -> BlockAnd<Rvalue<'tcx>> {",
+            "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+            "start_line": 40,
+            "end_line": 551,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 23099,
+              "selected_line_ranges": [
+                "40-551"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Main THIR-to-MIR rvalue lowering entrypoint in this file; it handles the expression forms that shape the async closure body before optimization, making it the strongest upstream candidate for a MIR-cycle-triggering body shape."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::limit_capture_mutability@742-820",
+            "file": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+            "item_type": "method",
+            "item_name": "limit_capture_mutability",
+            "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::limit_capture_mutability",
+            "signature": "fn limit_capture_mutability( &mut self, upvar_span: Span, upvar_ty: Ty<'tcx>, temp_lifetime: Option<region::Scope>, mut block: BasicBlock, arg: ExprId, ) -> BlockAnd<Operand<'tcx>> {",
+            "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+            "start_line": 742,
+            "end_line": 820,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3329,
+              "selected_line_ranges": [
+                "742-820"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Directly lowers closure/upvar captures by constructing borrowed places and tracking mutability; async-closure capture lowering is the most issue-relevant path in this file."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::build_binary_op@553-703",
+            "file": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+            "item_type": "method",
+            "item_name": "build_binary_op",
+            "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::build_binary_op",
+            "signature": "pub(crate) fn build_binary_op( &mut self, mut block: BasicBlock, op: BinOp, span: Span, ty: Ty<'tcx>, lhs: Operand<'tcx>, rhs: Operand<'tcx>, ) -> BlockAnd<Rvalue<'tcx>> {",
+            "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+            "start_line": 553,
+            "end_line": 703,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 6685,
+              "selected_line_ranges": [
+                "553-703"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Implements MIR lowering for arithmetic with overflow/division checks and can consult layout-sensitive helpers; less directly tied to the reproducer, but still a substantial lowering path that can influence generated MIR and query dependencies."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::neg_1_literal@823-829",
+            "file": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+            "item_type": "method",
+            "item_name": "neg_1_literal",
+            "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::neg_1_literal",
+            "signature": "fn neg_1_literal(&mut self, span: Span, ty: Ty<'tcx>) -> Operand<'tcx> {",
+            "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+            "start_line": 823,
+            "end_line": 829,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 329,
+              "selected_line_ranges": [
+                "823-829"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Computes a signed `-1` literal via `layout_of`, so it touches the same layout query machinery mentioned in the cycle note and is a plausible contributor to query recursion in MIR construction."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::minval_literal@832-840",
+            "file": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+            "item_type": "method",
+            "item_name": "minval_literal",
+            "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::minval_literal",
+            "signature": "fn minval_literal(&mut self, span: Span, ty: Ty<'tcx>) -> Operand<'tcx> {",
+            "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+            "start_line": 832,
+            "end_line": 840,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 381,
+              "selected_line_ranges": [
+                "832-840"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Computes signed minimum-value literals through `layout_of`; like `neg_1_literal`, it is a layout-dependent helper that can participate in the cycle-inducing query chain."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+        "group_index": 9,
+        "candidate_count": 30,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::expr_as_place@413-576",
+            "file": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+            "item_type": "method",
+            "item_name": "expr_as_place",
+            "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::expr_as_place",
+            "signature": "fn expr_as_place( &mut self, mut block: BasicBlock, expr_id: ExprId, mutability: Mutability, fake_borrow_temps: Option<&mut Vec<Local>>, ) -> BlockAnd<PlaceBuilder<'tcx>> {",
+            "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+            "start_line": 413,
+            "end_line": 576,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 6968,
+              "selected_line_ranges": [
+                "413-576"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Top-level lowering entry for THIR expressions into MIR places. It is the main dispatch point that recognizes `ExprKind::UpvarRef`, `ExprKind::Closure`, indexing, and other place-forming expressions, so it sits closest to the async-closure capture path that can feed a bad MIR shape into later optimization."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::lower_captured_upvar@581-588",
+            "file": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+            "item_type": "method",
+            "item_name": "lower_captured_upvar",
+            "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::lower_captured_upvar",
+            "signature": "fn lower_captured_upvar( &mut self, block: BasicBlock, closure_def_id: LocalDefId, var_hir_id: LocalVarId, ) -> BlockAnd<PlaceBuilder<'tcx>> {",
+            "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+            "start_line": 581,
+            "end_line": 588,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 275,
+              "selected_line_ranges": [
+                "581-588"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Directly constructs `PlaceBase::Upvar` for captured variables. The reproducer is an async closure, and captured upvars are the key input to closure-body MIR lowering, making this a likely upstream source for the cycle-triggering body."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs::impl<'tcx> PlaceBuilder<'tcx>::resolve_upvar@287-295",
+            "file": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+            "item_type": "method",
+            "item_name": "resolve_upvar",
+            "qualified_name": "impl<'tcx> PlaceBuilder<'tcx>::resolve_upvar",
+            "signature": "pub(in crate::build) fn resolve_upvar( &self, cx: &Builder<'_, 'tcx>, ) -> Option<PlaceBuilder<'tcx>> {",
+            "parent_signature": "impl<'tcx> PlaceBuilder<'tcx>",
+            "start_line": 287,
+            "end_line": 295,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 339,
+              "selected_line_ranges": [
+                "287-295"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Resolves an upvar place builder back into a concrete `Place`. Because the bug is tied to closure-body MIR and capture resolution, this method is part of the critical path that turns captured variables into actual MIR places consumed by later passes."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs::to_upvars_resolved_place_builder@172-211",
+            "file": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+            "item_type": "function",
+            "item_name": "to_upvars_resolved_place_builder",
+            "qualified_name": "to_upvars_resolved_place_builder",
+            "signature": "fn to_upvars_resolved_place_builder<'tcx>( cx: &Builder<'_, 'tcx>, var_hir_id: LocalVarId, closure_def_id: LocalDefId, projection: &[PlaceElem<'tcx>], ) -> Option<PlaceBuilder<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 172,
+            "end_line": 211,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1494,
+              "selected_line_ranges": [
+                "172-211"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Performs the core upvar-to-place translation, including capture lookup and reconstruction of the remaining projections. This is the most semantically important helper for precise capture handling, which is directly relevant to async-closure lowering and any self-referential MIR shape it may create."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs::find_capture_matching_projections@155-167",
+            "file": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+            "item_type": "function",
+            "item_name": "find_capture_matching_projections",
+            "qualified_name": "find_capture_matching_projections",
+            "signature": "fn find_capture_matching_projections<'a, 'tcx>( upvars: &'a CaptureMap<'tcx>, var_hir_id: LocalVarId, projections: &[PlaceElem<'tcx>], ) -> Option<(usize, &'a Capture<'tcx>)> {",
+            "parent_signature": "",
+            "start_line": 155,
+            "end_line": 167,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 588,
+              "selected_line_ranges": [
+                "155-167"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Matches the requested projections against the closure capture map. Since the issue involves async closure capture lowering, this matching logic is a plausible place where capture selection or projection truncation could influence the resulting MIR and downstream query cycle."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_middle/src/ty/closure.rs",
+        "group_index": 10,
+        "candidate_count": 19,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_middle/src/ty/closure.rs::closure_typeinfo@200-209",
+            "file": "compiler/rustc_middle/src/ty/closure.rs",
+            "item_type": "function",
+            "item_name": "closure_typeinfo",
+            "qualified_name": "closure_typeinfo",
+            "signature": "fn closure_typeinfo<'tcx>(tcx: TyCtxt<'tcx>, def: LocalDefId) -> ClosureTypeInfo<'tcx> {",
+            "parent_signature": "",
+            "start_line": 200,
+            "end_line": 209,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 573,
+              "selected_line_ranges": [
+                "200-209"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Core query provider in this file: it gathers `typeck` results, closure captures, and kind origin for closure-like items. The reported cycle is tied to an async closure body and layout computation, so this is the most likely shared query edge involved."
+          },
+          {
+            "id": "compiler/rustc_middle/src/ty/closure.rs::analyze_coroutine_closure_captures@419-471",
+            "file": "compiler/rustc_middle/src/ty/closure.rs",
+            "item_type": "function",
+            "item_name": "analyze_coroutine_closure_captures",
+            "qualified_name": "analyze_coroutine_closure_captures",
+            "signature": "pub fn analyze_coroutine_closure_captures<'a, 'tcx: 'a, T>( parent_captures: impl IntoIterator<Item = &'a CapturedPlace<'tcx>>, child_captures: impl IntoIterator<Item = &'a CapturedPlace<'tcx>>, mut for_each: impl FnMut((usize, &'a CapturedPlace<'tcx>), (usize, &'a CapturedPlace<'tcx>)) -> T, ) -> impl Iterator<Item = T> + Captures<'a> + Captures<'tcx> {",
+            "parent_signature": "",
+            "start_line": 419,
+            "end_line": 471,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 2800,
+              "selected_line_ranges": [
+                "419-471"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Directly specific to coroutine/async-closure capture analysis. The reproducer uses `#![feature(async_closure)]`, making this the strongest async-specific logic in the file that could influence the closure body shape seen during MIR optimization."
+          },
+          {
+            "id": "compiler/rustc_middle/src/ty/closure.rs::impl<'tcx> TyCtxt<'tcx>::closure_captures@220-225",
+            "file": "compiler/rustc_middle/src/ty/closure.rs",
+            "item_type": "method",
+            "item_name": "closure_captures",
+            "qualified_name": "impl<'tcx> TyCtxt<'tcx>::closure_captures",
+            "signature": "pub fn closure_captures(self, def_id: LocalDefId) -> &'tcx [&'tcx ty::CapturedPlace<'tcx>] {",
+            "parent_signature": "impl<'tcx> TyCtxt<'tcx>",
+            "start_line": 220,
+            "end_line": 225,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 239,
+              "selected_line_ranges": [
+                "220-225"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Thin wrapper over `closure_typeinfo` that exposes captured places for closure-like defs. Since the failure mentions computing layout of the async closure body, capture information is a plausible part of the query chain leading into that layout/optimization cycle."
+          },
+          {
+            "id": "compiler/rustc_middle/src/ty/closure.rs::impl<'tcx> TyCtxt<'tcx>::closure_kind_origin@211-214",
+            "file": "compiler/rustc_middle/src/ty/closure.rs",
+            "item_type": "method",
+            "item_name": "closure_kind_origin",
+            "qualified_name": "impl<'tcx> TyCtxt<'tcx>::closure_kind_origin",
+            "signature": "impl<'tcx> TyCtxt<'tcx> { pub fn closure_kind_origin(self, def_id: LocalDefId) -> Option<&'tcx (Span, HirPlace<'tcx>)> {",
+            "parent_signature": "impl<'tcx> TyCtxt<'tcx>",
+            "start_line": 211,
+            "end_line": 214,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 180,
+              "selected_line_ranges": [
+                "211-214"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Another direct wrapper over `closure_typeinfo`, returning the closure kind origin used in closure analysis. It is a likely participant in the same query dependency chain as the reported E0391 cycle."
+          },
+          {
+            "id": "compiler/rustc_middle/src/ty/closure.rs::child_prefix_matches_parent_projections@473-487",
+            "file": "compiler/rustc_middle/src/ty/closure.rs",
+            "item_type": "function",
+            "item_name": "child_prefix_matches_parent_projections",
+            "qualified_name": "child_prefix_matches_parent_projections",
+            "signature": "fn child_prefix_matches_parent_projections( parent_capture: &ty::CapturedPlace<'_>, child_capture: &ty::CapturedPlace<'_>, ) -> bool {",
+            "parent_signature": "",
+            "start_line": 473,
+            "end_line": 487,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 626,
+              "selected_line_ranges": [
+                "473-487"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Helper used by `analyze_coroutine_closure_captures` to relate parent/child capture projections. It is narrowly tied to the async/coroutine capture machinery that matches the reproducer's closure path."
+          }
+        ]
+      }
+    ],
+    "selected_merged_count": 44,
+    "selected_methods": [
+      {
+        "id": "compiler/rustc_mir_transform/src/inline/cycle.rs::mir_callgraph_reachable@12-148",
+        "file": "compiler/rustc_mir_transform/src/inline/cycle.rs",
+        "item_type": "function",
+        "item_name": "mir_callgraph_reachable",
+        "qualified_name": "mir_callgraph_reachable",
+        "signature": "pub(crate) fn mir_callgraph_reachable<'tcx>( tcx: TyCtxt<'tcx>, (root, target): (ty::Instance<'tcx>, LocalDefId), ) -> bool {",
+        "parent_signature": "",
+        "start_line": 12,
+        "end_line": 148,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 5421,
+          "selected_line_ranges": [
+            "12-148"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/inline/cycle.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/inline/cycle.rs::mir_inliner_callees@150-187",
+        "file": "compiler/rustc_mir_transform/src/inline/cycle.rs",
+        "item_type": "function",
+        "item_name": "mir_inliner_callees",
+        "qualified_name": "mir_inliner_callees",
+        "signature": "pub(crate) fn mir_inliner_callees<'tcx>( tcx: TyCtxt<'tcx>, instance: ty::InstanceKind<'tcx>, ) -> &'tcx [(DefId, GenericArgsRef<'tcx>)] {",
+        "parent_signature": "",
+        "start_line": 150,
+        "end_line": 187,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1415,
+          "selected_line_ranges": [
+            "150-187"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/inline/cycle.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::coroutine_by_move_body_def_id@85-233",
+        "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "item_type": "function",
+        "item_name": "coroutine_by_move_body_def_id",
+        "qualified_name": "coroutine_by_move_body_def_id",
+        "signature": "pub fn coroutine_by_move_body_def_id<'tcx>( tcx: TyCtxt<'tcx>, coroutine_def_id: LocalDefId, ) -> DefId {",
+        "parent_signature": "",
+        "start_line": 85,
+        "end_line": 233,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 6653,
+          "selected_line_ranges": [
+            "85-233"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine/by_move_body.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::tcx@241-244",
+        "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "item_type": "method",
+        "item_name": "tcx",
+        "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::tcx",
+        "signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx> { fn tcx(&self) -> TyCtxt<'tcx> {",
+        "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+        "start_line": 241,
+        "end_line": 244,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 113,
+          "selected_line_ranges": [
+            "241-244"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine/by_move_body.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_place@246-307",
+        "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "item_type": "method",
+        "item_name": "visit_place",
+        "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_place",
+        "signature": "fn visit_place( &mut self, place: &mut mir::Place<'tcx>, context: mir::visit::PlaceContext, location: mir::Location, ) {",
+        "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+        "start_line": 246,
+        "end_line": 307,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3241,
+          "selected_line_ranges": [
+            "246-307"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine/by_move_body.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_local_decl@309-314",
+        "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "item_type": "method",
+        "item_name": "visit_local_decl",
+        "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_local_decl",
+        "signature": "fn visit_local_decl(&mut self, local: mir::Local, local_decl: &mut mir::LocalDecl<'tcx>) {",
+        "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+        "start_line": 309,
+        "end_line": 314,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 257,
+          "selected_line_ranges": [
+            "309-314"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine/by_move_body.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::mir_coroutine_witnesses@1558-1589",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "function",
+        "item_name": "mir_coroutine_witnesses",
+        "qualified_name": "mir_coroutine_witnesses",
+        "signature": "pub(crate) fn mir_coroutine_witnesses<'tcx>( tcx: TyCtxt<'tcx>, def_id: LocalDefId, ) -> Option<CoroutineLayout<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 1558,
+        "end_line": 1589,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1330,
+          "selected_line_ranges": [
+            "1558-1589"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine.rs] Best match to the reported failure note about computing layout of the async closure body: this is the public entry point that gathers coroutine liveness, calls `compute_layout`, and returns the `CoroutineLayout` used by later MIR transform steps."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::compute_layout@1023-1129",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "function",
+        "item_name": "compute_layout",
+        "qualified_name": "compute_layout",
+        "signature": "fn compute_layout<'tcx>( liveness: LivenessInfo, body: &Body<'tcx>, ) -> ( IndexVec<Local, Option<(Ty<'tcx>, VariantIdx, FieldIdx)>>, CoroutineLayout<'tcx>, IndexVec<BasicBlock, Option<BitSet<Local>>>, ) {",
+        "parent_signature": "",
+        "start_line": 1023,
+        "end_line": 1129,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 4535,
+          "selected_line_ranges": [
+            "1023-1129"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine.rs] Directly performs coroutine layout construction from liveness info, building the field remap and variant layout that the diagnostic says is involved in the cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::locals_live_across_suspend_points@752-864",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "function",
+        "item_name": "locals_live_across_suspend_points",
+        "qualified_name": "locals_live_across_suspend_points",
+        "signature": "fn locals_live_across_suspend_points<'tcx>( tcx: TyCtxt<'tcx>, body: &Body<'tcx>, always_live_locals: &BitSet<Local>, movable: bool, ) -> LivenessInfo {",
+        "parent_signature": "",
+        "start_line": 752,
+        "end_line": 864,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 5138,
+          "selected_line_ranges": [
+            "752-864"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine.rs] Core analysis feeding the layout computation: it runs MIR dataflow to determine which locals stay live across suspension points, so any layout-related cycle would pass through here."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::impl<'tcx> MirPass<'tcx> for StateTransform::run_pass@1626-1799",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "method",
+        "item_name": "run_pass",
+        "qualified_name": "impl<'tcx> MirPass<'tcx> for StateTransform::run_pass",
+        "signature": "impl<'tcx> MirPass<'tcx> for StateTransform { fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {",
+        "parent_signature": "impl<'tcx> MirPass<'tcx> for StateTransform",
+        "start_line": 1626,
+        "end_line": 1799,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 8005,
+          "selected_line_ranges": [
+            "1626-1799"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine.rs] Top-level MIR optimization pass for coroutines/async bodies; it orchestrates the exact pipeline that the error says is cycling during MIR optimization, including witness/layout computation and later coroutine rewriting."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::create_coroutine_resume_function@1377-1465",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "function",
+        "item_name": "create_coroutine_resume_function",
+        "qualified_name": "create_coroutine_resume_function",
+        "signature": "fn create_coroutine_resume_function<'tcx>( tcx: TyCtxt<'tcx>, transform: TransformVisitor<'tcx>, body: &mut Body<'tcx>, can_return: bool, ) {",
+        "parent_signature": "",
+        "start_line": 1377,
+        "end_line": 1465,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3488,
+          "selected_line_ranges": [
+            "1377-1465"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine.rs] Relevant later-stage coroutine body rewriting that consumes the computed transform/layout state to synthesize the resume function for async coroutines; less direct than the layout helpers, but still part of the same optimization pipeline."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/inline.rs::inline@78-112",
+        "file": "compiler/rustc_mir_transform/src/inline.rs",
+        "item_type": "function",
+        "item_name": "inline",
+        "qualified_name": "inline",
+        "signature": "fn inline<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) -> bool {",
+        "parent_signature": "",
+        "start_line": 78,
+        "end_line": 112,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1160,
+          "selected_line_ranges": [
+            "78-112"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/inline.rs] Most directly relevant: it contains the explicit guard that skips inlining into coroutines because their `optimized_mir` is used for layout computation and can create a cycle, which matches the reported MIR-cycle-on-async-closure failure."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/inline.rs::impl<'tcx> Inliner<'tcx>::check_mir_is_available@301-383",
+        "file": "compiler/rustc_mir_transform/src/inline.rs",
+        "item_type": "method",
+        "item_name": "check_mir_is_available",
+        "qualified_name": "impl<'tcx> Inliner<'tcx>::check_mir_is_available",
+        "signature": "fn check_mir_is_available( &self, caller_body: &Body<'tcx>, callee: Instance<'tcx>, ) -> Result<(), &'static str> {",
+        "parent_signature": "impl<'tcx> Inliner<'tcx>",
+        "start_line": 301,
+        "end_line": 383,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3884,
+          "selected_line_ranges": [
+            "301-383"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/inline.rs] This method is the inliner’s cycle-avoidance gate. It explicitly handles `caller might be reachable from callee (query cycle avoidance)` and special-cases coroutine-related shims, making it a strong match for an E0391 optimized-MIR cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/inline.rs::impl<'tcx> Inliner<'tcx>::try_inlining@181-299",
+        "file": "compiler/rustc_mir_transform/src/inline.rs",
+        "item_type": "method",
+        "item_name": "try_inlining",
+        "qualified_name": "impl<'tcx> Inliner<'tcx>::try_inlining",
+        "signature": "fn try_inlining( &self, caller_body: &mut Body<'tcx>, callsite: &CallSite<'tcx>, ) -> Result<std::ops::Range<BasicBlock>, &'static str> {",
+        "parent_signature": "impl<'tcx> Inliner<'tcx>",
+        "start_line": 181,
+        "end_line": 299,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 5353,
+          "selected_line_ranges": [
+            "181-299"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/inline.rs] Core inlining path: it requests callee MIR via `try_instance_mir`, checks availability, and then inlines. Any recursive optimized-MIR query or cycle around an async closure body would pass through here."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/inline.rs::impl<'tcx> Inliner<'tcx>::process_blocks@132-176",
+        "file": "compiler/rustc_mir_transform/src/inline.rs",
+        "item_type": "method",
+        "item_name": "process_blocks",
+        "qualified_name": "impl<'tcx> Inliner<'tcx>::process_blocks",
+        "signature": "impl<'tcx> Inliner<'tcx> { fn process_blocks(&mut self, caller_body: &mut Body<'tcx>, blocks: Range<BasicBlock>) {",
+        "parent_signature": "impl<'tcx> Inliner<'tcx>",
+        "start_line": 132,
+        "end_line": 176,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1645,
+          "selected_line_ranges": [
+            "132-176"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/inline.rs] This drives recursive inlining over the caller body and can re-enter the inliner on newly inlined blocks. It is part of the control flow that could amplify or expose a cycle during MIR optimization."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/inline.rs::impl<'tcx> Inliner<'tcx>::resolve_callsite@385-430",
+        "file": "compiler/rustc_mir_transform/src/inline.rs",
+        "item_type": "method",
+        "item_name": "resolve_callsite",
+        "qualified_name": "impl<'tcx> Inliner<'tcx>::resolve_callsite",
+        "signature": "fn resolve_callsite( &self, caller_body: &Body<'tcx>, bb: BasicBlock, bb_data: &BasicBlockData<'tcx>, ) -> Option<CallSite<'tcx>> {",
+        "parent_signature": "impl<'tcx> Inliner<'tcx>",
+        "start_line": 385,
+        "end_line": 430,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1946,
+          "selected_line_ranges": [
+            "385-430"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/inline.rs] This is the callsite discovery step before inlining. It normalizes and resolves callable instances and filters history, so it is upstream of the recursive MIR query path implicated by the cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/shim.rs::make_shim@32-166",
+        "file": "compiler/rustc_mir_transform/src/shim.rs",
+        "item_type": "function",
+        "item_name": "make_shim",
+        "qualified_name": "make_shim",
+        "signature": "fn make_shim<'tcx>(tcx: TyCtxt<'tcx>, instance: ty::InstanceKind<'tcx>) -> Body<'tcx> {",
+        "parent_signature": "",
+        "start_line": 32,
+        "end_line": 166,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 6348,
+          "selected_line_ranges": [
+            "32-166"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/shim.rs] Top-level shim dispatcher for MIR optimization inputs. It selects the coroutine-closure and drop-glue shim paths, and the drop-glue arm explicitly queries `tcx.optimized_mir(...)`, which is the kind of self-referential MIR query pattern implicated by an E0391 cycle during async-closure optimization."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/shim.rs::build_construct_coroutine_by_move_shim@1025-1132",
+        "file": "compiler/rustc_mir_transform/src/shim.rs",
+        "item_type": "function",
+        "item_name": "build_construct_coroutine_by_move_shim",
+        "qualified_name": "build_construct_coroutine_by_move_shim",
+        "signature": "fn build_construct_coroutine_by_move_shim<'tcx>( tcx: TyCtxt<'tcx>, coroutine_closure_def_id: DefId, receiver_by_ref: bool, ) -> Body<'tcx> {",
+        "parent_signature": "",
+        "start_line": 1025,
+        "end_line": 1132,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3990,
+          "selected_line_ranges": [
+            "1025-1132"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/shim.rs] Most directly tied to async closures: it constructs the synthetic coroutine-closure MIR body for `ConstructCoroutineInClosureShim`. The reproducer is an `async closure`, so this is the most plausible place where the body shape feeding MIR optimization is created."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/shim.rs::build_call_shim@691-913",
+        "file": "compiler/rustc_mir_transform/src/shim.rs",
+        "item_type": "function",
+        "item_name": "build_call_shim",
+        "qualified_name": "build_call_shim",
+        "signature": "fn build_call_shim<'tcx>( tcx: TyCtxt<'tcx>, instance: ty::InstanceKind<'tcx>, rcvr_adjustment: Option<Adjustment>, call_kind: CallKind<'tcx>, ) -> Body<'tcx> {",
+        "parent_signature": "",
+        "start_line": 691,
+        "end_line": 913,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 8418,
+          "selected_line_ranges": [
+            "691-913"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/shim.rs] Builds call shims for `Fn`/`FnMut`/`FnOnce` and related indirect/direct call paths, including async-fn trait handling. Async closures route through these callable-instance shims, so this is a strong upstream candidate for the body and signature that later cycles in MIR optimization."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/shim.rs::build_drop_shim@214-297",
+        "file": "compiler/rustc_mir_transform/src/shim.rs",
+        "item_type": "function",
+        "item_name": "build_drop_shim",
+        "qualified_name": "build_drop_shim",
+        "signature": "fn build_drop_shim<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, ty: Option<Ty<'tcx>>) -> Body<'tcx> {",
+        "parent_signature": "",
+        "start_line": 214,
+        "end_line": 297,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3180,
+          "selected_line_ranges": [
+            "214-297"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/shim.rs] Handles `DropGlue`, and for coroutine types it explicitly fetches `tcx.optimized_mir(coroutine_def_id)` before elaborating drops. That makes it a direct participant in optimized-MIR query recursion and a plausible contributor to the reported cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/shim.rs::build_clone_shim@429-452",
+        "file": "compiler/rustc_mir_transform/src/shim.rs",
+        "item_type": "function",
+        "item_name": "build_clone_shim",
+        "qualified_name": "build_clone_shim",
+        "signature": "fn build_clone_shim<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, self_ty: Ty<'tcx>) -> Body<'tcx> {",
+        "parent_signature": "",
+        "start_line": 429,
+        "end_line": 452,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1107,
+          "selected_line_ranges": [
+            "429-452"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/shim.rs] Creates clone shims for closures and coroutine closures, delegating to `coroutine_shim` for coroutine types. While less direct than the call/drop paths, it still operates on the same synthetic coroutine bodies and closure state that are central to the async-closure cycle."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::layout_of_uncached@105-685",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "layout_of_uncached",
+        "qualified_name": "layout_of_uncached",
+        "signature": "fn layout_of_uncached<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 105,
+        "end_line": 685,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 24029,
+          "selected_line_ranges": [
+            "105-685"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/layout.rs] Core layout-computation dispatcher. The diagnostic says the cycle is encountered while computing layout of an async closure body, and this function is where `ty::Coroutine`/closure-like types are routed into specialized layout logic and where recursive `layout_of` calls are made."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::coroutine_layout@811-1012",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "coroutine_layout",
+        "qualified_name": "coroutine_layout",
+        "signature": "fn coroutine_layout<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, def_id: hir::def_id::DefId, args: GenericArgsRef<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 811,
+        "end_line": 1012,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 8748,
+          "selected_line_ranges": [
+            "811-1012"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/layout.rs] Most directly tied to the reported async-closure path. It constructs the layout for coroutine/async-closure bodies, which matches the error note that the cycle is used when computing layout of `{async closure body ...}`."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::layout_of@35-80",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "layout_of",
+        "qualified_name": "layout_of",
+        "signature": "fn layout_of<'tcx>( tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>, ) -> Result<TyAndLayout<'tcx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 35,
+        "end_line": 80,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1676,
+          "selected_line_ranges": [
+            "35-80"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/layout.rs] Public query entry point for type layout. Even though it is a thin wrapper, the reported failure is a layout query cycle, so this is the top-level method that can re-enter cached layout computation and surface the recursion."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::univariant_uninterned@89-103",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "univariant_uninterned",
+        "qualified_name": "univariant_uninterned",
+        "signature": "fn univariant_uninterned<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, fields: &IndexSlice<FieldIdx, Layout<'_>>, repr: &ReprOptions, kind: StructKind, ) -> Result<LayoutS<FieldIdx, VariantIdx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 89,
+        "end_line": 103,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 528,
+          "selected_line_ranges": [
+            "89-103"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/layout.rs] Shared helper used by `layout_of_uncached` and `coroutine_layout` to build packed field layouts. It sits on the direct path that assembles the coroutine body layout and can participate in recursive field-layout evaluation."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::coroutine_saved_local_eligibility@715-808",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "coroutine_saved_local_eligibility",
+        "qualified_name": "coroutine_saved_local_eligibility",
+        "signature": "fn coroutine_saved_local_eligibility( info: &CoroutineLayout<'_>, ) -> (BitSet<CoroutineSavedLocal>, IndexVec<CoroutineSavedLocal, SavedLocalEligibility>) {",
+        "parent_signature": "",
+        "start_line": 715,
+        "end_line": 808,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3992,
+          "selected_line_ranges": [
+            "715-808"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/layout.rs] Coroutine-layout helper used to decide which saved locals are promoted or overlapped. It is part of the async-coroutine layout pipeline that feeds the failing layout computation, so it is the next most relevant method in this file."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/instance.rs::resolve_instance_raw@18-92",
+        "file": "compiler/rustc_ty_utils/src/instance.rs",
+        "item_type": "function",
+        "item_name": "resolve_instance_raw",
+        "qualified_name": "resolve_instance_raw",
+        "signature": "fn resolve_instance_raw<'tcx>( tcx: TyCtxt<'tcx>, key: ty::ParamEnvAnd<'tcx, (DefId, GenericArgsRef<'tcx>)>, ) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {",
+        "parent_signature": "",
+        "start_line": 18,
+        "end_line": 92,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 2921,
+          "selected_line_ranges": [
+            "18-92"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/instance.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/instance.rs::resolve_associated_item@94-379",
+        "file": "compiler/rustc_ty_utils/src/instance.rs",
+        "item_type": "function",
+        "item_name": "resolve_associated_item",
+        "qualified_name": "resolve_associated_item",
+        "signature": "fn resolve_associated_item<'tcx>( tcx: TyCtxt<'tcx>, trait_item_id: DefId, param_env: ty::ParamEnv<'tcx>, trait_id: DefId, rcvr_args: GenericArgsRef<'tcx>, ) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {",
+        "parent_signature": "",
+        "start_line": 94,
+        "end_line": 379,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 14125,
+          "selected_line_ranges": [
+            "94-379"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/instance.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/instance.rs::provide@381-383",
+        "file": "compiler/rustc_ty_utils/src/instance.rs",
+        "item_type": "function",
+        "item_name": "provide",
+        "qualified_name": "provide",
+        "signature": "pub(crate) fn provide(providers: &mut Providers) {",
+        "parent_signature": "",
+        "start_line": 381,
+        "end_line": 383,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 119,
+          "selected_line_ranges": [
+            "381-383"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/instance.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::as_rvalue@40-551",
+        "file": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+        "item_type": "method",
+        "item_name": "as_rvalue",
+        "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::as_rvalue",
+        "signature": "pub(crate) fn as_rvalue( &mut self, mut block: BasicBlock, scope: Option<region::Scope>, expr_id: ExprId, ) -> BlockAnd<Rvalue<'tcx>> {",
+        "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+        "start_line": 40,
+        "end_line": 551,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 23099,
+          "selected_line_ranges": [
+            "40-551"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/expr/as_rvalue.rs] Main THIR-to-MIR rvalue lowering entrypoint in this file; it handles the expression forms that shape the async closure body before optimization, making it the strongest upstream candidate for a MIR-cycle-triggering body shape."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::limit_capture_mutability@742-820",
+        "file": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+        "item_type": "method",
+        "item_name": "limit_capture_mutability",
+        "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::limit_capture_mutability",
+        "signature": "fn limit_capture_mutability( &mut self, upvar_span: Span, upvar_ty: Ty<'tcx>, temp_lifetime: Option<region::Scope>, mut block: BasicBlock, arg: ExprId, ) -> BlockAnd<Operand<'tcx>> {",
+        "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+        "start_line": 742,
+        "end_line": 820,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3329,
+          "selected_line_ranges": [
+            "742-820"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/expr/as_rvalue.rs] Directly lowers closure/upvar captures by constructing borrowed places and tracking mutability; async-closure capture lowering is the most issue-relevant path in this file."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::build_binary_op@553-703",
+        "file": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+        "item_type": "method",
+        "item_name": "build_binary_op",
+        "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::build_binary_op",
+        "signature": "pub(crate) fn build_binary_op( &mut self, mut block: BasicBlock, op: BinOp, span: Span, ty: Ty<'tcx>, lhs: Operand<'tcx>, rhs: Operand<'tcx>, ) -> BlockAnd<Rvalue<'tcx>> {",
+        "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+        "start_line": 553,
+        "end_line": 703,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 6685,
+          "selected_line_ranges": [
+            "553-703"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/expr/as_rvalue.rs] Implements MIR lowering for arithmetic with overflow/division checks and can consult layout-sensitive helpers; less directly tied to the reproducer, but still a substantial lowering path that can influence generated MIR and query dependencies."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::neg_1_literal@823-829",
+        "file": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+        "item_type": "method",
+        "item_name": "neg_1_literal",
+        "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::neg_1_literal",
+        "signature": "fn neg_1_literal(&mut self, span: Span, ty: Ty<'tcx>) -> Operand<'tcx> {",
+        "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+        "start_line": 823,
+        "end_line": 829,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 329,
+          "selected_line_ranges": [
+            "823-829"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/expr/as_rvalue.rs] Computes a signed `-1` literal via `layout_of`, so it touches the same layout query machinery mentioned in the cycle note and is a plausible contributor to query recursion in MIR construction."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::minval_literal@832-840",
+        "file": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+        "item_type": "method",
+        "item_name": "minval_literal",
+        "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::minval_literal",
+        "signature": "fn minval_literal(&mut self, span: Span, ty: Ty<'tcx>) -> Operand<'tcx> {",
+        "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+        "start_line": 832,
+        "end_line": 840,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 381,
+          "selected_line_ranges": [
+            "832-840"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/expr/as_rvalue.rs] Computes signed minimum-value literals through `layout_of`; like `neg_1_literal`, it is a layout-dependent helper that can participate in the cycle-inducing query chain."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::expr_as_place@413-576",
+        "file": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+        "item_type": "method",
+        "item_name": "expr_as_place",
+        "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::expr_as_place",
+        "signature": "fn expr_as_place( &mut self, mut block: BasicBlock, expr_id: ExprId, mutability: Mutability, fake_borrow_temps: Option<&mut Vec<Local>>, ) -> BlockAnd<PlaceBuilder<'tcx>> {",
+        "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+        "start_line": 413,
+        "end_line": 576,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 6968,
+          "selected_line_ranges": [
+            "413-576"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/expr/as_place.rs] Top-level lowering entry for THIR expressions into MIR places. It is the main dispatch point that recognizes `ExprKind::UpvarRef`, `ExprKind::Closure`, indexing, and other place-forming expressions, so it sits closest to the async-closure capture path that can feed a bad MIR shape into later optimization."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::lower_captured_upvar@581-588",
+        "file": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+        "item_type": "method",
+        "item_name": "lower_captured_upvar",
+        "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::lower_captured_upvar",
+        "signature": "fn lower_captured_upvar( &mut self, block: BasicBlock, closure_def_id: LocalDefId, var_hir_id: LocalVarId, ) -> BlockAnd<PlaceBuilder<'tcx>> {",
+        "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+        "start_line": 581,
+        "end_line": 588,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 275,
+          "selected_line_ranges": [
+            "581-588"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/expr/as_place.rs] Directly constructs `PlaceBase::Upvar` for captured variables. The reproducer is an async closure, and captured upvars are the key input to closure-body MIR lowering, making this a likely upstream source for the cycle-triggering body."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs::impl<'tcx> PlaceBuilder<'tcx>::resolve_upvar@287-295",
+        "file": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+        "item_type": "method",
+        "item_name": "resolve_upvar",
+        "qualified_name": "impl<'tcx> PlaceBuilder<'tcx>::resolve_upvar",
+        "signature": "pub(in crate::build) fn resolve_upvar( &self, cx: &Builder<'_, 'tcx>, ) -> Option<PlaceBuilder<'tcx>> {",
+        "parent_signature": "impl<'tcx> PlaceBuilder<'tcx>",
+        "start_line": 287,
+        "end_line": 295,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 339,
+          "selected_line_ranges": [
+            "287-295"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/expr/as_place.rs] Resolves an upvar place builder back into a concrete `Place`. Because the bug is tied to closure-body MIR and capture resolution, this method is part of the critical path that turns captured variables into actual MIR places consumed by later passes."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs::to_upvars_resolved_place_builder@172-211",
+        "file": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+        "item_type": "function",
+        "item_name": "to_upvars_resolved_place_builder",
+        "qualified_name": "to_upvars_resolved_place_builder",
+        "signature": "fn to_upvars_resolved_place_builder<'tcx>( cx: &Builder<'_, 'tcx>, var_hir_id: LocalVarId, closure_def_id: LocalDefId, projection: &[PlaceElem<'tcx>], ) -> Option<PlaceBuilder<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 172,
+        "end_line": 211,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1494,
+          "selected_line_ranges": [
+            "172-211"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/expr/as_place.rs] Performs the core upvar-to-place translation, including capture lookup and reconstruction of the remaining projections. This is the most semantically important helper for precise capture handling, which is directly relevant to async-closure lowering and any self-referential MIR shape it may create."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/expr/as_place.rs::find_capture_matching_projections@155-167",
+        "file": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+        "item_type": "function",
+        "item_name": "find_capture_matching_projections",
+        "qualified_name": "find_capture_matching_projections",
+        "signature": "fn find_capture_matching_projections<'a, 'tcx>( upvars: &'a CaptureMap<'tcx>, var_hir_id: LocalVarId, projections: &[PlaceElem<'tcx>], ) -> Option<(usize, &'a Capture<'tcx>)> {",
+        "parent_signature": "",
+        "start_line": 155,
+        "end_line": 167,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 588,
+          "selected_line_ranges": [
+            "155-167"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/expr/as_place.rs] Matches the requested projections against the closure capture map. Since the issue involves async closure capture lowering, this matching logic is a plausible place where capture selection or projection truncation could influence the resulting MIR and downstream query cycle."
+      },
+      {
+        "id": "compiler/rustc_middle/src/ty/closure.rs::closure_typeinfo@200-209",
+        "file": "compiler/rustc_middle/src/ty/closure.rs",
+        "item_type": "function",
+        "item_name": "closure_typeinfo",
+        "qualified_name": "closure_typeinfo",
+        "signature": "fn closure_typeinfo<'tcx>(tcx: TyCtxt<'tcx>, def: LocalDefId) -> ClosureTypeInfo<'tcx> {",
+        "parent_signature": "",
+        "start_line": 200,
+        "end_line": 209,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 573,
+          "selected_line_ranges": [
+            "200-209"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_middle/src/ty/closure.rs] Core query provider in this file: it gathers `typeck` results, closure captures, and kind origin for closure-like items. The reported cycle is tied to an async closure body and layout computation, so this is the most likely shared query edge involved."
+      },
+      {
+        "id": "compiler/rustc_middle/src/ty/closure.rs::analyze_coroutine_closure_captures@419-471",
+        "file": "compiler/rustc_middle/src/ty/closure.rs",
+        "item_type": "function",
+        "item_name": "analyze_coroutine_closure_captures",
+        "qualified_name": "analyze_coroutine_closure_captures",
+        "signature": "pub fn analyze_coroutine_closure_captures<'a, 'tcx: 'a, T>( parent_captures: impl IntoIterator<Item = &'a CapturedPlace<'tcx>>, child_captures: impl IntoIterator<Item = &'a CapturedPlace<'tcx>>, mut for_each: impl FnMut((usize, &'a CapturedPlace<'tcx>), (usize, &'a CapturedPlace<'tcx>)) -> T, ) -> impl Iterator<Item = T> + Captures<'a> + Captures<'tcx> {",
+        "parent_signature": "",
+        "start_line": 419,
+        "end_line": 471,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 2800,
+          "selected_line_ranges": [
+            "419-471"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_middle/src/ty/closure.rs] Directly specific to coroutine/async-closure capture analysis. The reproducer uses `#![feature(async_closure)]`, making this the strongest async-specific logic in the file that could influence the closure body shape seen during MIR optimization."
+      },
+      {
+        "id": "compiler/rustc_middle/src/ty/closure.rs::impl<'tcx> TyCtxt<'tcx>::closure_captures@220-225",
+        "file": "compiler/rustc_middle/src/ty/closure.rs",
+        "item_type": "method",
+        "item_name": "closure_captures",
+        "qualified_name": "impl<'tcx> TyCtxt<'tcx>::closure_captures",
+        "signature": "pub fn closure_captures(self, def_id: LocalDefId) -> &'tcx [&'tcx ty::CapturedPlace<'tcx>] {",
+        "parent_signature": "impl<'tcx> TyCtxt<'tcx>",
+        "start_line": 220,
+        "end_line": 225,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 239,
+          "selected_line_ranges": [
+            "220-225"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_middle/src/ty/closure.rs] Thin wrapper over `closure_typeinfo` that exposes captured places for closure-like defs. Since the failure mentions computing layout of the async closure body, capture information is a plausible part of the query chain leading into that layout/optimization cycle."
+      },
+      {
+        "id": "compiler/rustc_middle/src/ty/closure.rs::impl<'tcx> TyCtxt<'tcx>::closure_kind_origin@211-214",
+        "file": "compiler/rustc_middle/src/ty/closure.rs",
+        "item_type": "method",
+        "item_name": "closure_kind_origin",
+        "qualified_name": "impl<'tcx> TyCtxt<'tcx>::closure_kind_origin",
+        "signature": "impl<'tcx> TyCtxt<'tcx> { pub fn closure_kind_origin(self, def_id: LocalDefId) -> Option<&'tcx (Span, HirPlace<'tcx>)> {",
+        "parent_signature": "impl<'tcx> TyCtxt<'tcx>",
+        "start_line": 211,
+        "end_line": 214,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 180,
+          "selected_line_ranges": [
+            "211-214"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_middle/src/ty/closure.rs] Another direct wrapper over `closure_typeinfo`, returning the closure kind origin used in closure analysis. It is a likely participant in the same query dependency chain as the reported E0391 cycle."
+      },
+      {
+        "id": "compiler/rustc_middle/src/ty/closure.rs::child_prefix_matches_parent_projections@473-487",
+        "file": "compiler/rustc_middle/src/ty/closure.rs",
+        "item_type": "function",
+        "item_name": "child_prefix_matches_parent_projections",
+        "qualified_name": "child_prefix_matches_parent_projections",
+        "signature": "fn child_prefix_matches_parent_projections( parent_capture: &ty::CapturedPlace<'_>, child_capture: &ty::CapturedPlace<'_>, ) -> bool {",
+        "parent_signature": "",
+        "start_line": 473,
+        "end_line": 487,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 626,
+          "selected_line_ranges": [
+            "473-487"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_middle/src/ty/closure.rs] Helper used by `analyze_coroutine_closure_captures` to relate parent/child capture projections. It is narrowly tied to the async/coroutine capture machinery that matches the reproducer's closure path."
+      }
+    ],
+    "ranked_methods": [
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::mir_coroutine_witnesses@1558-1589",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "function",
+        "item_name": "mir_coroutine_witnesses",
+        "qualified_name": "mir_coroutine_witnesses",
+        "signature": "pub(crate) fn mir_coroutine_witnesses<'tcx>( tcx: TyCtxt<'tcx>, def_id: LocalDefId, ) -> Option<CoroutineLayout<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 1558,
+        "end_line": 1589,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1330,
+          "selected_line_ranges": [
+            "1558-1589"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 1,
+        "reason": "Closest match to the diagnostic note about computing layout of the async closure body: this is the entrypoint that gathers liveness and immediately calls `compute_layout`, so it sits on the exact coroutine-layout path implicated by the cycle."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::coroutine_layout@811-1012",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "coroutine_layout",
+        "qualified_name": "coroutine_layout",
+        "signature": "fn coroutine_layout<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, def_id: hir::def_id::DefId, args: GenericArgsRef<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 811,
+        "end_line": 1012,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 8748,
+          "selected_line_ranges": [
+            "811-1012"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 2,
+        "reason": "Directly constructs the layout for coroutine/async-closure bodies. The error note says the cycle is used when computing layout of `{async closure body...}`, which is exactly this function's responsibility."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::compute_layout@1023-1129",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "function",
+        "item_name": "compute_layout",
+        "qualified_name": "compute_layout",
+        "signature": "fn compute_layout<'tcx>( liveness: LivenessInfo, body: &Body<'tcx>, ) -> ( IndexVec<Local, Option<(Ty<'tcx>, VariantIdx, FieldIdx)>>, CoroutineLayout<'tcx>, IndexVec<BasicBlock, Option<BitSet<Local>>>, ) {",
+        "parent_signature": "",
+        "start_line": 1023,
+        "end_line": 1129,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 4535,
+          "selected_line_ranges": [
+            "1023-1129"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 3,
+        "reason": "The main layout-construction helper behind `mir_coroutine_witnesses`; it turns liveness data into the coroutine field/variant layout that the diagnostic points at, making it a very strong layout-cycle candidate."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::impl<'tcx> MirPass<'tcx> for StateTransform::run_pass@1626-1799",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "method",
+        "item_name": "run_pass",
+        "qualified_name": "impl<'tcx> MirPass<'tcx> for StateTransform::run_pass",
+        "signature": "impl<'tcx> MirPass<'tcx> for StateTransform { fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {",
+        "parent_signature": "impl<'tcx> MirPass<'tcx> for StateTransform",
+        "start_line": 1626,
+        "end_line": 1799,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 8005,
+          "selected_line_ranges": [
+            "1626-1799"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 4,
+        "reason": "Top-level MIR pass for coroutine/async bodies. It orchestrates the liveness, layout, and rewriting steps, so if the optimized-MIR cycle is happening while transforming the async closure body, this is the pass that drives it."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::layout_of_uncached@105-685",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "layout_of_uncached",
+        "qualified_name": "layout_of_uncached",
+        "signature": "fn layout_of_uncached<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 105,
+        "end_line": 685,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 24029,
+          "selected_line_ranges": [
+            "105-685"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 5,
+        "reason": "Central type-layout dispatcher. The failure note explicitly mentions layout computation, and this function is where coroutine-like types are routed into `coroutine_layout`, so it is the broader query layer in the cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/inline.rs::inline@78-112",
+        "file": "compiler/rustc_mir_transform/src/inline.rs",
+        "item_type": "function",
+        "item_name": "inline",
+        "qualified_name": "inline",
+        "signature": "fn inline<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) -> bool {",
+        "parent_signature": "",
+        "start_line": 78,
+        "end_line": 112,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1160,
+          "selected_line_ranges": [
+            "78-112"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 6,
+        "reason": "Strong surface-trigger candidate for an `optimized_mir` cycle: the function explicitly avoids inlining into coroutines because their `optimized_mir` is used for layout computation and can create a cycle, which mirrors the reported failure mode."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/inline.rs::impl<'tcx> Inliner<'tcx>::check_mir_is_available@301-383",
+        "file": "compiler/rustc_mir_transform/src/inline.rs",
+        "item_type": "method",
+        "item_name": "check_mir_is_available",
+        "qualified_name": "impl<'tcx> Inliner<'tcx>::check_mir_is_available",
+        "signature": "fn check_mir_is_available( &self, caller_body: &Body<'tcx>, callee: Instance<'tcx>, ) -> Result<(), &'static str> {",
+        "parent_signature": "impl<'tcx> Inliner<'tcx>",
+        "start_line": 301,
+        "end_line": 383,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3884,
+          "selected_line_ranges": [
+            "301-383"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 7,
+        "reason": "The inliner’s cycle-avoidance gate. It explicitly contains the `caller might be reachable from callee (query cycle avoidance)` logic, so it is one of the most cycle-relevant methods in the optimization pipeline."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/shim.rs::make_shim@32-166",
+        "file": "compiler/rustc_mir_transform/src/shim.rs",
+        "item_type": "function",
+        "item_name": "make_shim",
+        "qualified_name": "make_shim",
+        "signature": "fn make_shim<'tcx>(tcx: TyCtxt<'tcx>, instance: ty::InstanceKind<'tcx>) -> Body<'tcx> {",
+        "parent_signature": "",
+        "start_line": 32,
+        "end_line": 166,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 6348,
+          "selected_line_ranges": [
+            "32-166"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 8,
+        "reason": "Top-level shim dispatcher that can re-enter optimized-MIR queries for coroutine drop glue and by-move bodies. Its coroutine-specific arms make it a plausible recursion point feeding the MIR-opt/layout cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/shim.rs::build_drop_shim@214-297",
+        "file": "compiler/rustc_mir_transform/src/shim.rs",
+        "item_type": "function",
+        "item_name": "build_drop_shim",
+        "qualified_name": "build_drop_shim",
+        "signature": "fn build_drop_shim<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, ty: Option<Ty<'tcx>>) -> Body<'tcx> {",
+        "parent_signature": "",
+        "start_line": 214,
+        "end_line": 297,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3180,
+          "selected_line_ranges": [
+            "214-297"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 9,
+        "reason": "Directly builds drop glue, and `make_shim` uses it for coroutine-related cases. Because drop shims for coroutines are tied to `optimized_mir` lookups, it is a plausible contributor to the query cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::coroutine_by_move_body_def_id@85-233",
+        "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "item_type": "function",
+        "item_name": "coroutine_by_move_body_def_id",
+        "qualified_name": "coroutine_by_move_body_def_id",
+        "signature": "pub fn coroutine_by_move_body_def_id<'tcx>( tcx: TyCtxt<'tcx>, coroutine_def_id: LocalDefId, ) -> DefId {",
+        "parent_signature": "",
+        "start_line": 85,
+        "end_line": 233,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 6653,
+          "selected_line_ranges": [
+            "85-233"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 10,
+        "reason": "Async-closure-specific body synthesis path. It remaps captures and creates the synthetic by-move coroutine body, so it is a plausible upstream source for the body shape that later participates in the layout/optimization cycle."
+      }
+    ]
+  },
+  "efficiency": {
+    "total_wall_time_sec": 614.825,
+    "stage_times_sec": {
+      "checkout": 4.336,
+      "load_issue": 0.0,
+      "load_reproducer": 0.002,
+      "load_evidence": 0.0,
+      "enumerate_stage1_crates": 0.003,
+      "load_crate_docs": 0.002,
+      "stage1_llm": 10.682,
+      "enumerate_all_modules_in_selected_crates": 0.003,
+      "stage3_file_doc_llm": 400.0,
+      "stage4_method_llm": 199.796
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 23,
+      "input_tokens": 317701,
+      "output_tokens": 30163,
+      "total_tokens": 347864,
+      "requests": [
+        {
+          "stage": "stage1_crate",
+          "latency_sec": 10.681,
+          "input_tokens": 18921,
+          "output_tokens": 364,
+          "total_tokens": 19285
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 12.217,
+          "input_tokens": 4935,
+          "output_tokens": 728,
+          "total_tokens": 5663
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 32.963,
+          "input_tokens": 6717,
+          "output_tokens": 2209,
+          "total_tokens": 8926
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 9.551,
+          "input_tokens": 3839,
+          "output_tokens": 415,
+          "total_tokens": 4254
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 21.166,
+          "input_tokens": 5103,
+          "output_tokens": 822,
+          "total_tokens": 5925
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 30.979,
+          "input_tokens": 6986,
+          "output_tokens": 2069,
+          "total_tokens": 9055
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 12.671,
+          "input_tokens": 4544,
+          "output_tokens": 762,
+          "total_tokens": 5306
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 20.844,
+          "input_tokens": 4832,
+          "output_tokens": 1318,
+          "total_tokens": 6150
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 17.891,
+          "input_tokens": 8429,
+          "output_tokens": 1117,
+          "total_tokens": 9546
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 119.342,
+          "input_tokens": 7589,
+          "output_tokens": 374,
+          "total_tokens": 7963
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 25.407,
+          "input_tokens": 11333,
+          "output_tokens": 1397,
+          "total_tokens": 12730
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 12.026,
+          "input_tokens": 4455,
+          "output_tokens": 713,
+          "total_tokens": 5168
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 7.426,
+          "input_tokens": 5238,
+          "output_tokens": 381,
+          "total_tokens": 5619
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 27.497,
+          "input_tokens": 5611,
+          "output_tokens": 1547,
+          "total_tokens": 7158
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 49.936,
+          "input_tokens": 20317,
+          "output_tokens": 3365,
+          "total_tokens": 23682
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 32.401,
+          "input_tokens": 35292,
+          "output_tokens": 2058,
+          "total_tokens": 37350
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 15.619,
+          "input_tokens": 21706,
+          "output_tokens": 919,
+          "total_tokens": 22625
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 20.151,
+          "input_tokens": 24050,
+          "output_tokens": 1230,
+          "total_tokens": 25280
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 22.848,
+          "input_tokens": 15266,
+          "output_tokens": 1463,
+          "total_tokens": 16729
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 20.974,
+          "input_tokens": 11502,
+          "output_tokens": 1290,
+          "total_tokens": 12792
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 12.386,
+          "input_tokens": 17232,
+          "output_tokens": 687,
+          "total_tokens": 17919
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 18.904,
+          "input_tokens": 11338,
+          "output_tokens": 1201,
+          "total_tokens": 12539
+        },
+        {
+          "stage": "stage4_method_global",
+          "latency_sec": 56.473,
+          "input_tokens": 62466,
+          "output_tokens": 3734,
+          "total_tokens": 66200
+        }
+      ]
+    }
+  },
+  "diagnosis": {
+    "groundtruth_files": [
+      "compiler/rustc_mir_transform/src/validate.rs"
+    ],
+    "groundtruth_file_rank": null,
+    "file_top1_hit": false,
+    "file_top3_hit": false,
+    "file_top5_hit": false,
+    "file_top10_hit": false,
+    "method_groundtruth_count": 1,
+    "method_groundtruth_rank": null,
+    "method_top1_hit": false,
+    "method_top3_hit": false,
+    "method_top5_hit": false,
+    "method_top10_hit": false
+  }
+}

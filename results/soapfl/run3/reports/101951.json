@@ -1,0 +1,238 @@
+{
+  "bug_id": "101951",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-08-10",
+    "resolved": "34a6cae28e7013ff0e640026a8e46f315426829d"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/compare_method.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_infer/src/infer/sub.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/region_constraints/leak_check.rs",
+    "compiler/rustc_middle/src/ty/fold.rs",
+    "compiler/rustc_resolve/src/late/lifetimes.rs",
+    "compiler/rustc_typeck/src/hir_wf_check.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables `deny(elided_lifetimes_in_paths)`, making hidden path lifetimes a hard error and stressing lifetime diagnostics.",
+        "Defines `BuilderFn<'a>` with an associated `Output`, then blanket-implements it for any `FnOnce(&'a mut ()) -> Out`.",
+        "Uses a higher-ranked trait bound: `ConstructionFirm::Builder: for<'a> BuilderFn<'a>`, requiring one builder type to work for every lifetime.",
+        "In `Campus::add_building`, projects a nested associated type: `<<T as ConstructionFirm>::Builder as BuilderFn<'_>>::Output`.",
+        "The projected type uses `'_` inside a trait path, exercising placeholder lifetime handling under the elided-lifetimes lint.",
+        "Implements `ConstructionFirm` with a function-pointer builder `fn(&mut ()) -> PrettyCondo<'_>`, tying output to the input borrow lifetime.",
+        "Defines `PrettyCondo<'a>` holding `&'a mut ()`, so the associated output is explicitly lifetime-parameterized and invariant over a mutable reference.",
+        "Implements `Campus<ArchitectsInc>` using `&mut PrettyCondo<'_>`, checking coherence between concrete impl signatures and HRTB-associated type projection."
+      ],
+      "summary": "The reproducer combines higher-ranked trait bounds, blanket impls for `FnOnce`, nested associated-type projection, and explicit denial of elided path lifetimes. It checks how rustc handles `'_` in projected associated types and function-pointer outputs whose returned type borrows from the argument. The failing area is lifetime/lint handling around HRTB-based associated type normalization."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on lifetime handling during trait method signature matching when a higher-ranked associated type projection is involved. The reproducer defines `ConstructionFirm::Builder: for<'a> BuilderFn<'a>`, then uses the projected type `<<T as ConstructionFirm>::Builder as BuilderFn<'_>>::Output` in a trait method. For the concrete impl, `Builder` is a function pointer `fn(&mut ()) -> PrettyCondo<'_>`, so the projected output is intended to be `PrettyCondo<'a>` for each bound lifetime. The impl method uses `&mut PrettyCondo<'_>`, which should correspond to the instantiated projection, but rustc reports E0477 that `PrettyCondo<'_>` does not fulfill the required lifetime. This suggests a compiler-side bug in how anonymous placeholder lifetimes `'_` are represented or related when normalizing associated types under a `for<'a>` binder. The common thread across the reproducer, error, and behavior summary is interaction between: HRTB (`for<'a>`), function-pointer output borrowing from input, associated type projection, and elided/placeholder lifetimes in paths under strict lifetime linting. The likely defect is not in user code structure, but in lifetime checking / trait signature comparison after projection normalization, where rustc appears to lose the relationship between the returned `PrettyCondo<'a>` and the binder lifetime or treats `'_` as a fresh unrelated lifetime instead of the appropriately bound/inferred one.",
+      "possible_causes": [
+        "Bug in associated-type projection normalization under higher-ranked trait bounds: rustc may incorrectly normalize `<<T as ConstructionFirm>::Builder as BuilderFn<'_>>::Output` by introducing an anonymous lifetime not properly tied to the `for<'a>` binder.",
+        "Defect in trait impl method signature comparison: when checking `Campus<ArchitectsInc>::add_building`, rustc may compare the impl signature against the trait signature using placeholder regions incorrectly, causing a false E0477 outlives failure.",
+        "Incorrect handling of `'_` in trait path associated type projections, especially when `elided_lifetimes_in_paths` is active; the compiler may treat the placeholder lifetime in the projection as a distinct free region rather than one inferred from the HRTB context.",
+        "Region checking bug for function-pointer builders returning a value borrowing from their argument: the compiler may fail to preserve the dependency between input lifetime and output lifetime through the blanket `BuilderFn<'a> for F where F: FnOnce(&'a mut ()) -> Out` impl.",
+        "Possible issue in binder instantiation / late-bound region replacement during normalization or subtyping, where `PrettyCondo<'a>` becomes compared against `PrettyCondo<'_>` without proper alpha-renaming or variance-aware equivalence.",
+        "Bug in diagnostics-causing path lifetime lowering: `'_` inside nested projected types may be lowered differently from `'_` in the concrete impl signature, producing mismatched region identities and a spurious lifetime requirement failure."
+      ],
+      "evidence": [
+        "The trait requires `type Builder: for<'a> BuilderFn<'a>`, so one builder type must satisfy the trait for every lifetime, making correct HRTB binder handling essential.",
+        "`Campus::add_building` uses a nested projection `<<T as ConstructionFirm>::Builder as BuilderFn<'_>>::Output`, directly exercising compiler normalization of associated types with placeholder lifetimes.",
+        "The concrete builder type is `fn(&mut ()) -> PrettyCondo<'_>`, where output lifetime is tied to the input borrow; this relationship must be preserved through the blanket `BuilderFn` impl.",
+        "`PrettyCondo<'a>` contains `&'a mut ()`, so lifetime mismatches are strict due to mutable-reference invariance, amplifying any incorrect region substitution.",
+        "The compiler error is E0477 on the impl method `fn add_building(&mut self, _building: &mut PrettyCondo<'_>)`, indicating rustc believes the impl type does not satisfy the required lifetime even though it should match the projected associated output.",
+        "The reproducer explicitly stresses `'_` handling in type paths and HRTB-associated projections, and the failure occurs in exactly that area rather than in unrelated borrow checking or parsing.",
+        "No reproducer pattern suggests user-code unsoundness; the impl mirrors the intended concrete associated output, so the mismatch points to compiler logic in lifetime normalization / trait matching."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1471,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/compare_method.rs",
+        "reason": "Most directly responsible for checking that an impl method matches the corresponding trait method signature. This bug manifests as a false E0477 on the impl of `Campus::add_building`, so the impl-vs-trait signature comparison path—especially around HRTB, projected associated types, and placeholder lifetime instantiation—is the most suspicious location."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "The reproducer critically depends on `for<'a>` higher-ranked bounds and preserving the relationship between the builder input lifetime and projected output lifetime. If placeholder regions or fresh vars are instantiated incorrectly under binders, rustc can spuriously treat `PrettyCondo<'_>` as not satisfying the required lifetime."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The failing type involves nested associated-type projection `<<T as ConstructionFirm>::Builder as BuilderFn<'_>>::Output` under an HRTB. A bug in projection/normalization of associated types, especially when the projection argument contains `'_`, could easily produce the mismatched lifetime relation that later triggers E0477."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "Normalization is likely exercised before or during method signature comparison. This file handles recursive normalization in inference contexts and explicitly deals with escaping bound variables/universes, which matches the reproducer’s combination of HRTB plus projected associated types."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/sub.rs",
+        "reason": "The emitted E0477 indicates a subtype/outlives failure while comparing the impl signature against the trait-required one. If subtyping over types containing late-bound or placeholder regions is mishandled, `PrettyCondo<'a>` vs `PrettyCondo<'_>` could be rejected incorrectly here."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "This is the inference-layer projection support used when associated types cannot be resolved immediately. Since the reproducer stresses projected associated outputs in a trait method signature, a bug in deferred projection obligations or their interaction with inference variables and lifetimes is plausible."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/region_constraints/leak_check.rs",
+        "reason": "Higher-ranked placeholder regions often fail through leak-check style logic when universes are connected incorrectly. A mistaken leak check could falsely conclude that the placeholder lifetime from the HRTB escapes or does not outlive the required anonymous lifetime, yielding the observed lifetime error."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/fold.rs",
+        "reason": "Binder-sensitive folding/substitution is central to replacing bound regions during normalization and comparison. If `'_` inside the projected type path is folded or shifted incorrectly across binders, the compiler could lose the intended tie between input and output lifetimes."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late/lifetimes.rs",
+        "reason": "The reproducer explicitly uses `#![deny(elided_lifetimes_in_paths)]` and `'_` in type paths. While the final failure is type-system related, incorrect lowering/classification of anonymous lifetimes in paths could seed mismatched region identities that later surface during method signature checking."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/hir_wf_check.rs",
+        "reason": "Less likely than the others, but the error is an outlives/well-formedness-style complaint on the impl method parameter type. If well-formedness checking of the HRTB-projected associated type mishandles anonymous lifetimes, it could contribute to the false rejection."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 163.846,
+    "stage_times_sec": {
+      "checkout": 1.504,
+      "load_bug_context": 0.175,
+      "test_behavior_analysis": 6.136,
+      "test_failure_analysis": 21.712,
+      "load_file_candidates": 0.092,
+      "search_suspicious_files": 134.226
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 344688,
+      "output_tokens": 6551,
+      "total_tokens": 351239,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.136,
+          "input_tokens": 582,
+          "output_tokens": 343,
+          "total_tokens": 925
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 21.712,
+          "input_tokens": 1295,
+          "output_tokens": 900,
+          "total_tokens": 2195
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.977,
+          "input_tokens": 27208,
+          "output_tokens": 382,
+          "total_tokens": 27590
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.411,
+          "input_tokens": 26782,
+          "output_tokens": 331,
+          "total_tokens": 27113
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.98,
+          "input_tokens": 26775,
+          "output_tokens": 330,
+          "total_tokens": 27105
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.891,
+          "input_tokens": 27040,
+          "output_tokens": 308,
+          "total_tokens": 27348
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.247,
+          "input_tokens": 26952,
+          "output_tokens": 419,
+          "total_tokens": 27371
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.256,
+          "input_tokens": 27030,
+          "output_tokens": 328,
+          "total_tokens": 27358
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.612,
+          "input_tokens": 27013,
+          "output_tokens": 322,
+          "total_tokens": 27335
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.836,
+          "input_tokens": 26905,
+          "output_tokens": 313,
+          "total_tokens": 27218
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 10.721,
+          "input_tokens": 25800,
+          "output_tokens": 355,
+          "total_tokens": 26155
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 10.13,
+          "input_tokens": 26747,
+          "output_tokens": 339,
+          "total_tokens": 27086
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.359,
+          "input_tokens": 27102,
+          "output_tokens": 310,
+          "total_tokens": 27412
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.327,
+          "input_tokens": 26738,
+          "output_tokens": 374,
+          "total_tokens": 27112
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.965,
+          "input_tokens": 8710,
+          "output_tokens": 435,
+          "total_tokens": 9145
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 14.489,
+          "input_tokens": 12009,
+          "output_tokens": 762,
+          "total_tokens": 12771
+        }
+      ]
+    }
+  }
+}

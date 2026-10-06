@@ -1,0 +1,229 @@
+{
+  "bug_id": "93646",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-02-03",
+    "resolved": "27f5d830eb11cd7bdc834d6f0d78120976f75443"
+  },
+  "final_top10": [
+    "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+    "compiler/rustc_middle/src/mir/interpret/queries.rs",
+    "compiler/rustc_const_eval/src/interpret/operand.rs",
+    "compiler/rustc_const_eval/src/interpret/step.rs",
+    "compiler/rustc_const_eval/src/interpret/terminator.rs",
+    "compiler/rustc_const_eval/src/interpret/place.rs",
+    "compiler/rustc_const_eval/src/interpret/validity.rs",
+    "compiler/rustc_middle/src/mir/interpret/error.rs",
+    "compiler/rustc_typeck/src/check/wfcheck.rs",
+    "compiler/rustc_middle/src/ty/generics.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Declares a struct with a const generic parameter `N: usize`, using a default value instead of requiring callers to specify it.",
+        "Uses an inline block expression as the default const generic argument, exercising parsing and evaluation of block-based const expressions.",
+        "Inside the const block, declares an uninitialized local binding `let s: &str;`, which is invalid if later read before initialization.",
+        "Immediately calls `s.len()` in the const expression, forcing the compiler to analyze use of an uninitialized reference.",
+        "Invokes method resolution on `&str` within a const-generic default, combining const evaluation with normal method-call/type-checking rules.",
+        "Tests compiler validation of default const generic expressions during item checking, even though the type is never instantiated.",
+        "Exercises nightly-era const generics support from `nightly-2022-02-03`, where generic const defaults and diagnostics were still evolving.",
+        "Keeps `main` empty so any failure comes purely from compiling the type definition, isolating front-end analysis behavior."
+      ],
+      "summary": "The reproducer defines a struct whose const generic parameter has a default value computed by a block expression that reads an uninitialized `&str` local via `s.len()`. This targets nightly const-generics handling, especially parsing, type checking, method resolution, and validation of invalid const default expressions at item-definition time."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on a default const-generic argument being eagerly evaluated during item well-formedness checking. The default value is a block const expression that declares a local `let s: &str;` without initialization and then immediately reads it via `s.len()`. This should be rejected with a normal definite-initialization/borrow-check style diagnostic (E0381), but instead rustc panics while const-evaluating and simplifying the constant for the type system. The query stack shows the crash occurs in `eval_to_allocation_raw` / `eval_to_const_value_raw` while checking `X::{constant#0}`, before any instantiation of the struct. That strongly suggests a compiler defect in handling invalid MIR/const-eval of default const generic expressions containing uninitialized locals and method-call lowering, where an expected user error is not converted into `ErrorReported` and instead triggers an ICE.",
+      "possible_causes": [
+        "Bug in const-eval/MIR interpreter for const generic defaults: reading an uninitialized local inside a default const argument is not gracefully diagnosed and instead causes a panic during `eval_to_allocation_raw`.",
+        "Defect in error propagation when simplifying a const generic default for the type system (`eval_to_const_value_raw`): the compiler likely assumes the constant can be evaluated and fails to handle the E0381-style uninitialized-use error path.",
+        "Well-formedness checking for generic parameter defaults may be forcing eager evaluation of erroneous block-based const expressions without first rejecting invalid local initialization state, exposing an ICE in item checking.",
+        "Method-call lowering or const qualification for `s.len()` on an uninitialized `&str` inside a const block may produce invalid MIR/operand state that the const evaluator does not defensively handle.",
+        "Mismatch between diagnostics and const-eval for default const generics on nightly const-generics implementation: the frontend recognizes this as an uninitialized-variable error, but the const-generic validation path still attempts full evaluation and panics."
+      ],
+      "evidence": [
+        "Reproducer uses a default const generic expression `const N: usize = { let s: &str; s.len() }`, combining const generics, block const expressions, and a read of an uninitialized local.",
+        "Compiler output references `E0381`, confirming the semantic issue is use of an uninitialized binding, which should normally be reported as a user error rather than an ICE.",
+        "Query stack pinpoints the panic to const evaluation: `#0 [eval_to_allocation_raw] const-evaluating + checking X::{constant#0}` and `#1 [eval_to_const_value_raw] simplifying constant for the type system`.",
+        "Crash happens during `check_item_well_formed` for `X`, even though `main` is empty and the struct is never instantiated, showing the bug is in compiler validation of the item definition itself.",
+        "The reproducer specifically uses a default const generic on nightly 2022-02-03, an area known to involve immature eager evaluation/type-system simplification paths.",
+        "Because the panic occurs before code generation and solely from compiling the type definition, the likely defect is in front-end type checking / const-eval production code, not in the reproducer."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1388,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+        "reason": "Most suspicious because the query stack points directly at `eval_to_allocation_raw` and `eval_to_const_value_raw` while evaluating the default const generic `X::{constant#0}`. This file is responsible for turning interpreter failures into `ErrorHandled` diagnostics, so an ICE instead of a reported E0381 strongly suggests bad error propagation here."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/interpret/queries.rs",
+        "reason": "This is the `TyCtxt` wrapper layer that constructs the const-eval query inputs for unevaluated consts and const-generic defaults. Since the crash happens while simplifying a const for the type system during item WF checking, this layer is a likely place for an erroneous assumption that the const can be evaluated rather than rejected cleanly."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/interpret/operand.rs",
+        "reason": "The reproducer reads an uninitialized local `s` and then calls `s.len()`, so interpreter operand handling around `Immediate::Uninit` and reads of uninitialized values is highly relevant. A panic could result if this path does not gracefully convert uninitialized operand access into a user-facing error."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/interpret/step.rs",
+        "reason": "Execution of the const block `{ let s: &str; s.len() }` requires MIR statement stepping for local declaration/assignment state before the read. If initialization state for locals in const-eval is mishandled here, the interpreter may ICE when the later read occurs."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/interpret/terminator.rs",
+        "reason": "`s.len()` is lowered as a function/method call in MIR, so terminator call handling is involved in evaluating the invalid const expression. If call setup on an uninitialized `&str` receiver is not rejected properly, this file could trigger the panic during CTFE."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/interpret/place.rs",
+        "reason": "Reading `s` as a place before initialization flows through the place machinery. Bugs in converting an uninitialized place to an operand or destination during const evaluation could explain an ICE instead of the expected definite-initialization diagnostic."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/interpret/validity.rs",
+        "reason": "Even if the interpreter reaches a value, validation should catch invalid/uninitialized references in const contexts. A failure to classify this as a validation error and instead panic would fit the observed behavior."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/interpret/error.rs",
+        "reason": "The failure mode suggests an issue distinguishing reported CTFE errors from internal failures. This file defines `ErrorHandled`, which is exactly the mechanism that should carry an emitted diagnostic rather than allowing a panic to escape."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "The query stack shows the ICE occurs during `check_item_well_formed` for `X`, before instantiation. That makes the well-formedness checking path for items with default const generic expressions a plausible trigger that may be eagerly forcing evaluation of an invalid const."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/generics.rs",
+        "reason": "This file retrieves const parameter defaults via `const_param_default`, so it sits on the path that exposes the problematic default const generic to later WF/type-system evaluation. If generic-default handling is causing eager simplification of erroneous defaults, this file is relevant."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 126.578,
+    "stage_times_sec": {
+      "checkout": 1.754,
+      "load_bug_context": 0.037,
+      "test_behavior_analysis": 5.924,
+      "test_failure_analysis": 11.088,
+      "load_file_candidates": 0.126,
+      "search_suspicious_files": 107.649
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 332261,
+      "output_tokens": 5812,
+      "total_tokens": 338073,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.924,
+          "input_tokens": 342,
+          "output_tokens": 279,
+          "total_tokens": 621
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.088,
+          "input_tokens": 2132,
+          "output_tokens": 652,
+          "total_tokens": 2784
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.712,
+          "input_tokens": 27784,
+          "output_tokens": 357,
+          "total_tokens": 28141
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.297,
+          "input_tokens": 27420,
+          "output_tokens": 309,
+          "total_tokens": 27729
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.717,
+          "input_tokens": 27589,
+          "output_tokens": 346,
+          "total_tokens": 27935
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.992,
+          "input_tokens": 27574,
+          "output_tokens": 364,
+          "total_tokens": 27938
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.318,
+          "input_tokens": 27471,
+          "output_tokens": 372,
+          "total_tokens": 27843
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.198,
+          "input_tokens": 27659,
+          "output_tokens": 381,
+          "total_tokens": 28040
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.8,
+          "input_tokens": 27614,
+          "output_tokens": 371,
+          "total_tokens": 27985
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.324,
+          "input_tokens": 26698,
+          "output_tokens": 379,
+          "total_tokens": 27077
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.831,
+          "input_tokens": 27409,
+          "output_tokens": 309,
+          "total_tokens": 27718
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.623,
+          "input_tokens": 27637,
+          "output_tokens": 260,
+          "total_tokens": 27897
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.645,
+          "input_tokens": 27158,
+          "output_tokens": 369,
+          "total_tokens": 27527
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.296,
+          "input_tokens": 16976,
+          "output_tokens": 330,
+          "total_tokens": 17306
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.875,
+          "input_tokens": 10798,
+          "output_tokens": 734,
+          "total_tokens": 11532
+        }
+      ]
+    }
+  }
+}

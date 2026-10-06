@@ -1,0 +1,235 @@
+{
+  "bug_id": "99793",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-07-25",
+    "resolved": "7fe022f5aa32bbbb33c3a58755729d6667a461a9"
+  },
+  "final_top10": [
+    "compiler/rustc_const_eval/src/transform/check_consts/qualifs.rs",
+    "compiler/rustc_const_eval/src/transform/check_consts/check.rs",
+    "compiler/rustc_const_eval/src/transform/check_consts/mod.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_typeck/src/check/expr.rs",
+    "compiler/rustc_typeck/src/collect/item_bounds.rs",
+    "compiler/rustc_ty_utils/src/common_traits.rs",
+    "compiler/rustc_borrowck/src/lib.rs",
+    "compiler/rustc_borrowck/src/nll.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a const function returning `impl Eq`, using return-position `impl Trait` in a `const fn`.",
+        "The hidden concrete return type of `f` is inferred from calling another const function `g()`.",
+        "`g` has no explicit return type, so it implicitly returns unit `()`.",
+        "`()` implements `Eq`, so `f`’s opaque return type should resolve to `()`.",
+        "The reproducer specifically uses a tail expression `g()` rather than `g();`, exercising tail-expression type inference.",
+        "Comments show nearby equivalent forms compile, isolating behavior to this exact opaque-type/tail-expression combination.",
+        "This stresses rustc’s handling of opaque type inference in const contexts on nightly.",
+        "The empty `main` keeps runtime irrelevant; the bug is purely a compile-time type-checking/inference issue."
+      ],
+      "summary": "This reproducer targets rustc’s compile-time handling of return-position `impl Trait` inside `const fn`. Function `f` returns `impl Eq` via the tail expression `g()`, where `g` implicitly returns `()`. Since `()` implements `Eq`, the code should type-check. The commented variants indicate equivalent forms succeed, narrowing the failure to opaque return type inference from a tail call expression in a const context."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is a query-cycle during compilation, not a normal type error. The reproducer combines three specific ingredients: (1) a `const fn`, (2) return-position `impl Trait` (`-> impl Eq`), and (3) inference of the hidden opaque type from a tail expression `g()`. The compiler should infer the hidden type of `f`’s opaque return as `()`, because `g` implicitly returns unit and `()` implements `Eq`. However, the stack trace shows rustc computing the type of `f`’s opaque return, then borrow-checking/processing/const-checking `f`, then asking whether the opaque type is `Freeze`, which triggers trait selection on `impl Eq: Freeze`, which recursively requires computing the opaque type again. The nearby accepted variants are important: `g();` and `{}` avoid the problematic tail-expression opaque inference path, and `(g(),).0` likely forces a different expression/type-checking route that avoids the cycle. This strongly suggests a compiler defect in the interaction between opaque type inference for RPIT in `const fn` and const-checking / qualif (`Freeze`) evaluation, where the hidden type is queried too late or through a self-referential query path.",
+      "possible_causes": [
+        "A defect in rustc’s query dependency graph for return-position `impl Trait` in `const fn`, where computing the hidden opaque type of `f` incorrectly depends on const-checking `f`, and const-checking in turn depends on evaluating trait bounds (`Freeze`) on that same opaque type, creating a cycle.",
+        "Incorrect ordering/eagerness in const qualification checking: the compiler appears to evaluate whether the RPIT hidden type is `Freeze` before the hidden type has been fully resolved from the tail expression, causing trait selection on an unresolved opaque to recurse back into opaque-type computation.",
+        "A bug specific to tail-expression handling in opaque type inference for const functions: `g()` as the final expression likely goes through a different inference path than `g();` or `{}`, and that path may register the hidden type through body/borrowck/const-check queries instead of directly normalizing the expression type to `()`.",
+        "Improper integration between borrow-checking/processing of `const fn` bodies and opaque type registration, such that borrowck or MIR-based const checks are invoked while the opaque type for RPIT is still under computation, yielding self-dependence.",
+        "A missing special-case or normalization step for trivial hidden types like unit `()` in const RPIT, causing rustc to keep the hidden type opaque during const qualification instead of concretizing it early and avoiding the `impl Eq: Freeze` obligation cycle."
+      ],
+      "evidence": [
+        "Compiler error is `E0391: cycle detected when computing type of f::{opaque#0}` at `const fn f() -> impl Eq { g() }`, directly indicating a self-referential compiler query around the opaque return type.",
+        "The query stack explicitly shows: computing opaque type -> borrow-checking `f` -> processing `f` -> const checking `f` -> computing whether `impl Eq` is `Freeze` -> trait selection obligation `impl Eq: Freeze` -> again computing the opaque type. This points to a compiler-internal cycle involving const-checking and trait evaluation, not a user-code semantic mismatch.",
+        "`g` has implicit return type `()`, and `()` implements `Eq`, so the program should type-check; therefore the observed failure is inconsistent with the language semantics and indicates a compiler bug.",
+        "The comments demonstrate close variants compile: `g();`, `{}`, and `(g(),).0`. These forms preserve essentially the same semantic result but avoid the exact failing inference path, isolating the defect to the tail-expression RPIT-in-const handling rather than to `impl Eq`, `const fn`, or `g` alone.",
+        "The reproducer has empty `main` and no runtime behavior, so the failure is entirely in compile-time type inference / query evaluation within rustc."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1459,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_const_eval/src/transform/check_consts/qualifs.rs",
+        "reason": "Most directly implicated by the query stack: const-checking asks whether the RPIT hidden type is `Freeze`, and this file implements the qualification logic that derives const qualifs from types, including `Freeze`-related checks. The cycle likely comes from qualif computation querying `impl Eq: Freeze` before the opaque return type of the const fn has been fully resolved."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/check_consts/check.rs",
+        "reason": "This is the main MIR const-checking pass invoked on `const fn` bodies. The error notes explicitly mention 'const checking `f`', so this file is a prime suspect for triggering qualif evaluation on the function body/result type too early, especially for a tail-expression RPIT case."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/check_consts/mod.rs",
+        "reason": "Coordinates const-checking for `const fn` bodies and is the entry point tying together the checker and qualif machinery. If the bug is in the ordering/integration between const checking and opaque type resolution, the orchestration here is a likely place."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Opaque hidden types for `impl Trait` are finalized here after borrow checking/NLL. The cycle mentions computing the type of `f::{opaque#0}` and borrow-checking `f`; a defect in when or how the hidden type is materialized for RPIT in const contexts could easily produce this self-dependence."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Core inference support for opaque types (`impl Trait`) lives here. Since the reproducer isolates a tail-expression RPIT inference path (`g()` vs `g();`), this file is highly suspicious for mishandling hidden type registration/resolution in a way that later forces const-checking to recurse."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/expr.rs",
+        "reason": "Expression type checking determines the type of the tail expression and feeds RPIT hidden-type inference. The fact that only the exact tail-expression form `g()` fails, while semantically equivalent forms succeed, strongly suggests a bug in expression/RPIT interaction during body type checking."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect/item_bounds.rs",
+        "reason": "This file computes bounds for opaque types (`impl Trait`). Because the failing obligation is `impl Eq: Freeze`, incorrect handling of opaque bounds or their normalization in const contexts could contribute to the recursive query path."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/common_traits.rs",
+        "reason": "Implements low-level queries like `is_freeze_raw`, and the stack explicitly says the compiler is 'computing whether `impl core::cmp::Eq` is freeze'. If `is_freeze_raw` handles opaques poorly or forces `type_of` on the opaque too eagerly, it could be the immediate trigger of the cycle."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/lib.rs",
+        "reason": "The query stack explicitly passes through borrow-checking `f`. This file is the borrowck query entry point, so it is a plausible site for an incorrect dependency edge between borrowck and opaque-type computation in this RPIT const-fn scenario."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/nll.rs",
+        "reason": "NLL borrow checking carries inferred opaque type values and participates in the post-typeck resolution path for RPIT. Given the cycle goes through borrow-checking before returning to opaque type computation, this integration layer is also suspicious."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 142.933,
+    "stage_times_sec": {
+      "checkout": 1.224,
+      "load_bug_context": 0.06,
+      "test_behavior_analysis": 5.836,
+      "test_failure_analysis": 14.491,
+      "load_file_candidates": 0.087,
+      "search_suspicious_files": 121.235
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 340560,
+      "output_tokens": 6216,
+      "total_tokens": 346776,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.836,
+          "input_tokens": 382,
+          "output_tokens": 270,
+          "total_tokens": 652
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.491,
+          "input_tokens": 1207,
+          "output_tokens": 824,
+          "total_tokens": 2031
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.719,
+          "input_tokens": 27033,
+          "output_tokens": 328,
+          "total_tokens": 27361
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.771,
+          "input_tokens": 26603,
+          "output_tokens": 306,
+          "total_tokens": 26909
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.764,
+          "input_tokens": 26632,
+          "output_tokens": 343,
+          "total_tokens": 26975
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.092,
+          "input_tokens": 26873,
+          "output_tokens": 331,
+          "total_tokens": 27204
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.447,
+          "input_tokens": 26777,
+          "output_tokens": 421,
+          "total_tokens": 27198
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.698,
+          "input_tokens": 26858,
+          "output_tokens": 325,
+          "total_tokens": 27183
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.386,
+          "input_tokens": 26873,
+          "output_tokens": 384,
+          "total_tokens": 27257
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.9,
+          "input_tokens": 26713,
+          "output_tokens": 313,
+          "total_tokens": 27026
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.791,
+          "input_tokens": 25615,
+          "output_tokens": 339,
+          "total_tokens": 25954
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.921,
+          "input_tokens": 26618,
+          "output_tokens": 244,
+          "total_tokens": 26862
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.164,
+          "input_tokens": 26912,
+          "output_tokens": 306,
+          "total_tokens": 27218
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.413,
+          "input_tokens": 26596,
+          "output_tokens": 350,
+          "total_tokens": 26946
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.697,
+          "input_tokens": 6047,
+          "output_tokens": 372,
+          "total_tokens": 6419
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.444,
+          "input_tokens": 12821,
+          "output_tokens": 760,
+          "total_tokens": 13581
+        }
+      ]
+    }
+  }
+}

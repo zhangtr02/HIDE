@@ -1,0 +1,228 @@
+{
+  "bug_id": "93794",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-02-09",
+    "resolved": "0c292c9667f1b202a9150d58bdd2e89e3e803996"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/expr.rs",
+    "compiler/rustc_typeck/src/check/fn_ctxt/mod.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/at.rs",
+    "compiler/rustc_infer/src/infer/combine.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_typeck/src/check/expectation.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_typeck/src/check/coercion.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "`foo` returns `impl IntoIterator<Item = ()>`, exercising opaque `impl Trait` in return position.",
+        "The `if b { return vec![()]; }` branch fixes the hidden concrete return type to `Vec<()>` via an early `return`.",
+        "The fallback branch builds an array iterator from `[()]` using `.into_iter()` under Rust 2021 array-by-value iteration semantics.",
+        "That iterator is immediately consumed by `.collect()`, relying on type inference to choose a collection type from the function’s expected opaque return.",
+        "Because the hidden `impl Trait` type must be identical across all return paths, the compiler must infer the `collect()` result as `Vec<()>`.",
+        "The reproducer stresses cross-branch type unification between an explicit `Vec<()>` and an implicitly inferred `collect()` target.",
+        "It exercises trait-based reasoning: `Vec<()>` implements `IntoIterator<Item = ()>`, while the compiler must preserve a single concrete opaque type.",
+        "This targets compiler behavior around `impl Trait` normalization/inference with early returns and collection inference in MIR/type checking."
+      ],
+      "summary": "The program defines `foo` with an opaque return type `impl IntoIterator<Item = ()>`. One branch explicitly returns `Vec<()>`; the other creates `[()]`, iterates it, and uses `collect()` without a written target type. Rust must infer that `collect()` also produces `Vec<()>`, because all `impl Trait` return paths must share one hidden concrete type. The reproducer exercises Rust 2021 array iteration, `collect` inference, trait resolution, and compiler unification of opaque return types across branches."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on return-position `impl Trait` with multiple return paths where one branch explicitly determines the hidden opaque type (`Vec<()>`) and another branch relies on inference through `Iterator::collect()`. Semantically, both branches should resolve to the same concrete type because RPIT requires a single hidden type for all returns. However, the compiler instead type-checks the `collect()` call as if it must directly build the opaque type `impl IntoIterator<Item = ()>`, producing a `FromIterator<()> for impl IntoIterator<Item=()>` obligation. This indicates the opaque return type is not being properly replaced/unified with its inferred hidden concrete type during type checking of the later branch. The common pattern is a missed propagation of branch-established hidden type information for an opaque return type into inference/trait solving for `collect`, especially in the presence of an early `return` and expected-type-driven collection inference.",
+      "possible_causes": [
+        "Bug in type checking/inference for return-position `impl Trait`: the expected type for the `collect()` expression is left as the opaque type instead of being resolved to the hidden concrete type inferred from another return branch (`Vec<()>`).",
+        "Defect in cross-branch return type unification for opaque types with early returns, where the hidden type chosen from `return vec![()]` is not propagated to subsequent return expressions in the same function body.",
+        "Trait solver / obligation generation bug around `Iterator::collect` with opaque expected types: rustc generates a `FromIterator` obligation for the opaque `impl IntoIterator<Item=()>` rather than normalizing or constraining it to the single hidden type.",
+        "Possible issue in handling RPIT normalization during coercion/checking of tail expressions, causing the fallback branch to be checked against the interface bound (`IntoIterator`) rather than the concrete hidden type required by opaque type definition.",
+        "Inference bug specific to Rust 2021 array-by-value `.into_iter()` plus `collect()` under an opaque return expectation, where expected-type-based collection inference fails when the expected type is an unresolved opaque alias."
+      ],
+      "evidence": [
+        "The explicit branch `return vec![()];` should fix the hidden concrete type of `impl IntoIterator<Item = ()>` to `Vec<()>`.",
+        "The other branch uses `[()].into_iter().collect()` with no explicit target type, so correct compilation depends on expected-type inference from the function return type.",
+        "The emitted error says `FromIterator<()>` is not implemented for `impl IntoIterator<Item = ()>`, showing rustc tried to collect directly into the opaque type rather than into `Vec<()>`.",
+        "All return paths of a function returning RPIT must use the same hidden concrete type, so treating the opaque type as the collection target is inconsistent with RPIT semantics.",
+        "The reproducer specifically combines early `return`, opaque return type, and `collect()` inference; the failure occurs at the `collect()` call rather than at branch mismatch, pointing to expected-type/opaque-type handling in compiler type checking rather than user code logic."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1393,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/expr.rs",
+        "reason": "Most likely site of the bug: the failure happens while type-checking the tail expression `[()].into_iter().collect()` under the expected return type `impl IntoIterator<Item=()>`. The compiler appears to pass the opaque RPIT itself as the expected `collect` target instead of using the hidden concrete type already fixed by the earlier `return vec![()]` branch. This file contains expression checking, branch handling, return/tail-expression typing, and expected-type propagation that directly controls `collect` inference."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/fn_ctxt/mod.rs",
+        "reason": "`FnCtxt` owns per-function body state, including return-type coercion and the machinery that accumulates and unifies types across multiple return paths. Since the reproducer depends on an early `return` establishing the hidden RPIT type and a later tail expression reusing it, a bug in how function-context state records or exposes the opaque hidden type across returns is highly plausible here."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "The error strongly suggests that the opaque return type was not replaced/unified with its inferred hidden type during inference. This file implements inference-time support for opaque types and the key logic that rewrites/tracks `impl Trait` as inference variables and records hidden types. A defect here would explain why `collect` ends up generating `FromIterator<()> for impl IntoIterator<Item=()>` instead of for `Vec<()>`."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/at.rs",
+        "reason": "This file defines `DefineOpaqueTypes` handling on the main inference relation entry points. The bug pattern matches an operation being performed in the wrong opaque-type mode—treating the RPIT opaquely during expression/return checking when it should be allowed to define or reveal the hidden type. That would cause obligations to be generated against the opaque alias itself."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "reason": "Cross-branch unification and equality/subtyping relations ultimately flow through the general type-combining infrastructure here. If combining the explicit `Vec<()>` return with the opaque return slot does not correctly define the RPIT hidden type, later inference for `collect()` would see only the opaque shell. This makes the generic combine logic a strong suspect."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "After inference records an opaque instantiation, this file contains logic to recover the canonical hidden type definition from that instantiation. A bug in mapping an instantiated RPIT back to its defining hidden type could prevent the compiler from normalizing the expected type of the later branch, especially when the hidden type is first fixed by an early return."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/expectation.rs",
+        "reason": "The reproducer is especially sensitive to expected-type propagation into `collect()`. This file governs how expectations are weakened or preserved across branch-like constructs. If expectation adjustment for `if` expressions or tail expressions drops or preserves the wrong form of the RPIT expectation, `collect` inference could target the opaque type instead of the concrete hidden type."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "The emitted error is a trait obligation failure (`FromIterator<()>` not implemented). While likely downstream of a typeck/inference mistake, the fulfillment engine is where the wrong obligation on the opaque type becomes visible. If fulfillment mishandles obligations involving definable opaque types, it could contribute to rejecting a program that should infer `Vec<()>`."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "A plausible failure mode is missing normalization/revelation of the expected RPIT type before checking `collect()`. This file provides normalization entry points used during type checking and trait solving. If normalization leaves the opaque alias unrevealed in this context, `collect` would incorrectly try to build the opaque interface type."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/coercion.rs",
+        "reason": "Return-path merging and tail-expression checking often use coercion machinery. Since the bug involves reconciling multiple return expressions to one hidden RPIT type, coercion logic that fails to coerce the later branch toward the already-established hidden concrete type could be involved, especially in branch/join contexts."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 150.386,
+    "stage_times_sec": {
+      "checkout": 0.188,
+      "load_bug_context": 0.064,
+      "test_behavior_analysis": 6.824,
+      "test_failure_analysis": 33.564,
+      "load_file_candidates": 0.085,
+      "search_suspicious_files": 109.661
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 319078,
+      "output_tokens": 5948,
+      "total_tokens": 325026,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.824,
+          "input_tokens": 362,
+          "output_tokens": 340,
+          "total_tokens": 702
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 33.564,
+          "input_tokens": 1075,
+          "output_tokens": 616,
+          "total_tokens": 1691
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.156,
+          "input_tokens": 26702,
+          "output_tokens": 393,
+          "total_tokens": 27095
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.849,
+          "input_tokens": 26301,
+          "output_tokens": 360,
+          "total_tokens": 26661
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.402,
+          "input_tokens": 26490,
+          "output_tokens": 322,
+          "total_tokens": 26812
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.619,
+          "input_tokens": 26484,
+          "output_tokens": 310,
+          "total_tokens": 26794
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.609,
+          "input_tokens": 26393,
+          "output_tokens": 353,
+          "total_tokens": 26746
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.421,
+          "input_tokens": 26563,
+          "output_tokens": 374,
+          "total_tokens": 26937
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.688,
+          "input_tokens": 26530,
+          "output_tokens": 323,
+          "total_tokens": 26853
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.698,
+          "input_tokens": 25594,
+          "output_tokens": 300,
+          "total_tokens": 25894
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.955,
+          "input_tokens": 26323,
+          "output_tokens": 342,
+          "total_tokens": 26665
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.747,
+          "input_tokens": 26528,
+          "output_tokens": 308,
+          "total_tokens": 26836
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.346,
+          "input_tokens": 26081,
+          "output_tokens": 339,
+          "total_tokens": 26420
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.639,
+          "input_tokens": 16915,
+          "output_tokens": 345,
+          "total_tokens": 17260
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 15.508,
+          "input_tokens": 10737,
+          "output_tokens": 923,
+          "total_tokens": 11660
+        }
+      ]
+    }
+  }
+}

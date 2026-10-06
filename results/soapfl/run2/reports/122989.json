@@ -1,0 +1,252 @@
+{
+  "bug_id": "122989",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-03-24",
+    "resolved": "2f090c30ddd6b3bbe5c81c087579a5166e7c7278"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/object_safety.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/lint.rs",
+    "compiler/rustc_parse/src/parser/generics.rs",
+    "compiler/rustc_parse/src/parser/ty.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_trait_selection/src/traits/object_safety.rs",
+    "compiler/rustc_parse/src/parser/diagnostics.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `Traitor` with duplicate const generic parameter names `N`, both constrained by the trait `N<2>`, stressing generic parameter name resolution and diagnostics.",
+        "Uses const generic defaults where the second `Traitor` parameter defaults to the first `N`, exercising dependency ordering and default const argument handling.",
+        "Declares a method `fn N(&N) -> N<2>` reusing `N` as method name, parameter type, and return type, stressing parser/name-resolution ambiguity.",
+        "Method body returns `M`, an undeclared identifier, forcing later name resolution and error recovery inside an already malformed trait definition.",
+        "Defines trait `N` with a const generic default `12` constrained by `Traitor<2>`, exercising trait-bound checking on const generic parameter types/defaults.",
+        "Creates a cyclic relationship: `Traitor` references trait `N`, while `N` references `Traitor`, testing compiler handling of mutually recursive generic constraints.",
+        "Uses invalid syntax like trait bounds in const parameter types (`const N: N<2>` / `const N: Traitor<2>`), exercising parsing and AST/HIR lowering diagnostics.",
+        "Contains no trait impls or calls; compilation focuses entirely on front-end parsing, name resolution, generic validation, and diagnostic recovery."
+      ],
+      "summary": "The reproducer is a deliberately malformed Rust program built to stress rustc’s parser and diagnostic recovery around const generics, duplicate generic names, recursive trait references, and ambiguous identifier reuse. It defines two mutually referring traits with invalid const-parameter bounds/defaults and a malformed trait method, so the compiler mainly exercises early parsing, name resolution, generic validation, and error recovery paths."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is concentrated in rustc front-end handling of malformed const-generic trait syntax combined with aggressive error recovery. The reproducer repeatedly places trait names where const-parameter types are expected (`const N: N<2>` and `const N: Traitor<2>`), reuses the identifier `N` in several namespaces, and creates mutual references between `Traitor` and `N`. The compiler output shows that rustc recovers by interpreting these invalid const parameter types as trait objects (`dyn Traitor<2>`, `dyn N<2>`), then continues into object-safety checks and const-generic-type validation. That indicates the bug is likely not the emitted user-facing errors themselves, but a defective recovery/lowering/type-checking path that incorrectly constructs or validates trait-object types from invalid const-generic syntax. The query-stack/analysis-pass mention suggests the malformed HIR/Ty produced during recovery leaks into later analysis instead of being rejected cleanly earlier. Overall, the common pattern is: invalid const generic declarations involving trait paths and recursive references are being mis-lowered or over-validated, triggering unrelated object-safety and trait-object diagnostics during analysis.",
+      "possible_causes": [
+        "A defect in parser or AST->HIR lowering for const generic parameters that misclassifies `const N: Trait<...>` as a trait-object type candidate instead of rejecting it as an invalid const-parameter type early.",
+        "Buggy diagnostic recovery for malformed generic parameter syntax allows invalid trait references in const parameter type position to survive into type checking, producing spurious object-safety checks on `Traitor`/`N`.",
+        "A compiler defect in const-generic validation order: rustc appears to run object-safety and trait-object formation logic before definitively rejecting unsupported const parameter types, causing later analysis to operate on nonsensical recovered types.",
+        "Name resolution / namespace handling bug caused by repeated identifier `N` across trait name, generic parameter names, method name, parameter type, and return type, potentially confusing recovery and causing the wrong entities to be resolved in generic/type contexts.",
+        "Improper handling of mutually recursive trait references in erroneous generic defaults/constraints may cause the compiler to build cyclic or partially-invalid type representations that leak into analysis passes.",
+        "A defect in error recovery around duplicate const generic parameter names may leave an inconsistent generics list, amplifying downstream misdiagnostics when later passes inspect defaults and bounds.",
+        "Type checking or trait-object construction code may be incorrectly invoked for trait paths appearing in const-generic parameter declarations, even though const parameter types are restricted to primitive scalar kinds and should be rejected before object-safety evaluation."
+      ],
+      "evidence": [
+        "Compiler reports `the trait 'Traitor' cannot be made into an object` at `trait N<const N: Traitor<2> = 12>`, showing rustc treated an invalid const-parameter type as a trait-object-like type and invoked object-safety machinery.",
+        "Compiler emits `'(dyn Traitor<2, {const error}> + 'static)' is forbidden as the type of a const generic parameter`, strong evidence that recovery transformed invalid syntax into a `dyn Trait` type instead of stopping earlier.",
+        "Multiple E0782 diagnostics (`trait objects must include the dyn keyword`) on `N<2>` and `Traitor<2>` inside const parameter declarations and return types indicate trait-path parsing/recovery is flowing into trait-object diagnostics.",
+        "The reproducer intentionally mixes duplicate generic names, recursive trait references, and invalid const-generic bounds/defaults, and all observed errors come from parsing/name-resolution/type-validation stages rather than codegen or borrow checking.",
+        "The log mentions `running analysis passes on this crate` / `end of query stack`, suggesting invalid recovered constructs survived far enough into later compiler analysis to trigger additional queries instead of being contained by earlier validation.",
+        "No impls or executable logic exist in the program, so the failure source is necessarily in compiler front-end parsing, lowering, generic validation, trait solving, or diagnostic recovery code paths handling malformed syntax."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1765,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+        "reason": "Most suspicious because the bad program is being lowered from malformed HIR type/const syntax into semantic types, and the observed errors show invalid const-parameter type syntax (`const N: Traitor<2>`) surviving as trait-object-like types into later analysis. This module is the main HIR type lowering entry point for types, trait refs, and const arguments, so a recovery/lowering bug here could easily misclassify trait paths in const-generic type position and let nonsense reach object-safety checks."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/object_safety.rs",
+        "reason": "The output specifically shows object-safety machinery being invoked on an invalid const generic parameter type, including construction of `(dyn Traitor<2, {const error}> + 'static)`. This file contains trait-object lowering and validation, so it is highly suspect for accepting/recovering malformed trait-path syntax as a dyn object candidate instead of rejecting it earlier or containing the error."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/lint.rs",
+        "reason": "Multiple E0782 diagnostics (`trait objects must include the dyn keyword`) are emitted on invalid const parameter declarations and return types. This file is responsible for bare trait object diagnostics during HIR type lowering, so it is a strong candidate for over-eagerly treating invalid syntax in const-generic type position as a bare trait object and producing cascading, unrelated diagnostics."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/generics.rs",
+        "reason": "The reproducer heavily stresses generic parameter parsing with invalid forms like `const N: N<2>` and duplicate const parameter names/defaults. A parser bug or recovery issue here could create an AST that incorrectly represents these const params as typed trait-object candidates rather than rejecting them cleanly, feeding bad structures into lowering."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/ty.rs",
+        "reason": "The malformed code reuses trait names in type positions and return types (`-> N<2>`), and the emitted diagnostics suggest the parser/recovery path may be interpreting trait-path syntax as trait objects. Since this file handles type parsing and recovery around trait object syntax, it is a plausible source of the initial misclassification."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "AST validation should catch invalid AST shapes before HIR lowering. Given the clearly invalid const generic parameter type syntax and duplicate parameter names, a missing or insufficient validation here could allow malformed constructs to proceed into lowering and later analysis, causing the downstream spurious object-safety behavior."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/object_safety.rs",
+        "reason": "The compiler emits E0038 object-safety errors on code that should primarily fail const-generic/type-position validation first. This file provides object-safety checks and has a special early path used during HIR lowering, so it may be involved in running object-safety validation too aggressively on erroneous recovered types."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/diagnostics.rs",
+        "reason": "The failure pattern strongly suggests aggressive parser recovery on malformed syntax. This file centralizes parser recovery and fabrication of placeholder AST nodes; if recovery incorrectly synthesizes a trait-object-like type from `const N: Trait<...>`, it would explain why later phases diagnose `dyn`/object-safety instead of stopping earlier."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The code intentionally reuses `N` across trait name, const params, method name, parameter type, and return type, and introduces mutual trait references. Late name resolution is therefore a plausible contributor if namespace resolution under recovery confuses which `N` is meant in type/trait contexts and helps produce invalid lowered semantic forms."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "The reproducer stresses duplicate const generic parameter names and dependent defaults (`const N ... = N`). This file computes canonical generics from HIR, so if duplicate-name recovery or default-argument collection leaves an inconsistent generics list, it could amplify downstream mis-lowering and analysis errors in exactly this kind of malformed input."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 160.974,
+    "stage_times_sec": {
+      "checkout": 0.416,
+      "load_bug_context": 0.164,
+      "test_behavior_analysis": 7.016,
+      "test_failure_analysis": 13.592,
+      "load_file_candidates": 0.088,
+      "search_suspicious_files": 139.698
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 425757,
+      "output_tokens": 7093,
+      "total_tokens": 432850,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.016,
+          "input_tokens": 360,
+          "output_tokens": 344,
+          "total_tokens": 704
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.592,
+          "input_tokens": 2048,
+          "output_tokens": 814,
+          "total_tokens": 2862
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.166,
+          "input_tokens": 27876,
+          "output_tokens": 342,
+          "total_tokens": 28218
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 5.241,
+          "input_tokens": 27744,
+          "output_tokens": 156,
+          "total_tokens": 27900
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.456,
+          "input_tokens": 27363,
+          "output_tokens": 368,
+          "total_tokens": 27731
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.576,
+          "input_tokens": 27550,
+          "output_tokens": 369,
+          "total_tokens": 27919
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.952,
+          "input_tokens": 27561,
+          "output_tokens": 345,
+          "total_tokens": 27906
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.861,
+          "input_tokens": 27946,
+          "output_tokens": 364,
+          "total_tokens": 28310
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.462,
+          "input_tokens": 27710,
+          "output_tokens": 352,
+          "total_tokens": 28062
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.426,
+          "input_tokens": 27695,
+          "output_tokens": 384,
+          "total_tokens": 28079
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.125,
+          "input_tokens": 27789,
+          "output_tokens": 371,
+          "total_tokens": 28160
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.141,
+          "input_tokens": 27629,
+          "output_tokens": 341,
+          "total_tokens": 27970
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.971,
+          "input_tokens": 27916,
+          "output_tokens": 327,
+          "total_tokens": 28243
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.702,
+          "input_tokens": 27752,
+          "output_tokens": 369,
+          "total_tokens": 28121
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.971,
+          "input_tokens": 28005,
+          "output_tokens": 293,
+          "total_tokens": 28298
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.631,
+          "input_tokens": 27744,
+          "output_tokens": 304,
+          "total_tokens": 28048
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.294,
+          "input_tokens": 20623,
+          "output_tokens": 364,
+          "total_tokens": 20987
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 14.691,
+          "input_tokens": 14446,
+          "output_tokens": 886,
+          "total_tokens": 15332
+        }
+      ]
+    }
+  }
+}

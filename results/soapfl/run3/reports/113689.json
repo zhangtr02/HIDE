@@ -1,0 +1,244 @@
+{
+  "bug_id": "113689",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-07-13",
+    "resolved": "33a2c2487ac5d9927830ea4c1844335c6b9f77db"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_hir_typeck/src/callee.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_infer/src/infer/combine.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `returns_u8` with an `impl Fn() -> u8` parameter, exercising argument-position opaque trait syntax and closure/function trait matching.",
+        "Defines `foo` returning `impl Sized`, creating an opaque return type whose concrete type is hidden from callers.",
+        "Inside `foo`, passes `foo` itself to `returns_u8`, exercising recursive use of a function item while its own opaque return type is still being inferred.",
+        "The call requires rustc to check whether function item `foo` implements `Fn() -> u8`, forcing comparison between opaque return `impl Sized` and expected concrete `u8`.",
+        "`0u8` is the only returned value, so the hidden concrete type of `foo` is actually `u8`; rustc must infer this consistently.",
+        "This stresses type checking around function items, coercion to `Fn` traits, and normalization of opaque return types during self-reference.",
+        "The reproducer targets compiler behavior for cyclic or premature evaluation when an opaque `impl Trait` function is referenced inside its own body.",
+        "`main` is empty; all exercised behavior is compile-time type analysis rather than runtime execution."
+      ],
+      "summary": "The reproducer defines a function `foo` with an opaque return type and recursively passes `foo` as a `Fn() -> u8` argument inside its own body. Although `foo` ultimately returns `0u8`, rustc must infer that hidden type while simultaneously checking the self-reference. This exercises opaque `impl Trait` return inference, function item-to-`Fn` matching, and compiler handling of recursive type checking cycles."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is a self-referential type-checking scenario involving an opaque return type. The reproducer defines `foo() -> impl Sized`, then uses the function item `foo` inside its own body as an argument to `returns_u8`, which requires a callable of type `Fn() -> u8`. This forces the compiler to reason about `foo`'s signature before its hidden `impl Trait` return type has been fully resolved. The only actual return expression is `0u8`, so the hidden type should infer to `u8`, but the recursive use appears to trigger premature normalization or cycle handling failure. The stack trace shows an ICE during the analysis query, with no user-facing type error emitted, which strongly suggests a compiler-internal failure in query-based type checking or opaque type resolution rather than ordinary rejection of invalid code. The key similarity across the code and behavior is recursive comparison of a function item's signature against a `Fn() -> u8` obligation while the function's own opaque return type is still under inference.",
+      "possible_causes": [
+        "Bug in opaque `impl Trait` return type inference when the defining function is referenced within its own body, causing premature evaluation of the hidden type.",
+        "Missing or incorrect cycle detection in type checking / trait obligation evaluation for self-referential function item calls involving opaque return types.",
+        "Defect in normalization or projection logic that compares `foo`'s return type `impl Sized` against expected concrete type `u8` before the opaque type is fully constrained.",
+        "Compiler bug in function item to `Fn` trait matching where the callable signature is evaluated recursively and re-enters opaque type resolution unsafely.",
+        "Query-system integration issue in the analysis/typeck path, where recursive obligations around opaque return types are not converted into a recoverable cycle error and instead panic/ICE."
+      ],
+      "evidence": [
+        "`foo` returns `impl Sized`, so its concrete return type is hidden and must be inferred from the body.",
+        "Inside `foo`, the code passes `foo` itself to `returns_u8`, requiring rustc to prove that `foo: Fn() -> u8`.",
+        "That proof requires comparing `foo`'s still-being-inferred opaque return type with the expected concrete `u8`.",
+        "The only return expression is `0u8`, indicating the program should let the hidden type resolve to `u8` if inference and cycle handling are correct.",
+        "The reproducer specifically stresses self-reference plus opaque return normalization, matching the observed ICE during compile-time analysis.",
+        "The compiler output shows an internal compiler error during the `analysis` query rather than a normal diagnostic, indicating failure in production compiler logic for this type-checking path.",
+        "The query stack is empty at panic time, consistent with an internal bug in recursive analysis / obligation handling rather than a straightforward semantic rejection."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1642,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "This is the primary body-type-checking entry point for functions and explicitly handles replacing opaque return types with inference variables before checking the body. The reproducer hinges on `foo() -> impl Sized` being referenced within its own body while its hidden type is still inferred, so a bug here in setup/order of return-type inference versus checking the call `returns_u8(foo)` is highly plausible."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "The crash strongly suggests mishandling of local opaque return inference under self-reference. This file owns inference-context support for replacing local opaques with inference vars and tracking hidden types, exactly the machinery stressed when `foo` must simultaneously be treated as `Fn() -> u8` and as returning an unresolved `impl Sized`."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/callee.rs",
+        "reason": "The problematic expression is a call where the callee argument is the function item `foo`, which must be checked against `impl Fn() -> u8`. This file implements call checking and callable trait matching, making it a prime suspect for recursive function-item signature evaluation that re-enters opaque return normalization unsafely."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "Matching `foo` against `Fn() -> u8` creates trait obligations that must be fulfilled while the opaque return type is unresolved. If the legacy fulfillment engine mishandles this recursive obligation pattern, it could trigger an ICE instead of reporting ambiguity or a normal cycle error."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The failure pattern points to premature normalization of `foo`'s opaque return type to compare it with expected `u8`. This file provides the query-based normalization path widely used during type checking, and a recursion/cycle bug here would fit an ICE during analysis with self-referential opaque types."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "reason": "Eventually the compiler must relate the inferred opaque-backed return type of `foo` with the expected concrete `u8`. This shared type-relation infrastructure is a likely place for a bad interaction between relation, obligation generation, and opaque definition during self-reference."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "Although later in the pipeline, this file is responsible for collecting concrete hidden types for opaque definitions from body typeck results. A self-referential `impl Trait` body may expose an assumption violation or missing cycle handling here when extracting `foo`’s hidden type."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Opaque type argument remapping and inspection live here. Recursive use of a function while defining its own opaque return can stress mapping between the function’s generics/context and the opaque alias key, so an internal inconsistency here could manifest during type comparison or hidden-type recording."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "Much of `FnCtxt`’s inference, normalization, and obligation plumbing lives here. Since the bug arises from local expression type checking inside a function body, this file is a strong secondary suspect for incorrect handling of self-referential function items or normalization of unresolved opaque returns."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Callable trait matching for `Fn() -> u8` ultimately depends on classic trait selection. If selecting the `Fn` implementation for the function item `foo` recursively inspects its own unresolved signature without proper cycle handling, this module could be the root of the ICE."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 136.865,
+    "stage_times_sec": {
+      "checkout": 2.327,
+      "load_bug_context": 0.027,
+      "test_behavior_analysis": 5.272,
+      "test_failure_analysis": 9.222,
+      "load_file_candidates": 0.099,
+      "search_suspicious_files": 119.918
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 390186,
+      "output_tokens": 6523,
+      "total_tokens": 396709,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.272,
+          "input_tokens": 356,
+          "output_tokens": 330,
+          "total_tokens": 686
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 9.222,
+          "input_tokens": 1933,
+          "output_tokens": 576,
+          "total_tokens": 2509
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.334,
+          "input_tokens": 27261,
+          "output_tokens": 348,
+          "total_tokens": 27609
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.172,
+          "input_tokens": 27382,
+          "output_tokens": 336,
+          "total_tokens": 27718
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.96,
+          "input_tokens": 26951,
+          "output_tokens": 322,
+          "total_tokens": 27273
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.812,
+          "input_tokens": 27263,
+          "output_tokens": 330,
+          "total_tokens": 27593
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.87,
+          "input_tokens": 27197,
+          "output_tokens": 380,
+          "total_tokens": 27577
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.823,
+          "input_tokens": 27561,
+          "output_tokens": 356,
+          "total_tokens": 27917
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.617,
+          "input_tokens": 27389,
+          "output_tokens": 332,
+          "total_tokens": 27721
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.047,
+          "input_tokens": 27415,
+          "output_tokens": 348,
+          "total_tokens": 27763
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.29,
+          "input_tokens": 27398,
+          "output_tokens": 395,
+          "total_tokens": 27793
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.222,
+          "input_tokens": 27149,
+          "output_tokens": 358,
+          "total_tokens": 27507
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.48,
+          "input_tokens": 27451,
+          "output_tokens": 333,
+          "total_tokens": 27784
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.239,
+          "input_tokens": 27466,
+          "output_tokens": 335,
+          "total_tokens": 27801
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.647,
+          "input_tokens": 27637,
+          "output_tokens": 267,
+          "total_tokens": 27904
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.226,
+          "input_tokens": 19486,
+          "output_tokens": 387,
+          "total_tokens": 19873
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.149,
+          "input_tokens": 12891,
+          "output_tokens": 790,
+          "total_tokens": 13681
+        }
+      ]
+    }
+  }
+}

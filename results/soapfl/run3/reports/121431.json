@@ -1,0 +1,250 @@
+{
+  "bug_id": "121431",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-22",
+    "resolved": "3406ada96f8e16e49e947a91db3eba0db45245fa"
+  },
+  "final_top10": [
+    "compiler/rustc_ast_lowering/src/index.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_resolve/src/def_collector.rs",
+    "compiler/rustc_passes/src/entry.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_middle/src/hir/map/mod.rs",
+    "compiler/rustc_passes/src/hir_id_validator.rs",
+    "compiler/rustc_hir_analysis/src/collect.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `bug<T>() -> impl CallbackMarker<...>` using return-position `impl Trait`, forcing rustc to analyze an opaque return type constrained by an associated type equality.",
+        "Uses a trait name `CallbackMarker` that is never declared, exercising name resolution and trait lookup while still parsing complex generic bounds.",
+        "Constrains associated type `Item` to an array `[(); const_expr]`, so the compiler must type-check an inline const-generic array length expression.",
+        "The array length block contains a closure `|_: &mut ()| x;`, introducing closure type-checking inside a constant-expression context.",
+        "The closure body references undeclared variable `x`, exercising error handling for unresolved names during closure analysis.",
+        "The closure takes `&mut ()`, involving mutable reference typing even though the closure result is unused.",
+        "The block ends with `4`, making the array length evaluate to `4` if prior invalid code were ignored, so rustc must process mixed erroneous and valid statements.",
+        "The function body is empty despite a non-`!` return type, exercising missing-return diagnostics alongside opaque-type and trait-bound checking."
+      ],
+      "summary": "The reproducer combines return-position `impl Trait`, an associated type equality, and an array-length constant block containing a closure with an unresolved variable. Rustc must parse and type-check closures inside const-like expressions, resolve an undeclared trait and variable, and also diagnose the empty function body. It stresses interactions between parsing, name resolution, type checking, opaque return types, and error recovery."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern suggests an ICE during early semantic analysis while rustc is still processing malformed HIR rather than emitting only user-facing diagnostics. The reproducer combines several stressors in one signature: return-position `impl Trait`, an associated type equality (`Item = ...`), and an array length expressed as a block that contains a closure with an unresolved name. The compiler already recognized ordinary user errors (undeclared trait `CallbackMarker`, undeclared variable `x`), but then panicked later in the query pipeline while running `entry_fn`/`analysis`, with the query stack showing `hir_crate -> hir_attrs -> entry_fn -> analysis`. That combination indicates error recovery likely left an invalid or unexpected HIR/type state for a function item, and a later pass assumed the item was well-formed. The common pattern is not ordinary trait solving failure, but interaction between error recovery for invalid const-expression contents and opaque return type processing in function signature analysis. Because the problematic code lives entirely in the function signature, a likely defect is in compiler handling of closures or unresolved paths inside array-length/anon-const contexts nested under opaque `impl Trait` bounds, causing inconsistent HIR ownership/attributes or an unchecked assumption during later crate analysis.",
+      "possible_causes": [
+        "Bug in HIR lowering or validation for anon-const array lengths that contain closures: rustc may incorrectly permit or partially lower a closure expression inside a const-generic/array-length block, leaving malformed HIR that later queries like `hir_attrs` or `entry_fn` cannot safely traverse.",
+        "Defect in error recovery for unresolved names inside closures nested in const contexts: after emitting E0425 for `x`, the compiler may continue with an invalid body owner/local-def mapping, leading to a panic when later analysis queries inspect function/owner metadata.",
+        "Incorrect interaction between return-position `impl Trait` opaque type creation and associated type equality containing an anon const: the opaque type/signature analysis may create incomplete or inconsistent item bounds when the nested const expression is already erroneous, triggering an ICE in subsequent analysis instead of graceful error propagation.",
+        "Missing defensive checks in crate entry-function analysis over erroneous function items: `entry_fn`/`hir_attrs` may assume every function item has consistent attributes/HIR ownership even after earlier lowering/typeck failures in the signature, causing panic on invalid owners produced by recovery.",
+        "Potential compiler bug in AST-to-HIR ownership assignment for expressions embedded in type positions (array length block inside associated type binding inside `impl Trait`): nested closure nodes may be assigned the wrong parent owner, which would fit a later crash in HIR owner attribute lookup."
+      ],
+      "evidence": [
+        "The reproducer’s complexity is concentrated in the function signature, not the body: `impl Trait` + associated type equality + array-length block + closure in const-like context.",
+        "Compiler output reports normal front-end errors (E0405 undeclared trait, E0425 undeclared variable), showing rustc got far enough to diagnose user mistakes before hitting an ICE, which points to faulty recovery rather than simple parse failure.",
+        "Query stack ends in `hir_crate`, `hir_attrs`, and `entry_fn`, suggesting the panic occurs while traversing crate HIR/owners after malformed input was accepted into later stages.",
+        "The inline array length block contains `|_: &mut ()| x; 4`, mixing an invalid closure statement with a valid trailing constant, which is a classic stress case for recovery in anon-const/type-position expressions.",
+        "The closure appears inside an array length expression, a restricted/fragile context in the compiler; nesting that inside an associated type binding of RPIT (`impl CallbackMarker<Item = ...>`) increases the chance of a compiler bookkeeping bug rather than a user-code bug.",
+        "The function has an empty body despite a non-never return type, adding another recovery path; combined with the signature errors, later passes may observe partially constructed item metadata and panic."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1742,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_ast_lowering/src/index.rs",
+        "reason": "Most suspicious because the ICE query stack hits `hir_attrs` while traversing crate HIR owners, which strongly suggests malformed HIR owner/local-id indexing. This reproducer nests a closure inside an anon-const array length inside an RPIT bound, exactly the kind of construct that can confuse owner assignment and per-owner node indexing."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "Handles lowering of closures, const-related expressions, and expression forms embedded in unusual contexts. The failing code puts a closure with an unresolved name inside an array-length const block in type position, so bad lowering or recovery here could easily leave inconsistent HIR for later queries."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/def_collector.rs",
+        "reason": "Responsible for creating DefIds for nested AST constructs including closures and anonymous consts. The reproducer combines both in one signature; an incorrect parent/owner assignment during def collection would fit a later crash in HIR owner attribute lookup."
+      },
+      {
+        "path": "compiler/rustc_passes/src/entry.rs",
+        "reason": "The panic occurs during the `entry_fn` query. Even if the root bug is earlier, this pass is a plausible direct crash site if it assumes all function items and their attributes/HIR owners are valid after earlier error recovery."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "This file computes types for anonymous consts and inspects parent HIR relationships. Since the problematic code is an array-length anon const nested inside associated type equality under `impl Trait`, incorrect handling here could propagate inconsistent state or trigger assumptions about invalid anon-const contents."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "A closure inside an array-length const expression is highly unusual and may need to be rejected or specially diagnosed before lowering. If AST validation misses an invalid shape, later phases may encounter unsupported constructs and ICE during recovery."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "Name resolution must process the undeclared trait `CallbackMarker` and unresolved `x` inside the nested closure/anon-const context. Faulty recovery for unresolved names in this specific nesting could leave partial resolution data that later lowering/HIR queries mishandle."
+      },
+      {
+        "path": "compiler/rustc_middle/src/hir/map/mod.rs",
+        "reason": "`hir_attrs` and other crate-HIR traversals rely on HIR map parent/owner navigation. If nested closure/anon-const ownership was recorded inconsistently, this map layer is a plausible location where invalid parent chains or owner assumptions panic."
+      },
+      {
+        "path": "compiler/rustc_passes/src/hir_id_validator.rs",
+        "reason": "The likely underlying issue is broken HIR identity density/ownership for nested closure and anon-const nodes. This validator targets exactly that class of bug, and although it may not be the direct ICE site, its domain closely matches the suspected compiler inconsistency."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect.rs",
+        "reason": "This is the orchestration layer for collection queries such as `type_of`, `fn_sig`, item bounds, and opaque-type metadata. Because the reproducer stresses RPIT plus associated type equality plus anon const, a bug in how collection wires these queries together under error recovery is also plausible."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 157.16,
+    "stage_times_sec": {
+      "checkout": 0.27,
+      "load_bug_context": 0.079,
+      "test_behavior_analysis": 5.187,
+      "test_failure_analysis": 13.906,
+      "load_file_candidates": 0.105,
+      "search_suspicious_files": 137.613
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 422123,
+      "output_tokens": 6962,
+      "total_tokens": 429085,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.187,
+          "input_tokens": 338,
+          "output_tokens": 314,
+          "total_tokens": 652
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.905,
+          "input_tokens": 2188,
+          "output_tokens": 796,
+          "total_tokens": 2984
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.24,
+          "input_tokens": 27932,
+          "output_tokens": 347,
+          "total_tokens": 28279
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.916,
+          "input_tokens": 27936,
+          "output_tokens": 326,
+          "total_tokens": 28262
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.259,
+          "input_tokens": 27455,
+          "output_tokens": 308,
+          "total_tokens": 27763
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.691,
+          "input_tokens": 27692,
+          "output_tokens": 360,
+          "total_tokens": 28052
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.209,
+          "input_tokens": 27676,
+          "output_tokens": 352,
+          "total_tokens": 28028
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.765,
+          "input_tokens": 28077,
+          "output_tokens": 378,
+          "total_tokens": 28455
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.333,
+          "input_tokens": 27802,
+          "output_tokens": 371,
+          "total_tokens": 28173
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.37,
+          "input_tokens": 27826,
+          "output_tokens": 380,
+          "total_tokens": 28206
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.033,
+          "input_tokens": 27913,
+          "output_tokens": 376,
+          "total_tokens": 28289
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.06,
+          "input_tokens": 27727,
+          "output_tokens": 332,
+          "total_tokens": 28059
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.393,
+          "input_tokens": 28043,
+          "output_tokens": 369,
+          "total_tokens": 28412
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.684,
+          "input_tokens": 27962,
+          "output_tokens": 312,
+          "total_tokens": 28274
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.619,
+          "input_tokens": 28086,
+          "output_tokens": 330,
+          "total_tokens": 28416
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 5.929,
+          "input_tokens": 27847,
+          "output_tokens": 259,
+          "total_tokens": 28106
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.605,
+          "input_tokens": 15949,
+          "output_tokens": 352,
+          "total_tokens": 16301
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.478,
+          "input_tokens": 13674,
+          "output_tokens": 700,
+          "total_tokens": 14374
+        }
+      ]
+    }
+  }
+}

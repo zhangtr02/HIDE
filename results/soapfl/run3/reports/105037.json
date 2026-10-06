@@ -1,0 +1,238 @@
+{
+  "bug_id": "105037",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-11-27",
+    "resolved": "80a96467ec5675e9f69683b5c075a8b15950c341"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_infer/src/infer/canonical/canonicalizer.rs",
+    "compiler/rustc_infer/src/infer/freshen.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_middle/src/ty/abstract_const.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly `generic_const_exprs` to use trait-associated constants inside const generic array lengths and where-clause evaluatability checks.",
+        "Defines trait `Table<const D: usize>: Sync` with associated const `COLUMNS`, exercising const generics on traits plus a supertrait bound.",
+        "Implements `Table<D>` for `Table1<D>` and `Table2<D>`, giving different `COLUMNS` values to test per-implementation associated const resolution.",
+        "`process_table<T, const D>` requires `T: Table<D>` and `where [(); T::COLUMNS]:`, forcing compile-time evaluation of an associated const dependent on a generic type.",
+        "The array-length trick `[(); EXPR]:` is used only as a well-formedness/evaluatability constraint, not for runtime data.",
+        "`process_all_tables<const D>` repeats explicit bounds `[(); Table1::<D>::COLUMNS]:` and `[(); Table2::<D>::COLUMNS]:`, exercising normalization of concrete impl-associated consts.",
+        "Calling `process_table(Table1::<D>)` and `process_table(Table2::<D>)` checks whether the solver propagates those outer evaluatability bounds into generic function calls.",
+        "`main` is empty, so the reproducer targets type checking/trait solving/const-evaluation during compilation rather than runtime behavior."
+      ],
+      "summary": "This reproducer stresses nightly const-generic trait solving. It uses associated constants from trait implementations as array lengths in where-clauses, both generically (`T::COLUMNS`) and concretely (`Table1::<D>::COLUMNS`). The key compiler behavior under test is whether rustc can normalize and prove evaluatability of these const expressions across generic function boundaries when calling `process_table` from `process_all_tables`."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a compiler type/trait solving bug triggered by `generic_const_exprs` when an associated const projection (`T::COLUMNS`) appears in an evaluatability bound (`where [(); T::COLUMNS]:`). The program defines two distinct implementors of the same trait, each with a different concrete associated const, and then calls the same generic function twice with different `T`. Instead of checking each call independently, rustc reports that the first call expected `Table2<D>` and found `Table1<D>`, which indicates cross-call contamination or incorrect reuse of inference/obligation state. The explicit outer bounds `[(); Table1::<D>::COLUMNS]:` and `[(); Table2::<D>::COLUMNS]:` should suffice to prove evaluatability for each call, so the emitted `E0308` is not consistent with the source-level typing. The common theme is mishandling of associated-const projection normalization and/or caching of obligations involving generic const expressions, causing the inferred type parameter `T` for `process_table` to be fixed to the wrong impl from another call site.",
+      "possible_causes": [
+        "Bug in type inference for generic function calls with `generic_const_exprs`: inference variable for `T` in `process_table` may be improperly reused across multiple call sites, causing one invocation to constrain later ones and produce a bogus `expected Table2, found Table1` mismatch.",
+        "Incorrect canonicalization/caching of obligations involving projected associated consts like `T::COLUMNS`, where solver state may ignore the identity of `T` and treat obligations from `Table1<D>` and `Table2<D>` as interchangeable.",
+        "Defect in normalization of trait associated const projections under const evaluatability checks (`[(); T::COLUMNS]:`), leading rustc to resolve the projection using the wrong impl or to leak normalized results between different substitutions.",
+        "Bug in fulfillment/obligation resolution when propagating caller-side evaluatability bounds (`[(); Table1::<D>::COLUMNS]:`, `[(); Table2::<D>::COLUMNS]:`) into a callee requirement (`[(); T::COLUMNS]:`), causing an erroneous fallback to a previously selected impl/type.",
+        "Potential issue in query/key construction for const-generic obligations under `generic_const_exprs`, where the compiler may omit relevant generic arguments or projection identity, resulting in stale or aliased results between `Table1` and `Table2` impls."
+      ],
+      "evidence": [
+        "The program is well-typed at the source level: `process_table` is generic over `T`, so `process_table(Table1::<D>)` and `process_table(Table2::<D>)` should each infer different `T` independently.",
+        "The error message is anomalous: at the first call rustc says `expected struct Table2, found struct Table1`, even though no source annotation requires `T = Table2` there.",
+        "Both impls satisfy the same trait `Table<D>` and differ mainly in associated const value, making associated-const projection/normalization the distinguishing factor under test.",
+        "The only unusual requirement in `process_table` is `where [(); T::COLUMNS]:`, directly tying the failure to const evaluatability and associated const projection rather than ordinary trait matching.",
+        "`process_all_tables` provides explicit concrete evaluatability bounds for both `Table1::<D>::COLUMNS` and `Table2::<D>::COLUMNS`, so failure to accept the calls suggests the compiler is not correctly translating those concrete bounds to the generic callee obligation.",
+        "The reproducer uses nightly `generic_const_exprs`, and rustc itself warns this feature is incomplete; the behavior matches a compiler bug in unstable const-generic trait solving rather than a user-code mistake.",
+        "`main` is empty and there is no runtime logic; the failure occurs purely during compilation in type checking / trait solving / const evaluation.",
+        "The mismatch mentions concrete structs rather than an unevaluatable const expression error, consistent with solver/inference corruption caused by the const-generic obligation machinery."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1553,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "Most directly implicated by the reproducer: the failure is triggered specifically by `where [(); T::COLUMNS]:` under `generic_const_exprs`, and this file implements const-evaluatability checking plus matching such obligations against the param-env. A bug here could easily mis-handle `T::COLUMNS` vs `Table1::<D>::COLUMNS`/`Table2::<D>::COLUMNS` and leak or alias results across call sites."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The const expression depends on normalizing an associated const projection (`T::COLUMNS`) to the correct impl-specific value. This file is central to projection/normalization during trait solving, so an incorrect cache key, candidate choice, or normalization result could explain why one call is treated as if `T` were the other table type."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "The bogus `expected Table2, found Table1` strongly suggests obligation/inference state contamination between the two `process_table` calls. Fulfillment drives pending obligations incrementally, and a bug in how stalled or completed obligations involving generic const expressions are tracked could cause one invocation's constraints to affect the next."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/canonical/canonicalizer.rs",
+        "reason": "The failure pattern is consistent with incorrect canonicalization of obligations/query inputs involving associated const projections and const generics. If canonicalization drops relevant identity information for `T::COLUMNS`, cached solver results may be reused incorrectly between `Table1<D>` and `Table2<D>`."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/freshen.rs",
+        "reason": "Freshening is another place where unresolved type/const variables are converted into cacheable forms. If freshening for const-generic obligations treats the projected const too coarsely, the solver may conflate the two call sites and produce the observed spurious concrete-type mismatch."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "This file contains inference-layer projection support and rollback-aware projection caching. Since the reproducer likely involves cached normalization/projection state for `T::COLUMNS`, this is a strong candidate for wrong reuse of a projection result across different substitutions."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Trait selection mediates proving the `T: Table<D>` requirement and related obligations generated while normalizing/proving the const expression. A selection/cache bug here could incorrectly tie the generic parameter `T` to the wrong impl when processing both calls in one body."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "The emitted diagnostic is a call-site type mismatch during HIR type checking, suggesting that generic argument inference for `process_table(...)` may have been corrupted while incorporating obligations from `generic_const_exprs`. This file contains much of the expression/call inference plumbing where such leakage could surface."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The `[(); EXPR]:` bounds are primarily well-formedness/evaluatability constraints, and this file is responsible for registering and normalizing WF obligations. If WF normalization of these associated-const bounds is mishandled, downstream type checking could see inconsistent obligations and infer the wrong callee type."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/abstract_const.rs",
+        "reason": "`generic_const_exprs` relies on abstract-const expansion to reason about unevaluated const expressions in bounds. If abstract const expansion or representation loses the distinction between the two impl-associated constants, later evaluatability/projection logic could be fed aliased inputs."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 174.786,
+    "stage_times_sec": {
+      "checkout": 1.56,
+      "load_bug_context": 0.08,
+      "test_behavior_analysis": 6.661,
+      "test_failure_analysis": 17.64,
+      "load_file_candidates": 0.087,
+      "search_suspicious_files": 148.757
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 363218,
+      "output_tokens": 6661,
+      "total_tokens": 369879,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.661,
+          "input_tokens": 530,
+          "output_tokens": 370,
+          "total_tokens": 900
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 17.64,
+          "input_tokens": 1421,
+          "output_tokens": 828,
+          "total_tokens": 2249
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.825,
+          "input_tokens": 26989,
+          "output_tokens": 400,
+          "total_tokens": 27389
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 10.48,
+          "input_tokens": 26933,
+          "output_tokens": 368,
+          "total_tokens": 27301
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 11.235,
+          "input_tokens": 26821,
+          "output_tokens": 361,
+          "total_tokens": 27182
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 11.797,
+          "input_tokens": 27049,
+          "output_tokens": 383,
+          "total_tokens": 27432
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.256,
+          "input_tokens": 27085,
+          "output_tokens": 378,
+          "total_tokens": 27463
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.691,
+          "input_tokens": 27254,
+          "output_tokens": 365,
+          "total_tokens": 27619
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.687,
+          "input_tokens": 27120,
+          "output_tokens": 286,
+          "total_tokens": 27406
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.62,
+          "input_tokens": 27053,
+          "output_tokens": 295,
+          "total_tokens": 27348
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 11.275,
+          "input_tokens": 27201,
+          "output_tokens": 418,
+          "total_tokens": 27619
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.811,
+          "input_tokens": 25718,
+          "output_tokens": 377,
+          "total_tokens": 26095
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.797,
+          "input_tokens": 27254,
+          "output_tokens": 333,
+          "total_tokens": 27587
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.911,
+          "input_tokens": 27287,
+          "output_tokens": 299,
+          "total_tokens": 27586
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 12.254,
+          "input_tokens": 25375,
+          "output_tokens": 395,
+          "total_tokens": 25770
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 15.091,
+          "input_tokens": 12128,
+          "output_tokens": 805,
+          "total_tokens": 12933
+        }
+      ]
+    }
+  }
+}

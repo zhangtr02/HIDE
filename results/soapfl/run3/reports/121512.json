@@ -1,0 +1,253 @@
+{
+  "bug_id": "121512",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-23",
+    "resolved": "397937d812852f9bbeb671005cb399dbcb357cde"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_borrowck/src/region_infer/mod.rs",
+    "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with two lifetime parameters and a blanket impl, so any type satisfies `Trait<'a, 'b>`.",
+        "`foo` returns `impl Trait<'a, 'b>`, exercising opaque return types parameterized by higher-ranked lifetimes.",
+        "The bounds `'a: 'a` and `'b: 'b` are tautological self-outlives constraints, stressing lifetime handling in generic signature normalization.",
+        "Inside `foo`, `foo::<'a, 'b>()` recursively calls itself while its concrete `impl Trait` type is still being inferred.",
+        "The result of that recursive call is forced to type `&'a ()`, requiring the compiler to equate the opaque return with a reference type.",
+        "This creates a cyclic obligation around opaque type inference, lifetime substitution, and return-type unification.",
+        "`loop {}` makes the function body diverging (`!`), so normal return checking must interact with opaque type obligations despite no concrete value being produced.",
+        "The reproducer mainly exercises trait solving, lifetime inference, recursive type checking, and compiler cycle detection for `impl Trait`."
+      ],
+      "summary": "This reproducer defines a lifetime-parameterized trait, returns `impl Trait` from a generic function, and recursively calls that function inside its own body while coercing the result to `&'a ()`. The body then diverges with `loop {}`. It stresses rustc’s handling of opaque return types, lifetime substitution, recursive inference, and cycle detection when no concrete return expression exists."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in compiler-side well-formedness/type-checking around opaque return types (`impl Trait`) with generic lifetimes. The reproducer combines several stressors: a function generic over `'a` and `'b`, a return type `impl Trait<'a, 'b>`, a recursive call to the same function before the opaque return type is fully constrained, and an explicit coercion of that recursive result to `&'a ()`. Because the trait has a blanket impl for all `T`, the compiler may try to infer the hidden type of the opaque as `&'a ()`, but this happens through a recursive self-reference to the same opaque definition. The diverging body (`loop {}`) means there is no normal concrete return expression to anchor hidden type inference, so obligation solving and WF checking must reason about the opaque using only recursive constraints. The stack shows the crash during `check_mod_type_wf`, suggesting the compiler is mishandling a cycle or invalid state while proving well-formedness of the function/type rather than producing a user-facing type error. Overall, the common pattern is cyclic opaque type inference involving lifetime-substituted generics, recursive self-use, and a diverging body, likely exposing a missing cycle check or an incorrect assumption in WF/type-of-opaque computation.",
+      "possible_causes": [
+        "Missing or incomplete cycle detection when inferring the hidden type of an `impl Trait` from a recursive call to the same function within its own body.",
+        "A bug in opaque type/lifetime substitution logic where generic lifetimes on `impl Trait<'a, 'b>` are recursively unified with a concrete reference type like `&'a ()`, leading to self-referential obligations.",
+        "Incorrect interaction between diverging bodies (`!`) and opaque return type inference, where rustc still tries to fully resolve hidden type obligations from unreachable recursive expressions instead of delaying or rejecting them gracefully.",
+        "Defect in well-formedness checking (`check_mod_type_wf`) for opaque return types that depend on recursive trait/type obligations, causing a panic instead of emitting a cycle or type mismatch diagnostic.",
+        "Improper handling of tautological outlives bounds (`'a: 'a`, `'b: 'b`) during normalization or region checking, contributing to malformed recursive obligations involving the opaque return type.",
+        "A query-system integration bug where opaque type inference or type-check tables are forced during module WF checking in a state that has not been fully computed, resulting in an ICE rather than a recoverable error."
+      ],
+      "evidence": [
+        "The function returns `impl Trait<'a, 'b>`, so rustc must infer and validate an opaque hidden type parameterized by lifetimes.",
+        "Inside `foo`, the statement `let _: &'a () = foo::<'a, 'b>();` recursively uses the same function and forces its opaque return type to match `&'a ()`.",
+        "The trait has a blanket implementation for all `T`, so `&'a ()` trivially satisfies `Trait<'a, 'b>`, making hidden-type inference depend entirely on recursive self-reference rather than trait selection failure.",
+        "`loop {}` makes the function diverge, so there is no concrete returned value to stabilize hidden type inference; this increases reliance on recursive obligations.",
+        "The reported source span is exactly the coercion site `let _: &'a () = foo::<'a, 'b>();`, implicating type unification/inference around the recursive opaque result.",
+        "The stack trace includes `rustc_query_impl::query_impl::check_mod_type_wf`, indicating the crash occurs during compiler well-formedness analysis rather than normal runtime or user-code execution.",
+        "The test behavior explicitly highlights cyclic obligation creation across opaque type inference, lifetime substitution, and return-type unification, matching the likely compiler defect area.",
+        "The compiler produced an ICE with 'we would appreciate a bug report', which indicates an internal compiler failure instead of a proper diagnostic for recursive/cyclic type constraints."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1743,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The ICE is reported while executing `check_mod_type_wf`, and this reproducer creates a malformed cyclic well-formedness situation around a function returning `impl Trait<'a, 'b>`. This file is the direct implementation of HIR/type WF checking and is the most likely place where recursive opaque-return obligations are mishandled instead of producing a diagnostic."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "The reproducer forces inference of an opaque return type from a recursive call to the same function, with the opaque being unified against `&'a ()`. This file contains inference-context logic for replacing and tracking opaque types during type inference, making it highly suspicious for missing cycle handling or bad self-referential hidden-type inference."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "The bug involves lifetime-parameterized `impl Trait<'a, 'b>` and recursive coercion to `&'a ()`, which strongly suggests trouble in remapping generics/lifetimes between the function and the opaque type. This file specifically handles opaque type argument remapping and region-sensitive rewriting, so incorrect substitution could create invalid recursive obligations."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "The problematic expression `let _: &'a () = foo::<'a, 'b>();` is type-checked inside the defining body of `foo`, before the function diverges with `loop {}`. This file drives function body type checking and replacement of opaque return types with inference variables, so it is a plausible source of incorrect recursive body/return-type interaction."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Even though the visible stack ends in HIR WF checking, the actual failure likely arises while generating or solving WF obligations for the recursively constrained opaque hidden type. This file computes WF obligations and explicitly tries to avoid solver livelock, making it a strong candidate for a missed recursive opaque-type case."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "This file collects hidden/concrete types for opaque `impl Trait` definitions during HIR analysis. Since the reproducer has no concrete return expression and instead only constrains the opaque through a recursive self-call, hidden-type collection may be encountering an invalid self-reference or assuming a concrete hidden type exists when it should reject the cycle."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 139.541,
+    "stage_times_sec": {
+      "checkout": 2.087,
+      "load_bug_context": 0.043,
+      "test_behavior_analysis": 5.647,
+      "test_failure_analysis": 14.071,
+      "load_file_candidates": 0.107,
+      "search_suspicious_files": 117.586
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 417952,
+      "output_tokens": 6748,
+      "total_tokens": 424700,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.646,
+          "input_tokens": 376,
+          "output_tokens": 313,
+          "total_tokens": 689
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.071,
+          "input_tokens": 1955,
+          "output_tokens": 809,
+          "total_tokens": 2764
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.805,
+          "input_tokens": 27714,
+          "output_tokens": 343,
+          "total_tokens": 28057
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.517,
+          "input_tokens": 27718,
+          "output_tokens": 354,
+          "total_tokens": 28072
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.964,
+          "input_tokens": 27237,
+          "output_tokens": 392,
+          "total_tokens": 27629
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.089,
+          "input_tokens": 27474,
+          "output_tokens": 369,
+          "total_tokens": 27843
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.461,
+          "input_tokens": 27458,
+          "output_tokens": 366,
+          "total_tokens": 27824
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.993,
+          "input_tokens": 27859,
+          "output_tokens": 397,
+          "total_tokens": 28256
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.99,
+          "input_tokens": 27589,
+          "output_tokens": 352,
+          "total_tokens": 27941
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.544,
+          "input_tokens": 27615,
+          "output_tokens": 305,
+          "total_tokens": 27920
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 6.279,
+          "input_tokens": 27700,
+          "output_tokens": 314,
+          "total_tokens": 28014
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.584,
+          "input_tokens": 27494,
+          "output_tokens": 297,
+          "total_tokens": 27791
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.923,
+          "input_tokens": 27823,
+          "output_tokens": 349,
+          "total_tokens": 28172
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.984,
+          "input_tokens": 27743,
+          "output_tokens": 293,
+          "total_tokens": 28036
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 5.968,
+          "input_tokens": 27869,
+          "output_tokens": 249,
+          "total_tokens": 28118
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.488,
+          "input_tokens": 27626,
+          "output_tokens": 375,
+          "total_tokens": 28001
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 5.745,
+          "input_tokens": 15947,
+          "output_tokens": 341,
+          "total_tokens": 16288
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 9.229,
+          "input_tokens": 12755,
+          "output_tokens": 530,
+          "total_tokens": 13285
+        }
+      ]
+    }
+  }
+}

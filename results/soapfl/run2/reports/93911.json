@@ -1,0 +1,230 @@
+{
+  "bug_id": "93911",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-02-10",
+    "resolved": "e7aca895980f25f6d2d3c48e10fd04656764d1e4"
+  },
+  "final_top10": [
+    "compiler/rustc_resolve/src/late/lifetimes.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_ast_lowering/src/item.rs",
+    "compiler/rustc_typeck/src/collect.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_typeck/src/collect/type_of.rs",
+    "compiler/rustc_middle/src/ty/generics.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_middle/src/middle/resolve_lifetime.rs",
+    "compiler/rustc_typeck/src/check/wfcheck.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines lifetime-parameterized tuple structs `Foo<'a>` and nested `Bar<'b>`, exercising lifetime handling in item definitions.",
+        "Uses an inherent `impl<'a>` block for `Foo`, with `async fn foo()`, triggering async lowering to an opaque future type.",
+        "Declares `Bar` inside `Foo::foo`, exercising local item definitions within a function body.",
+        "Defines an inherent `impl<'b>` for the local type `Bar<'b>` inside another function, testing nested impl collection and name resolution.",
+        "Uses `async fn bar()` inside the nested impl, combining local impls with async function lowering.",
+        "Neither async function captures `self` or parameters, so the compiler still must build future types for zero-capture async methods.",
+        "The code mainly stresses compiler HIR/typeck/query handling for nested items, lifetimes, and async opaque types rather than runtime execution.",
+        "An empty `main` means successful compilation alone is the expected behavior; no futures are polled or executed."
+      ],
+      "summary": "This reproducer is compile-only. It defines a lifetime-parameterized type with an inherent async method, then introduces another lifetime-parameterized local struct and local inherent impl containing another async method. It exercises Rust’s support for nested item definitions, impls inside functions, lifetime parameters on local types, and async desugaring into opaque future types."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a compiler name-resolution/generics handling bug for nested items inside an `async fn` that itself is defined in a lifetime-parameterized `impl`. The reported error is `E0261` on the outer `impl<'a> Foo<'a>` lifetime, but the diagnostic suggests adding `'a` to the nested local `impl`/method, which indicates the compiler is incorrectly treating the outer lifetime as if it were being referenced from inside the nested local item scope. The reproducer combines three stressors: (1) an outer inherent impl with explicit lifetime parameter `'a`, (2) a local type and local inherent impl inside a function body, and (3) `async fn` in both outer and inner scopes, which introduces coroutine/opaque future lowering and additional nested synthetic items. Since the code should compile and no explicit use of `'a` occurs inside the nested `Bar` definitions, the most likely issue is that async lowering or generics propagation leaks the outer impl lifetime into the nested local impl/item environment, causing late name resolution or HIR lowering to believe `'a` must be in scope where it is not. In short, the bug is likely in compiler production code that computes/threads generic parameters for nested async items, local impls, or opaque future types, not in the source program.",
+      "possible_causes": [
+        "Incorrect propagation/capture of outer `impl` generic lifetime parameters into nested local items during HIR lowering or name resolution, causing the nested `impl Bar`/`async fn bar` context to erroneously reference outer lifetime `'a`.",
+        "Bug in async desugaring for methods inside lifetime-parameterized `impl` blocks: the synthetic generator/opaque future item may inherit the wrong parent generics and trigger undeclared lifetime errors for outer lifetimes.",
+        "Defect in resolver/rib handling for local items inside function bodies, especially nested inherent `impl`s, where entering the local `impl` or async body fails to isolate generic lifetime scopes from the enclosing `impl<'a> Foo<'a>`.",
+        "Incorrect generics-of computation (`tcx.generics_of`/HIR owner generics collection) for nested local impl items within async functions, resulting in a mismatch between declared generics and the lifetimes expected by type checking.",
+        "Bug in opaque type collection for `async fn` in nested/local contexts, where the hidden future type is assigned predicates or parent substitutions that still mention the outer lifetime `'a` although the local item does not declare it.",
+        "Diagnostic/help generation reveals the compiler thinks `'a` is missing from the inner local `impl` or `bar`, suggesting a production defect in scope attribution or parent item linkage for nested async items."
+      ],
+      "evidence": [
+        "`E0261` is emitted on `impl<'a> Foo<'a>` even though that lifetime is explicitly declared there, so the undeclared-lifetime report is inconsistent with the source and indicates internal scope confusion.",
+        "The error help proposes adding `'a` to `impl<'b> Bar<'b>` or `async fn bar()`, strongly suggesting the compiler incorrectly believes inner local items depend on outer lifetime `'a`.",
+        "The reproducer uses nested local item definitions (`struct Bar` and `impl Bar`) inside `async fn foo`, a pattern known to exercise HIR owner parenting and resolver scope boundaries.",
+        "Both outer and inner methods are `async fn`, which creates synthetic opaque future/generator items and increases the chance of incorrect generic parameter inheritance.",
+        "No source code inside `Bar` or `bar` actually mentions `'a`, so any dependency on `'a` must be compiler-introduced rather than user-written.",
+        "Compilation-only test with empty `main` means the expected behavior is successful type checking; failure during lifetime resolution points to front-end compiler logic rather than runtime or library behavior."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1392,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_resolve/src/late/lifetimes.rs",
+        "reason": "Most suspicious because the emitted error is specifically E0261 about an undeclared lifetime, and the bad suggestion implies lifetime scope/binder confusion between the outer impl<'a> and nested local impl/async items. This file owns late lifetime resolution, early-vs-late bound classification, and binder depth handling for nested items."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "The reproducer critically involves async fn lowering inside both the outer impl method and the nested local impl method. Async lowering creates synthetic generator/opaque items, so a bug here could incorrectly capture or thread the outer impl lifetime 'a into inner local async contexts."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "The nested struct and nested inherent impl are local items inside an async fn. Item lowering is a strong candidate if parent owner/generics for these nested items are attached incorrectly, causing the inner impl or generated async artifacts to inherit outer impl generics they should not see."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect.rs",
+        "reason": "The failure pattern matches a bad generics_of/type collection result for nested impl items under async lowering. This module computes item-level generics and signatures and is a likely place where an outer impl lifetime could be erroneously propagated into local nested items."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "General late name resolution also manages nested scopes and local items. Since the diagnostic points at the outer impl but suggests adding 'a to inner items, resolver scope handling outside the lifetime-specific submodule may be contributing to incorrect parent scope attribution."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect/type_of.rs",
+        "reason": "Async fn desugaring and opaque future construction eventually require correct item signatures and substitutions. If type_of for a nested async/local item is built with wrong parent generics, undeclared lifetime errors like this can surface."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/generics.rs",
+        "reason": "If the compiler internally constructs wrong generic parameter lists or parent counts for nested async/local items, this representation layer can expose the bug. The symptom strongly suggests mismatch between declared generics and the generics later expected by type checking."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "Async fn introduces opaque future types. A bug in remapping hidden types and generic arguments for opaque definitions could leak the outer lifetime 'a into the hidden type of the nested async fn bar even though source code never mentions it."
+      },
+      {
+        "path": "compiler/rustc_middle/src/middle/resolve_lifetime.rs",
+        "reason": "This file stores lifetime-resolution results consumed by later stages. If nested async/local item lifetimes are recorded with the wrong region parent or binding mode, it could explain why the compiler believes 'a is required in an inner scope."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "Well-formedness checking often reports missing/undeclared lifetime requirements after generics and signatures are collected. Less likely than lowering/resolution, but still plausible as the stage where an incorrectly propagated outer lifetime is first diagnosed."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 125.973,
+    "stage_times_sec": {
+      "checkout": 1.834,
+      "load_bug_context": 0.034,
+      "test_behavior_analysis": 6.184,
+      "test_failure_analysis": 14.836,
+      "load_file_candidates": 0.085,
+      "search_suspicious_files": 102.999
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 321849,
+      "output_tokens": 5740,
+      "total_tokens": 327589,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.184,
+          "input_tokens": 387,
+          "output_tokens": 291,
+          "total_tokens": 678
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.836,
+          "input_tokens": 1066,
+          "output_tokens": 781,
+          "total_tokens": 1847
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.438,
+          "input_tokens": 26859,
+          "output_tokens": 339,
+          "total_tokens": 27198
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.778,
+          "input_tokens": 26458,
+          "output_tokens": 354,
+          "total_tokens": 26812
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.828,
+          "input_tokens": 26647,
+          "output_tokens": 391,
+          "total_tokens": 27038
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.104,
+          "input_tokens": 26641,
+          "output_tokens": 331,
+          "total_tokens": 26972
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.743,
+          "input_tokens": 26550,
+          "output_tokens": 344,
+          "total_tokens": 26894
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.836,
+          "input_tokens": 26720,
+          "output_tokens": 301,
+          "total_tokens": 27021
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.38,
+          "input_tokens": 26687,
+          "output_tokens": 275,
+          "total_tokens": 26962
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.018,
+          "input_tokens": 25757,
+          "output_tokens": 360,
+          "total_tokens": 26117
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.003,
+          "input_tokens": 26481,
+          "output_tokens": 297,
+          "total_tokens": 26778
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.652,
+          "input_tokens": 26684,
+          "output_tokens": 316,
+          "total_tokens": 27000
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.673,
+          "input_tokens": 26237,
+          "output_tokens": 334,
+          "total_tokens": 26571
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.787,
+          "input_tokens": 16859,
+          "output_tokens": 352,
+          "total_tokens": 17211
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.733,
+          "input_tokens": 11816,
+          "output_tokens": 674,
+          "total_tokens": 12490
+        }
+      ]
+    }
+  }
+}

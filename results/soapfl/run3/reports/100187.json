@@ -1,0 +1,236 @@
+{
+  "bug_id": "100187",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-08-06",
+    "resolved": "affe0d3a00e92fa7885e3f5d2c5073fde432d154"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/collect/type_of.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_typeck/src/check/writeback.rs",
+    "compiler/rustc_borrowck/src/universal_regions.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_infer/src/infer/region_constraints/mod.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_typeck/src/collect/item_bounds.rs",
+    "compiler/rustc_mir_transform/src/generator.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait `Pattern<'a>` parameterized by a lifetime, exercising higher-ranked trait/lifetime plumbing in trait bounds.",
+        "Declares an `async fn` with explicit lifetimes `'a` and `'b`, so the compiler lowers it into a future while tracking lifetime parameters.",
+        "Uses `impl Pattern<'a>` in argument position, exercising opaque parameter types (`impl Trait`) with lifetime-dependent trait bounds.",
+        "Returns `impl Pattern<'b>` from an `async fn`, combining return-position opaque types with async lowering and lifetime substitution.",
+        "The function body is empty, so type checking focuses on inferred return type obligations rather than concrete implementation logic.",
+        "Because `async fn` actually returns `impl Future<Output = T>`, the compiler must wrap the opaque `impl Pattern<'b>` inside async desugaring.",
+        "The input lifetime `'a` and output lifetime `'b` are unrelated, stressing borrow checking and opaque type inference across distinct generic lifetimes.",
+        "Targets nightly Rust, likely exercising unstable/internal compiler handling for `async fn` plus nested `impl Trait` interactions."
+      ],
+      "summary": "The reproducer is a minimal type-checking case: an `async fn` takes an argument typed as `impl Pattern<'a>` and promises an `impl Pattern<'b>` result, with unrelated lifetimes and no body. It stresses Rust’s async desugaring, opaque `impl Trait` in parameter and return positions, lifetime propagation, and inference/error handling for impossible or unconstrained opaque return types on nightly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on nested opaque types and lifetime handling during type checking of an `async fn`. The reproducer combines: (a) argument-position `impl Trait` with a lifetime-bound trait (`impl Pattern<'a>`), (b) return-position `impl Trait` with a different lifetime (`impl Pattern<'b>`), and (c) async desugaring, which wraps the declared return type inside an `impl Future<Output = ...>`. The query stack shows the compiler progresses through type checking, MIR construction, borrow checking, and then panics while computing the type of the generated opaque type for `named_trait::{opaque#0}`. This strongly suggests the bug is not in user code semantics but in rustc's handling of opaque type inference/lowering for async functions when unrelated generic lifetimes appear in nested `impl Trait`. The empty body further indicates the ICE likely comes from compiler assumptions about fulfillment or well-formedness of the hidden type / opaque return type rather than from any concrete expression. A likely common pattern is that the compiler fails to gracefully reject or normalize an unconstrained/impossible hidden type for the async-returned opaque, especially after async lowering introduces a second layer of opacity.",
+      "possible_causes": [
+        "Bug in async fn lowering for return-position `impl Trait`, where the compiler incorrectly computes the hidden type or generic/lifetime substitution for the generated opaque type when the declared opaque output carries a lifetime (`'b`) unrelated to input lifetimes.",
+        "Defect in opaque type inference/type_of for `named_trait::{opaque#0}`: rustc may assume a fully constrained hidden type exists, but for an empty-body async fn with `impl Pattern<'b>` output, the hidden type remains unconstrained and triggers an ICE instead of a proper type error.",
+        "Incorrect handling of nested opaques (`async fn` desugaring to `impl Future<Output = impl Pattern<'b>>`) in the type checker or MIR type computation, especially around normalization of the inner opaque under the outer async-generated future.",
+        "Lifetime mapping/substitution bug between the function generics and the synthesized opaque type generics, causing rustc to mis-handle distinct lifetimes `'a` and `'b` when constructing or checking the opaque return type.",
+        "Missing error path or invalid invariant in borrowck/MIR/type-of pipeline for opaque return types from async functions, where an invalid or unsatisfied trait/lifetime obligation is allowed to reach a panic instead of emitting a diagnostic."
+      ],
+      "evidence": [
+        "The reproducer specifically combines `async fn` and return-position `impl Trait`, which creates nested opaque typing through async desugaring (`impl Future<Output = ...>`).",
+        "The function parameter and return use different explicit lifetimes (`'a` vs `'b`), stressing lifetime substitution and generic mapping for opaque types.",
+        "The query stack ends at `type_of` computing `named_trait::{opaque#0}`, directly implicating rustc's opaque type computation rather than user-level body logic.",
+        "The panic occurs after `typeck`, MIR building, unsafety check, const processing, promoted MIR, and borrow checking, indicating an internal inconsistency in later type computation for the synthesized opaque item.",
+        "The function body is empty, so there is no complex user expression; the crash is triggered by signature/lowering/inference machinery alone.",
+        "Compiler output reports an unexpected panic (ICE) rather than a normal diagnostic, which is consistent with a violated internal assumption in compiler production code handling opaque async return types."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1469,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/collect/type_of.rs",
+        "reason": "The query stack ends at `type_of` for `named_trait::{opaque#0}`, directly implicating opaque type computation. This reproducer is about an async fn with return-position `impl Trait` and unrelated lifetimes, so the code that computes the declared type/hidden-type interface for opaque items is the most likely place for a bad assumption or missing error path."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Borrow checking finishes before the panic, and this file is specifically responsible for turning borrowck-discovered opaque type instantiations into hidden types used later by `type_of`. The reproducer stresses lifetime remapping for opaque types (`'a` vs `'b`) and async lowering, which matches this file’s region-rewrite and canonicalization responsibilities."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "This file handles inference-time tracking and replacement of opaque types. The bug description strongly suggests an unconstrained or inconsistently constrained hidden type for nested opaques (`async fn` -> `impl Future<Output = impl Pattern<'b>>`), making opaque inference logic a prime suspect."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/writeback.rs",
+        "reason": "Writeback finalizes body type-check results, including opaque types and generator/async-related type information. Since the body is empty and the ICE occurs after typeck/borrowck during later opaque type computation, incorrect writeback of the async/opaque result could leave invalid state for `type_of`."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/universal_regions.rs",
+        "reason": "The reproducer hinges on distinct explicit lifetimes in input and output of an async fn. This file builds the universal region model used by borrowck/NLL, so a mismatch in how `'a` and `'b` are represented for the synthesized opaque/generator context could cascade into the later opaque-type panic."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "`impl Pattern<'b>` imposes type-outlives/lifetime obligations that must be lowered into region constraints. A bug here could mishandle the output lifetime of the opaque return type in the presence of async desugaring, leading to invalid region constraints that only surface when computing the opaque type."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/region_constraints/mod.rs",
+        "reason": "Opaque type lifetime inference relies on member and subregion constraints. Since this case appears to violate an internal invariant around hidden-type/lifetime resolution rather than produce a normal diagnostic, the core region-constraint machinery is a plausible source of malformed state."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Member constraints are heavily used for opaque type region solving. The reproducer’s unrelated lifetimes and nested opaque async return make it likely that a region-membership constraint for the hidden type is being formed or processed incorrectly."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect/item_bounds.rs",
+        "reason": "This file computes bounds for opaque types from HIR. Because the signature combines return-position `impl Trait` with explicit lifetime bounds inside an async fn, incorrect bound construction or missing validation for the opaque output could later cause `type_of` to ICE instead of rejecting the signature cleanly."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/generator.rs",
+        "reason": "`async fn` is lowered through generator machinery, effectively wrapping the declared return type inside a future/generator state machine. Since the reproducer specifically depends on async desugaring plus nested `impl Trait`, generator lowering is a plausible upstream source of incorrect opaque/lifetime substitution that later triggers the `type_of` panic."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 138.72,
+    "stage_times_sec": {
+      "checkout": 2.371,
+      "load_bug_context": 0.084,
+      "test_behavior_analysis": 6.342,
+      "test_failure_analysis": 12.483,
+      "load_file_candidates": 0.568,
+      "search_suspicious_files": 116.871
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 355637,
+      "output_tokens": 6271,
+      "total_tokens": 361908,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.342,
+          "input_tokens": 352,
+          "output_tokens": 311,
+          "total_tokens": 663
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.483,
+          "input_tokens": 2194,
+          "output_tokens": 710,
+          "total_tokens": 2904
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.314,
+          "input_tokens": 27917,
+          "output_tokens": 400,
+          "total_tokens": 28317
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.764,
+          "input_tokens": 27491,
+          "output_tokens": 332,
+          "total_tokens": 27823
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.927,
+          "input_tokens": 27484,
+          "output_tokens": 333,
+          "total_tokens": 27817
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.484,
+          "input_tokens": 27749,
+          "output_tokens": 362,
+          "total_tokens": 28111
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.502,
+          "input_tokens": 27661,
+          "output_tokens": 359,
+          "total_tokens": 28020
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.218,
+          "input_tokens": 27739,
+          "output_tokens": 384,
+          "total_tokens": 28123
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.004,
+          "input_tokens": 27747,
+          "output_tokens": 351,
+          "total_tokens": 28098
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.703,
+          "input_tokens": 27579,
+          "output_tokens": 346,
+          "total_tokens": 27925
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.207,
+          "input_tokens": 26531,
+          "output_tokens": 296,
+          "total_tokens": 26827
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.397,
+          "input_tokens": 27456,
+          "output_tokens": 309,
+          "total_tokens": 27765
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.676,
+          "input_tokens": 27790,
+          "output_tokens": 321,
+          "total_tokens": 28111
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.997,
+          "input_tokens": 27443,
+          "output_tokens": 352,
+          "total_tokens": 27795
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.089,
+          "input_tokens": 9025,
+          "output_tokens": 311,
+          "total_tokens": 9336
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 14.562,
+          "input_tokens": 13479,
+          "output_tokens": 794,
+          "total_tokens": 14273
+        }
+      ]
+    }
+  }
+}

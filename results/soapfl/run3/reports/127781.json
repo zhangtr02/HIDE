@@ -1,0 +1,258 @@
+{
+  "bug_id": "127781",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-07-14",
+    "resolved": "fcaa6fdfbee1316184e7ad98c53241d52cd30a5f"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_hir_typeck/src/coercion.rs",
+    "compiler/rustc_hir_analysis/src/autoderef.rs",
+    "compiler/rustc_middle/src/ty/typeck_results.rs",
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_middle/src/ty/adjustment.rs",
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_infer/src/infer/relate/type_relating.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Uses nightly `async_closure` to pass an `async move |value|` closure into `TryStreamExt::try_for_each`.",
+        "Builds a stream with `repeat_with(|| \"foo\".to_owned())`, so produced items are owned `String` values.",
+        "Limits the infinite stream via `.take(1)`, then wraps each item as `Result<String, anyhow::Error>` using `.map(Result::Ok)`.",
+        "`try_for_each` should infer the closure parameter as the stream `Ok` item type, here `String`.",
+        "Inside the async closure, `accept_string(&value)` confirms the compiler can treat `value` as `String` in some contexts.",
+        "`accept_str(&value)` triggers the bug: type checking reportedly misidentifies the closure argument as `str` and errors on the whole closure.",
+        "`accept_str(value.as_str())` should be a valid `String`→`&str` conversion, but the reproducer notes inference still fails without extra type help.",
+        "Exercises async closure lowering, trait-based stream combinators, closure argument inference, deref coercions, and diagnostics around borrowed string types."
+      ],
+      "summary": "The reproducer creates a one-item `TryStream` of `String` values and processes it with an async closure in `try_for_each`. It targets a nightly compiler bug where the closure parameter’s type is inferred inconsistently: `&String` is accepted, but using it as `&str` causes the compiler to act as if the parameter were `str`, producing incorrect inference and diagnostics."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is an incorrect type inference/lowering of the async closure argument passed to `TryStreamExt::try_for_each`. The stream element type is clearly `String` (`repeat_with(|| \"foo\".to_owned())`, then `map(Result::Ok)` gives `Result<String, Error>`), so `try_for_each` should require a closure of signature `FnMut(String) -> Fut`. However, diagnostics consistently show the compiler internally treating the async-closure parameter as `str`: unsized-local error on the parameter binding, `as_str` looked up on `str`, and the trait-bound mismatch reports `found function signature fn(str) -> _` instead of `fn(String) -> _`. This suggests a compiler defect in async-closure argument type propagation or signature construction, likely interacting with autoderef/coercion from `String` to `str` when the body uses `accept_str(&value)`. The fact that `accept_string(&value)` is mentioned as working indicates the source stream/item typing is correct and the bug is triggered by how the closure body constraints feed back into async closure inference/lowering, not by the reproducer’s stream setup. Overall, the likely bug area is rustc’s handling of `async move |arg|` expected input types under trait-method obligation (`FnMut(Self::Ok)`), where body-driven coercions incorrectly collapse the by-value argument from `String` to unsized `str`.",
+      "possible_causes": [
+        "Bug in async-closure signature inference: rustc may be constructing the closure's input type from body coercion obligations instead of preserving the expected `FnMut(String)` parameter type supplied by `try_for_each`.",
+        "Defect in async closure lowering/desugaring where a by-value `String` parameter is incorrectly normalized/autodereferenced to its `Deref::Target = str`, yielding an impossible unsized local `str` parameter.",
+        "Incorrect interaction between closure type checking and deref coercion: use of `accept_str(&value)` may be causing rustc to infer the parameter itself as `str` rather than applying coercion on `&String` to `&str`.",
+        "Bug in trait obligation solving for `TryStreamExt::try_for_each` with `async_closure`, causing the expected closure signature `fn(String) -> Fut` to be mismatched against an internally inferred `fn(str) -> Fut`.",
+        "Diagnostic evidence points to a typeck/HIR-to-MIR lowering issue for async closures, where captured/local variable types inside the generated future are computed from the wrong adjusted type (`str` after deref) instead of the original binding type (`String`)."
+      ],
+      "evidence": [
+        "The stream source is unequivocally `String`: `repeat_with(|| \"foo\".to_owned())` produces owned strings, and `.map(Result::<_, Error>::Ok)` makes the `TryStream` `Ok` type `String`.",
+        "`try_for_each` requires `F: FnMut(Self::Ok) -> Fut`; with this stream, the expected closure signature is `fn(String) -> _`, which the compiler itself states in the E0631 notes.",
+        "Compiler output says `found function signature fn(str) -> _`, showing the closure parameter was inferred internally as `str` rather than `String`.",
+        "E0277 on the closure parameter says `str` is unsized and cannot be a local variable, which can only happen if rustc assigned the binding type `str` directly.",
+        "E0599 says no method `as_str` found for type `str`, confirming the compiler believes `value` itself is `str`, not `String`.",
+        "The reproducer behavior notes that `accept_string(&value)` works, indicating the underlying item type information is available/correct in at least some contexts; the failure is triggered specifically when `&value` is used where `&str` is expected.",
+        "The bug only appears in the nightly `async_closure` path with a trait-based combinator (`try_for_each`), pointing to async-closure-specific inference/lowering rather than general stream typing."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1815,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "Most suspicious: the bug is specific to nightly `async_closure` and the compiler is clearly constructing the closure as if its parameter were `str` instead of the expected `String`. This file is responsible for deriving closure/async-closure signatures from contextual expectations like `FnMut(Self::Ok) -> Fut`, making it the likeliest place where the parameter type is being inferred or preserved incorrectly."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "This file checks function-like bodies, including closure bodies, against the inferred/liberated signature and enforces parameter typing. The unsized-local error on the closure parameter suggests the body parameter may actually be getting checked as `str`, so a bug in how the closure body parameter pattern is matched to the computed signature is plausible."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/coercion.rs",
+        "reason": "The misbehavior appears triggered specifically by `accept_str(&value)`, i.e. a deref/coercion from `&String` to `&str`. That points to a possible bad feedback path where coercion constraints from the body incorrectly influence the async closure parameter type itself, collapsing `String` to its deref target `str`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/autoderef.rs",
+        "reason": "Because `String` dereferences to `str`, and the compiler diagnostics consistently act as if the parameter itself became `str`, autoderef handling is a strong secondary suspect. A bug here could cause the adjusted/dereferenced type to leak into closure argument inference instead of remaining only an expression adjustment on `&value`."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/typeck_results.rs",
+        "reason": "If the correct parameter type is inferred in typeck but later consumers see `str`, the stored per-body type/adjustment results may be wrong or inconsistent for async closures. This file is the central container for inferred node types and adjustments that downstream lowering uses."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "This file lowers typed HIR expressions into THIR using recorded adjustments. If async-closure body expressions or parameter uses are lowered with the wrong adjusted type (`str` instead of `String`), it could explain why later diagnostics and callable-signature checks report `fn(str) -> _`."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "Async closures are still feature-gated and involve nontrivial desugaring during AST→HIR lowering. If the async-closure parameter or body is lowered in a way that loses by-value `String` semantics or mishandles the closure/coroutine boundary, later typeck could be led astray."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/adjustment.rs",
+        "reason": "The failure pattern strongly suggests a confusion between the original type and an adjusted autoderef/coercion target. This file defines the adjustment model rustc uses to represent such conversions, so a bad adjustment kind/target for async-closure arguments would fit the observed `String`→`str` collapse."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "`try_for_each` supplies the expected callable signature through trait selection (`FnMut(String) -> Fut`). Since diagnostics explicitly mention the expected signature is `fn(String) -> _` but the closure is found as `fn(str) -> _`, confirmation/unification of the callable trait obligation may be mishandling async-closure signatures."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+        "reason": "If the closure parameter type is being related against body-driven coercion constraints under the wrong variance or with over-eager structural relation, inference could incorrectly generalize/unify `String` with `str`. This core relation engine is therefore a plausible deeper cause behind the signature mismatch."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 167.19,
+    "stage_times_sec": {
+      "checkout": 3.08,
+      "load_bug_context": 0.07,
+      "test_behavior_analysis": 5.21,
+      "test_failure_analysis": 12.294,
+      "load_file_candidates": 6.01,
+      "search_suspicious_files": 140.527
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 435908,
+      "output_tokens": 7759,
+      "total_tokens": 443667,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.209,
+          "input_tokens": 535,
+          "output_tokens": 330,
+          "total_tokens": 865
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.294,
+          "input_tokens": 2085,
+          "output_tokens": 837,
+          "total_tokens": 2922
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.469,
+          "input_tokens": 27900,
+          "output_tokens": 461,
+          "total_tokens": 28361
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.381,
+          "input_tokens": 27825,
+          "output_tokens": 315,
+          "total_tokens": 28140
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.101,
+          "input_tokens": 27362,
+          "output_tokens": 316,
+          "total_tokens": 27678
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.122,
+          "input_tokens": 27692,
+          "output_tokens": 356,
+          "total_tokens": 28048
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.429,
+          "input_tokens": 27639,
+          "output_tokens": 386,
+          "total_tokens": 28025
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.22,
+          "input_tokens": 27952,
+          "output_tokens": 368,
+          "total_tokens": 28320
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.645,
+          "input_tokens": 27794,
+          "output_tokens": 371,
+          "total_tokens": 28165
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.254,
+          "input_tokens": 27749,
+          "output_tokens": 359,
+          "total_tokens": 28108
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.138,
+          "input_tokens": 27810,
+          "output_tokens": 361,
+          "total_tokens": 28171
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.781,
+          "input_tokens": 27835,
+          "output_tokens": 338,
+          "total_tokens": 28173
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.706,
+          "input_tokens": 27589,
+          "output_tokens": 359,
+          "total_tokens": 27948
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.855,
+          "input_tokens": 27859,
+          "output_tokens": 317,
+          "total_tokens": 28176
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.868,
+          "input_tokens": 28021,
+          "output_tokens": 332,
+          "total_tokens": 28353
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.851,
+          "input_tokens": 27948,
+          "output_tokens": 375,
+          "total_tokens": 28323
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 9.582,
+          "input_tokens": 27836,
+          "output_tokens": 415,
+          "total_tokens": 28251
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 6.489,
+          "input_tokens": 6098,
+          "output_tokens": 329,
+          "total_tokens": 6427
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.604,
+          "input_tokens": 10379,
+          "output_tokens": 834,
+          "total_tokens": 11213
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,243 @@
+{
+  "bug_id": "113796",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-07-16",
+    "resolved": "4c8bb79d9f565115637cc6da739f8389e79f3a29"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+    "compiler/rustc_trait_selection/src/traits/outlives_bounds.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_infer/src/infer/outlives/verify.rs",
+    "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `async_fn_in_trait` with `incomplete_features`, exercising unstable async methods inside trait definitions and impls.",
+        "Defines a trait with a generic associated type `Item<'a>`, constrained by `where Self: 'a`, testing GAT lifetime binding.",
+        "Uses a lending-iterator pattern where the yielded item may borrow from `self`, stressing self-referential lifetime relationships.",
+        "Declares `async fn next(&mut self) -> Option<Self::Item<'_>>`, combining async lowering with a GAT-based return type.",
+        "Implements the trait for `Lend<I>` with `type Item<'a> = &'a I`, checking lifetime projection from the wrapper’s inner generic type.",
+        "The impl’s async method returns `Option<&I>` tied to the borrow of `&mut self`, exercising region inference across async desugaring.",
+        "Even though `todo!()` avoids runtime behavior, the compiler must still type-check the async signature and generated future.",
+        "Targets compiler behavior around interaction of async-in-trait, GATs, opaque future generation, and borrow checking during trait impl validation."
+      ],
+      "summary": "This reproducer is a compile-time test for nightly Rust. It combines `async_fn_in_trait` and a GAT-based lending iterator trait, where `next` asynchronously returns a value borrowing from `self`. The impl maps the GAT to `&'a I`, forcing rustc to validate lifetimes, projection, and async desugaring together. The bug is likely in compiler handling of these interacting features during type checking or future lowering."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is a false lifetime error triggered only by the combination of unstable async methods in traits, a GAT with `where Self: 'a`, and an impl whose projected associated type is `&'a I`. The trait definition allows `type Item<'a>` to depend on a borrow of `self`, and the impl `type Item<'a> = &'a I where Self: 'a` should be justified because `Lend<I>: 'a` implies `I: 'a`. However, when the method is written as `async fn next(&mut self) -> Option<Self::Item<'_>>`, rustc reports E0311 on the impl method signature before body analysis matters (`todo!()`), indicating the bug is in signature/type-checking, async desugaring, or trait/impl obligation generation rather than runtime semantics. The common thread is that async-in-trait lowering introduces an opaque future/HRTB-like transformation, and rustc appears to lose or fail to propagate the implied outlives relation from the GAT bound `where Self: 'a` through the projection `Self::Item<'_>` in the impl. This causes the compiler to incorrectly demand an explicit lifetime validity for generic parameter `I` at the method boundary. In short, the likely compiler defect is mishandling lifetime obligations for projected GAT return types during async trait method lowering/checking.",
+      "possible_causes": [
+        "rustc likely fails to carry the implied outlives constraint from `type Item<'a> where Self: 'a` into the async-trait method's lowered return type, so the projection `Self::Item<'_>` in the impl is checked without the necessary `Lend<I>: 'a -> I: 'a` reasoning.",
+        "Bug in async-in-trait lowering: the generated opaque future for `async fn` in a trait impl may be instantiated with incorrect region obligations, causing a spurious E0311 when the future output contains a GAT projection borrowing from `self`.",
+        "Defect in trait impl signature validation or wf-checking for RPITIT/opaque async return types interacting with GAT projections, where rustc checks `Option<&'a I>` too early or outside the binder that provides the anonymous lifetime from `&mut self`.",
+        "Region inference / borrow-check integration bug for lending-pattern async methods: the anonymous lifetime tied to `&mut self` is not correctly related to the GAT lifetime parameter during projection normalization, producing a false 'parameter type `I` may not live long enough' error.",
+        "Possible omission in projection normalization or implied-bounds computation for associated type aliases in impls, specifically when normalizing `Self::Item<'_>` to `&'_ I` under `Self = Lend<I>` inside an async trait method."
+      ],
+      "evidence": [
+        "The error is emitted on the impl method signature itself, not on the body, so the issue is in compiler type/lifetime checking of the method interface or its async lowering.",
+        "`todo!()` means no actual returned reference is constructed, ruling out a concrete borrow-checking error from the body and pointing to a compiler-side false positive in signature obligations.",
+        "The trait explicitly permits borrowing via `type Item<'a> where Self: 'a;`, and the impl mirrors that with `type Item<'a> = &'a I where Self: 'a;`, so the required lifetime relationship should be derivable from `Self`.",
+        "The diagnostic says `I` may not live long enough for the anonymous lifetime introduced by `async fn next(&mut self)`, which matches a failure to propagate implied bounds from `Self: 'a` to the inner generic parameter during projection.",
+        "The reproducer specifically combines `async_fn_in_trait` + GAT + projection in return position + borrow from `self`; these are exactly the features implicated by the error and are known to stress async lowering and lifetime binder handling.",
+        "The problem appears during trait impl validation for `async fn next(&mut self) -> Option<Self::Item<'_>>`, suggesting the compiler mishandles the transformed future/output type rather than the high-level source semantics."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1642,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+        "reason": "The error is reported on the impl method signature while checking compatibility with the trait method. This file is the main place that validates impl-vs-trait method signatures, including async trait methods and RPITIT-related return-type refinement, so it is highly suspicious for losing the needed lifetime relation around `Self::Item<'_>`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The failure is a spurious E0311 before body analysis, which strongly suggests a well-formedness/signature obligation issue. This file is responsible for registering and normalizing WF obligations for item signatures and could be missing or misapplying the implied `Self: 'a` bound for the projected GAT in the async method return."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "Async fn in trait is lowered through RPITIT/opaque machinery with synthesized generics. This file explicitly has special handling for RPITIT generics; a bug here could mis-synthesize lifetime parameters or binders for the async method’s hidden future, causing the anonymous self-borrow lifetime not to be related correctly to the GAT projection."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+        "reason": "The reproducer points directly at a failure to derive implied outlives constraints from a well-formed type. This file computes implied outlives bounds, and a defect here could explain why `Lend<I>: 'a` is not yielding the necessary `I: 'a` reasoning when checking `Self::Item<'_>` in the async signature."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/outlives_bounds.rs",
+        "reason": "This is the layer that reifies implied outlives bounds back into inference/type checking. If the query result for the async method or projected return type is instantiated incorrectly, the compiler could emit exactly this false lifetime error for `I`."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "`Self::Item<'_>` must be normalized from the GAT projection to `&'_ I` under the impl, while preserving the `where Self: 'a` condition. This file is central to associated type projection/normalization and is a likely place for losing the projection’s required lifetime obligations in the async context."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "The diagnostic is specifically about a type parameter not living long enough, which arises when type-outlives obligations are decomposed into region constraints. This file lowers `T: 'a` obligations and could mishandle the projected `&'a I` / alias form originating from the async trait method signature."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+        "reason": "If the compiler successfully creates the outlives obligation but later fails to verify it using the available implied bounds, the result would be a false E0311 exactly like this. This file handles that verification logic and is therefore a strong suspect."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+        "reason": "The GAT declaration includes `where Self: 'a`, and this file is responsible for collecting and remapping associated type/GAT bounds. A bug here could mean the impl-side projection `Self::Item<'_>` is checked without the inherited/remapped bound that justifies borrowing from `Self`."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Async fn in trait uses opaque return-type machinery under the hood. If lifetime capture/remapping into the hidden future type is wrong, especially for the self-borrow lifetime feeding a projected GAT output, the compiler can spuriously require `I` to outlive the anonymous lifetime."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 156.302,
+    "stage_times_sec": {
+      "checkout": 1.592,
+      "load_bug_context": 0.07,
+      "test_behavior_analysis": 6.902,
+      "test_failure_analysis": 13.921,
+      "load_file_candidates": 0.097,
+      "search_suspicious_files": 133.719
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 382825,
+      "output_tokens": 7243,
+      "total_tokens": 390068,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.902,
+          "input_tokens": 457,
+          "output_tokens": 328,
+          "total_tokens": 785
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.921,
+          "input_tokens": 1228,
+          "output_tokens": 847,
+          "total_tokens": 2075
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.36,
+          "input_tokens": 26825,
+          "output_tokens": 402,
+          "total_tokens": 27227
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.611,
+          "input_tokens": 26946,
+          "output_tokens": 384,
+          "total_tokens": 27330
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.752,
+          "input_tokens": 26515,
+          "output_tokens": 339,
+          "total_tokens": 26854
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.4,
+          "input_tokens": 26827,
+          "output_tokens": 373,
+          "total_tokens": 27200
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.93,
+          "input_tokens": 26761,
+          "output_tokens": 401,
+          "total_tokens": 27162
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.856,
+          "input_tokens": 27125,
+          "output_tokens": 455,
+          "total_tokens": 27580
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.859,
+          "input_tokens": 26953,
+          "output_tokens": 447,
+          "total_tokens": 27400
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 10.997,
+          "input_tokens": 26999,
+          "output_tokens": 387,
+          "total_tokens": 27386
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.542,
+          "input_tokens": 26943,
+          "output_tokens": 332,
+          "total_tokens": 27275
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.229,
+          "input_tokens": 26713,
+          "output_tokens": 372,
+          "total_tokens": 27085
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.627,
+          "input_tokens": 27015,
+          "output_tokens": 352,
+          "total_tokens": 27367
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.95,
+          "input_tokens": 27030,
+          "output_tokens": 273,
+          "total_tokens": 27303
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.692,
+          "input_tokens": 27201,
+          "output_tokens": 372,
+          "total_tokens": 27573
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.046,
+          "input_tokens": 19050,
+          "output_tokens": 349,
+          "total_tokens": 19399
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.836,
+          "input_tokens": 12237,
+          "output_tokens": 830,
+          "total_tokens": 13067
+        }
+      ]
+    }
+  }
+}

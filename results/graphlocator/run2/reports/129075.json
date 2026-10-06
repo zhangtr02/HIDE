@@ -1,0 +1,276 @@
+{
+  "bug_id": "129075",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-08-13",
+    "resolved": "91376f416222a238227c84a848d168835ede2cc3"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/inline.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_mir_transform/src/inline.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_mir_transform/src/inline.rs",
+        "rank": 1
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/129075.json",
+    "graph_cache_hit": false,
+    "graph_cache_build_mode": "skeleton",
+    "graph_cache_bug_id": "129075",
+    "graph_cache_checkout_commit": "91376f416222a238227c84a848d168835ede2cc3",
+    "initial_graph_node_count": 57113,
+    "initial_graph_edge_count": 57112,
+    "graph_node_count": 57113,
+    "graph_edge_count": 69322,
+    "lazy_loaded_edge_count": 12210,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FILE\", \"name\": \"inline.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"inline.rs\"}",
+      "{\"type\": \"CLASS\", \"name\": \"process_blocks\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"process_blocks\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"fn process_blocks(&mut self, caller_body: &mut Body<'tcx>, blocks: Range<BasicBlock>) {\\n        // How many callsites in this body are we allowed to inline? We need to limit this in order\\n        // to prevent super-linear growth in MIR size\\n        let inline_limit = match self.history.len() {\\n            0 => usize::MAX,\\n            1..=TOP_DOWN_DEPTH_LIMIT => 1,\\n            _ => return,\\n        };\\n        let mut inlined_count = 0;\\n        for bb in blocks {\\n            let bb_data = &caller_body[bb];\\n            if bb_data.is_cleanup {\\n                continue;\\n            }\\n\\n            let Some(callsite) = self.resolve_callsite(caller_body, bb, bb_data) else {\\n                continue;\\n            };\\n\\n            let span = trace_span!(\\\"process_blocks\\\", %callsite.callee, ?bb);\\n            let _guard = span.enter();\\n\\n            match self.try_inlining(caller_body, &callsite) {\\n                Err(reason) => {\\n                    debug!(\\\"not-inlined {} [{}]\\\", callsite.callee, reason);\\n                    continue;\\n                }\\n                Ok(new_blocks) => {\\n                    debug!(\\\"inlined {}\\\", callsite.callee);\\n                    self.changed = true;\\n\\n                    self.history.push(callsite.callee.def_id());\\n                    self.process_blocks(caller_body, new_blocks);\\n                    self.history.pop();\\n\\n                    inlined_count += 1;\\n                    if inlined_count == inline_limit {\\n                        debug!(\\\"inline count reached\\\");\\n                        return;\\n                    }\\n                }\\n            }\\n        }\\n    }\"}",
+      "{\"type\": \"CLASS\", \"name\": \"try_inlining\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"try_inlining\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"fn try_inlining(\\n        &self,\\n        caller_body: &mut Body<'tcx>,\\n        callsite: &CallSite<'tcx>,\\n    ) -> Result<std::ops::Range<BasicBlock>, &'static str> {\\n        self.check_mir_is_available(caller_body, callsite.callee)?;\\n\\n        let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());\\n        let cross_crate_inlinable = self.tcx.cross_crate_inlinable(callsite.callee.def_id());\\n        self.check_codegen_attributes(callsite, callee_attrs, cross_crate_inlinable)?;\\n\\n        // Intrinsic fallback bodies are automatically made cross-crate inlineable,\\n        // but at this stage we don't know whether codegen knows the intrinsic,\\n        // so just conservatively don't inline it.\\n        if self.tcx.has_attr(callsite.callee.def_id(), sym::rustc_intrinsic) {\\n            return Err(\\\"Callee is an intrinsic, do not inline fallback bodies\\\");\\n        }\\n\\n        let terminator = caller_body[callsite.block].terminator.as_ref().unwrap();\\n        let TerminatorKind::Call { args, destination, .. } = &terminator.kind else { bug!() };\\n        let destination_ty = destination.ty(&caller_body.local_decls, self.tcx).ty;\\n        for arg in args {\\n            if !arg.node.ty(&caller_body.local_decls, self.tcx).is_sized(self.tcx, self.param_env) {\\n                // We do not allow inlining functions with unsized params. Inlining these functions\\n                // could create unsized locals, which are unsound and being phased out.\\n                return Err(\\\"Call has unsized argument\\\");\\n            }\\n        }\\n\\n        let callee_body = try_instance_mir(self.tcx, callsite.callee.def)?;\\n        self.check_mir_body(callsite, callee_body, callee_attrs, cross_crate_inlinable)?;\\n\\n        if !self.tcx.consider_optimizing(|| {\\n            format!(\\\"Inline {:?} into {:?}\\\", callsite.callee, caller_body.source)\\n        }) {\\n            return Err(\\\"optimization fuel exhausted\\\");\\n        }\\n\\n        let Ok(callee_body) = callsite.callee.try_instantiate_mir_and_normalize_erasing_regions(\\n            self.tcx,\\n            self.param_env,\\n            ty::EarlyBinder::bind(callee_body.clone()),\\n        ) else {\\n            return Err(\\\"failed to normalize callee body\\\");\\n        };\\n\\n        // Normally, this shouldn't be required, but trait normalization failure can create a\\n        // validation ICE.\\n        if !validate_types(\\n            self.tcx,\\n            MirPhase::Runtime(RuntimePhase::Optimized),\\n            self.param_env,\\n            &callee_body,\\n            &caller_body,\\n        )\\n        .is_empty()\\n        {\\n            return Err(\\\"failed to validate callee body\\\");\\n        }\\n\\n        // Check call signature compatibility.\\n        // Normally, this shouldn't be required, but trait normalization failure can create a\\n        // validation ICE.\\n        let output_type = callee_body.return_ty();\\n        if !util::relate_types(self.tcx, self.param_env, ty::Covariant, output_type, destination_ty)\\n        {\\n            trace!(?output_type, ?destination_ty);\\n            return Err(\\\"failed to normalize return type\\\");\\n        }\\n        if callsite.fn_sig.abi() == Abi::RustCall {\\n            // FIXME: Don't inline user-written `extern \\\"rust-call\\\"` functions,\\n            // since this is generally perf-negative on rustc, and we hope that\\n            // LLVM will inline these functions instead.\\n            if callee_body.spread_arg.is_some() {\\n                return Err(\\\"do not inline user-written rust-call functions\\\");\\n            }\\n\\n            let (self_arg, arg_tuple) = match &args[..] {\\n                [arg_tuple] => (None, arg_tuple),\\n                [self_arg, arg_tuple] => (Some(self_arg), arg_tuple),\\n                _ => bug!(\\\"Expected `rust-call` to have 1 or 2 args\\\"),\\n            };\\n\\n            let self_arg_ty =\\n                self_arg.map(|self_arg| self_arg.node.ty(&caller_body.local_decls, self.tcx));\\n\\n            let arg_tuple_ty = arg_tuple.node.ty(&caller_body.local_decls, self.tcx);\\n            let ty::Tuple(arg_tuple_tys) = *arg_tuple_ty.kind() else {\\n                bug!(\\\"Closure arguments are not passed as a tuple\\\");\\n            };\\n\\n            for (arg_ty, input) in\\n                self_arg_ty.into_iter().chain(arg_tuple_tys).zip(callee_body.args_iter())\\n            {\\n                let input_type = callee_body.local_decls[input].ty;\\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\\n                {\\n                    trace!(?arg_ty, ?input_type);\\n                    return Err(\\\"failed to normalize tuple argument type\\\");\\n                }\\n            }\\n        } else {\\n            for (arg, input) in args.iter().zip(callee_body.args_iter()) {\\n                let input_type = callee_body.local_decls[input].ty;\\n                let arg_ty = arg.node.ty(&caller_body.local_decls, self.tcx);\\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\\n                {\\n                    trace!(?arg_ty, ?input_type);\\n                    return Err(\\\"failed to normalize argument type\\\");\\n                }\\n            }\\n        }\\n\\n        let old_blocks = caller_body.basic_blocks.next_index();\\n        self.inline_call(caller_body, callsite, callee_body);\\n        let new_blocks = old_blocks..caller_body.basic_blocks.next_index();\\n\\n        Ok(new_blocks)\\n    }\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_mir_transform/src/inline.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Inlining proceeds on MIR from an invalid trait impl signature mismatch",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "try_inlining",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "fn try_inlining(\n        &self,\n        caller_body: &mut Body<'tcx>,\n        callsite: &CallSite<'tcx>,\n    ) -> Result<std::ops::Range<BasicBlock>, &'static str> {\n        self.check_mir_is_available(caller_body, callsite.callee)?;\n\n        let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());\n        let cross_crate_inlinable = self.tcx.cross_crate_inlinable(callsite.callee.def_id());\n        self.check_codegen_attributes(callsite, callee_attrs, cross_crate_inlinable)?;\n\n        // Intrinsic fallback bodies are automatically made cross-crate inlineable,\n        // but at this stage we don't know whether codegen knows the intrinsic,\n        // so just conservatively don't inline it.\n        if self.tcx.has_attr(callsite.callee.def_id(), sym::rustc_intrinsic) {\n            return Err(\"Callee is an intrinsic, do not inline fallback bodies\");\n        }\n\n        let terminator = caller_body[callsite.block].terminator.as_ref().unwrap();\n        let TerminatorKind::Call { args, destination, .. } = &terminator.kind else { bug!() };\n        let destination_ty = destination.ty(&caller_body.local_decls, self.tcx).ty;\n        for arg in args {\n            if !arg.node.ty(&caller_body.local_decls, self.tcx).is_sized(self.tcx, self.param_env) {\n                // We do not allow inlining functions with unsized params. Inlining these functions\n                // could create unsized locals, which are unsound and being phased out.\n                return Err(\"Call has unsized argument\");\n            }\n        }\n\n        let callee_body = try_instance_mir(self.tcx, callsite.callee.def)?;\n        self.check_mir_body(callsite, callee_body, callee_attrs, cross_crate_inlinable)?;\n\n        if !self.tcx.consider_optimizing(|| {\n            format!(\"Inline {:?} into {:?}\", callsite.callee, caller_body.source)\n        }) {\n            return Err(\"optimization fuel exhausted\");\n        }\n\n        let Ok(callee_body) = callsite.callee.try_instantiate_mir_and_normalize_erasing_regions(\n            self.tcx,\n            self.param_env,\n            ty::EarlyBinder::bind(callee_body.clone()),\n        ) else {\n            return Err(\"failed to normalize callee body\");\n        };\n\n        // Normally, this shouldn't be required, but trait normalization failure can create a\n        // validation ICE.\n        if !validate_types(\n            self.tcx,\n            MirPhase::Runtime(RuntimePhase::Optimized),\n            self.param_env,\n            &callee_body,\n            &caller_body,\n        )\n        .is_empty()\n        {\n            return Err(\"failed to validate callee body\");\n        }\n\n        // Check call signature compatibility.\n        // Normally, this shouldn't be required, but trait normalization failure can create a\n        // validation ICE.\n        let output_type = callee_body.return_ty();\n        if !util::relate_types(self.tcx, self.param_env, ty::Covariant, output_type, destination_ty)\n        {\n            trace!(?output_type, ?destination_ty);\n            return Err(\"failed to normalize return type\");\n        }\n        if callsite.fn_sig.abi() == Abi::RustCall {\n            // FIXME: Don't inline user-written `extern \"rust-call\"` functions,\n            // since this is generally perf-negative on rustc, and we hope that\n            // LLVM will inline these functions instead.\n            if callee_body.spread_arg.is_some() {\n                return Err(\"do not inline user-written rust-call functions\");\n            }\n\n            let (self_arg, arg_tuple) = match &args[..] {\n                [arg_tuple] => (None, arg_tuple),\n                [self_arg, arg_tuple] => (Some(self_arg), arg_tuple),\n                _ => bug!(\"Expected `rust-call` to have 1 or 2 args\"),\n            };\n\n            let self_arg_ty =\n                self_arg.map(|self_arg| self_arg.node.ty(&caller_body.local_decls, self.tcx));\n\n            let arg_tuple_ty = arg_tuple.node.ty(&caller_body.local_decls, self.tcx);\n            let ty::Tuple(arg_tuple_tys) = *arg_tuple_ty.kind() else {\n                bug!(\"Closure arguments are not passed as a tuple\");\n            };\n\n            for (arg_ty, input) in\n                self_arg_ty.into_iter().chain(arg_tuple_tys).zip(callee_body.args_iter())\n            {\n                let input_type = callee_body.local_decls[input].ty;\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\n                {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize tuple argument type\");\n                }\n            }\n        } else {\n            for (arg, input) in args.iter().zip(callee_body.args_iter()) {\n                let input_type = callee_body.local_decls[input].ty;\n                let arg_ty = arg.node.ty(&caller_body.local_decls, self.tcx);\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\n                {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize argument type\");\n                }\n            }\n        }\n\n        let old_blocks = caller_body.basic_blocks.next_index();\n        self.inline_call(caller_body, callsite, callee_body);\n        let new_blocks = old_blocks..caller_body.basic_blocks.next_index();\n\n        Ok(new_blocks)\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Destructuring assignment into struct-field/array pattern creates inconsistent MIR local/place indexing",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "try_inlining",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "fn try_inlining(\n        &self,\n        caller_body: &mut Body<'tcx>,\n        callsite: &CallSite<'tcx>,\n    ) -> Result<std::ops::Range<BasicBlock>, &'static str> {\n        self.check_mir_is_available(caller_body, callsite.callee)?;\n\n        let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());\n        let cross_crate_inlinable = self.tcx.cross_crate_inlinable(callsite.callee.def_id());\n        self.check_codegen_attributes(callsite, callee_attrs, cross_crate_inlinable)?;\n\n        // Intrinsic fallback bodies are automatically made cross-crate inlineable,\n        // but at this stage we don't know whether codegen knows the intrinsic,\n        // so just conservatively don't inline it.\n        if self.tcx.has_attr(callsite.callee.def_id(), sym::rustc_intrinsic) {\n            return Err(\"Callee is an intrinsic, do not inline fallback bodies\");\n        }\n\n        let terminator = caller_body[callsite.block].terminator.as_ref().unwrap();\n        let TerminatorKind::Call { args, destination, .. } = &terminator.kind else { bug!() };\n        let destination_ty = destination.ty(&caller_body.local_decls, self.tcx).ty;\n        for arg in args {\n            if !arg.node.ty(&caller_body.local_decls, self.tcx).is_sized(self.tcx, self.param_env) {\n                // We do not allow inlining functions with unsized params. Inlining these functions\n                // could create unsized locals, which are unsound and being phased out.\n                return Err(\"Call has unsized argument\");\n            }\n        }\n\n        let callee_body = try_instance_mir(self.tcx, callsite.callee.def)?;\n        self.check_mir_body(callsite, callee_body, callee_attrs, cross_crate_inlinable)?;\n\n        if !self.tcx.consider_optimizing(|| {\n            format!(\"Inline {:?} into {:?}\", callsite.callee, caller_body.source)\n        }) {\n            return Err(\"optimization fuel exhausted\");\n        }\n\n        let Ok(callee_body) = callsite.callee.try_instantiate_mir_and_normalize_erasing_regions(\n            self.tcx,\n            self.param_env,\n            ty::EarlyBinder::bind(callee_body.clone()),\n        ) else {\n            return Err(\"failed to normalize callee body\");\n        };\n\n        // Normally, this shouldn't be required, but trait normalization failure can create a\n        // validation ICE.\n        if !validate_types(\n            self.tcx,\n            MirPhase::Runtime(RuntimePhase::Optimized),\n            self.param_env,\n            &callee_body,\n            &caller_body,\n        )\n        .is_empty()\n        {\n            return Err(\"failed to validate callee body\");\n        }\n\n        // Check call signature compatibility.\n        // Normally, this shouldn't be required, but trait normalization failure can create a\n        // validation ICE.\n        let output_type = callee_body.return_ty();\n        if !util::relate_types(self.tcx, self.param_env, ty::Covariant, output_type, destination_ty)\n        {\n            trace!(?output_type, ?destination_ty);\n            return Err(\"failed to normalize return type\");\n        }\n        if callsite.fn_sig.abi() == Abi::RustCall {\n            // FIXME: Don't inline user-written `extern \"rust-call\"` functions,\n            // since this is generally perf-negative on rustc, and we hope that\n            // LLVM will inline these functions instead.\n            if callee_body.spread_arg.is_some() {\n                return Err(\"do not inline user-written rust-call functions\");\n            }\n\n            let (self_arg, arg_tuple) = match &args[..] {\n                [arg_tuple] => (None, arg_tuple),\n                [self_arg, arg_tuple] => (Some(self_arg), arg_tuple),\n                _ => bug!(\"Expected `rust-call` to have 1 or 2 args\"),\n            };\n\n            let self_arg_ty =\n                self_arg.map(|self_arg| self_arg.node.ty(&caller_body.local_decls, self.tcx));\n\n            let arg_tuple_ty = arg_tuple.node.ty(&caller_body.local_decls, self.tcx);\n            let ty::Tuple(arg_tuple_tys) = *arg_tuple_ty.kind() else {\n                bug!(\"Closure arguments are not passed as a tuple\");\n            };\n\n            for (arg_ty, input) in\n                self_arg_ty.into_iter().chain(arg_tuple_tys).zip(callee_body.args_iter())\n            {\n                let input_type = callee_body.local_decls[input].ty;\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\n                {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize tuple argument type\");\n                }\n            }\n        } else {\n            for (arg, input) in args.iter().zip(callee_body.args_iter()) {\n                let input_type = callee_body.local_decls[input].ty;\n                let arg_ty = arg.node.ty(&caller_body.local_decls, self.tcx);\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\n                {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize argument type\");\n                }\n            }\n        }\n\n        let old_blocks = caller_body.basic_blocks.next_index();\n        self.inline_call(caller_body, callsite, callee_body);\n        let new_blocks = old_blocks..caller_body.basic_blocks.next_index();\n\n        Ok(new_blocks)\n    }"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Recursive processing revisits newly inlined blocks after MIR shape changes, exposing stale block/local assumptions",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "process_blocks",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "fn process_blocks(&mut self, caller_body: &mut Body<'tcx>, blocks: Range<BasicBlock>) {\n        // How many callsites in this body are we allowed to inline? We need to limit this in order\n        // to prevent super-linear growth in MIR size\n        let inline_limit = match self.history.len() {\n            0 => usize::MAX,\n            1..=TOP_DOWN_DEPTH_LIMIT => 1,\n            _ => return,\n        };\n        let mut inlined_count = 0;\n        for bb in blocks {\n            let bb_data = &caller_body[bb];\n            if bb_data.is_cleanup {\n                continue;\n            }\n\n            let Some(callsite) = self.resolve_callsite(caller_body, bb, bb_data) else {\n                continue;\n            };\n\n            let span = trace_span!(\"process_blocks\", %callsite.callee, ?bb);\n            let _guard = span.enter();\n\n            match self.try_inlining(caller_body, &callsite) {\n                Err(reason) => {\n                    debug!(\"not-inlined {} [{}]\", callsite.callee, reason);\n                    continue;\n                }\n                Ok(new_blocks) => {\n                    debug!(\"inlined {}\", callsite.callee);\n                    self.changed = true;\n\n                    self.history.push(callsite.callee.def_id());\n                    self.process_blocks(caller_body, new_blocks);\n                    self.history.pop();\n\n                    inlined_count += 1;\n                    if inlined_count == inline_limit {\n                        debug!(\"inline count reached\");\n                        return;\n                    }\n                }\n            }\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Insufficient validation in MIR inliner before inline_call for argument/local count compatibility",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "try_inlining",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "fn try_inlining(\n        &self,\n        caller_body: &mut Body<'tcx>,\n        callsite: &CallSite<'tcx>,\n    ) -> Result<std::ops::Range<BasicBlock>, &'static str> {\n        self.check_mir_is_available(caller_body, callsite.callee)?;\n\n        let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());\n        let cross_crate_inlinable = self.tcx.cross_crate_inlinable(callsite.callee.def_id());\n        self.check_codegen_attributes(callsite, callee_attrs, cross_crate_inlinable)?;\n\n        // Intrinsic fallback bodies are automatically made cross-crate inlineable,\n        // but at this stage we don't know whether codegen knows the intrinsic,\n        // so just conservatively don't inline it.\n        if self.tcx.has_attr(callsite.callee.def_id(), sym::rustc_intrinsic) {\n            return Err(\"Callee is an intrinsic, do not inline fallback bodies\");\n        }\n\n        let terminator = caller_body[callsite.block].terminator.as_ref().unwrap();\n        let TerminatorKind::Call { args, destination, .. } = &terminator.kind else { bug!() };\n        let destination_ty = destination.ty(&caller_body.local_decls, self.tcx).ty;\n        for arg in args {\n            if !arg.node.ty(&caller_body.local_decls, self.tcx).is_sized(self.tcx, self.param_env) {\n                // We do not allow inlining functions with unsized params. Inlining these functions\n                // could create unsized locals, which are unsound and being phased out.\n                return Err(\"Call has unsized argument\");\n            }\n        }\n\n        let callee_body = try_instance_mir(self.tcx, callsite.callee.def)?;\n        self.check_mir_body(callsite, callee_body, callee_attrs, cross_crate_inlinable)?;\n\n        if !self.tcx.consider_optimizing(|| {\n            format!(\"Inline {:?} into {:?}\", callsite.callee, caller_body.source)\n        }) {\n            return Err(\"optimization fuel exhausted\");\n        }\n\n        let Ok(callee_body) = callsite.callee.try_instantiate_mir_and_normalize_erasing_regions(\n            self.tcx,\n            self.param_env,\n            ty::EarlyBinder::bind(callee_body.clone()),\n        ) else {\n            return Err(\"failed to normalize callee body\");\n        };\n\n        // Normally, this shouldn't be required, but trait normalization failure can create a\n        // validation ICE.\n        if !validate_types(\n            self.tcx,\n            MirPhase::Runtime(RuntimePhase::Optimized),\n            self.param_env,\n            &callee_body,\n            &caller_body,\n        )\n        .is_empty()\n        {\n            return Err(\"failed to validate callee body\");\n        }\n\n        // Check call signature compatibility.\n        // Normally, this shouldn't be required, but trait normalization failure can create a\n        // validation ICE.\n        let output_type = callee_body.return_ty();\n        if !util::relate_types(self.tcx, self.param_env, ty::Covariant, output_type, destination_ty)\n        {\n            trace!(?output_type, ?destination_ty);\n            return Err(\"failed to normalize return type\");\n        }\n        if callsite.fn_sig.abi() == Abi::RustCall {\n            // FIXME: Don't inline user-written `extern \"rust-call\"` functions,\n            // since this is generally perf-negative on rustc, and we hope that\n            // LLVM will inline these functions instead.\n            if callee_body.spread_arg.is_some() {\n                return Err(\"do not inline user-written rust-call functions\");\n            }\n\n            let (self_arg, arg_tuple) = match &args[..] {\n                [arg_tuple] => (None, arg_tuple),\n                [self_arg, arg_tuple] => (Some(self_arg), arg_tuple),\n                _ => bug!(\"Expected `rust-call` to have 1 or 2 args\"),\n            };\n\n            let self_arg_ty =\n                self_arg.map(|self_arg| self_arg.node.ty(&caller_body.local_decls, self.tcx));\n\n            let arg_tuple_ty = arg_tuple.node.ty(&caller_body.local_decls, self.tcx);\n            let ty::Tuple(arg_tuple_tys) = *arg_tuple_ty.kind() else {\n                bug!(\"Closure arguments are not passed as a tuple\");\n            };\n\n            for (arg_ty, input) in\n                self_arg_ty.into_iter().chain(arg_tuple_tys).zip(callee_body.args_iter())\n            {\n                let input_type = callee_body.local_decls[input].ty;\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\n                {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize tuple argument type\");\n                }\n            }\n        } else {\n            for (arg, input) in args.iter().zip(callee_body.args_iter()) {\n                let input_type = callee_body.local_decls[input].ty;\n                let arg_ty = arg.node.ty(&caller_body.local_decls, self.tcx);\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\n                {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize argument type\");\n                }\n            }\n        }\n\n        let old_blocks = caller_body.basic_blocks.next_index();\n        self.inline_call(caller_body, callsite, callee_body);\n        let new_blocks = old_blocks..caller_body.basic_blocks.next_index();\n\n        Ok(new_blocks)\n    }"
+            }
+          ]
+        },
+        {
+          "id": "E",
+          "name": "Indexing panic originates from MIR access during inlining workflow in inline pass",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "inline.rs",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "inline.rs"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.99
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.93
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.92
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.99
+        },
+        {
+          "source": "E",
+          "target": "I",
+          "weight": 0.84
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 159.923,
+    "stage_times_sec": {
+      "load_bug_context": 0.02,
+      "checkout": 1.314,
+      "load_or_build_graph": 40.891,
+      "symptom_vertices_locating": 85.954,
+      "dynamic_cig_discovering": 29.855,
+      "convert_results": 0.109
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 14,
+      "input_tokens": 127532,
+      "output_tokens": 1389,
+      "total_tokens": 128921,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 2.386,
+          "input_tokens": 5416,
+          "output_tokens": 26,
+          "total_tokens": 5442
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.469,
+          "input_tokens": 4763,
+          "output_tokens": 17,
+          "total_tokens": 4780
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 3.257,
+          "input_tokens": 5456,
+          "output_tokens": 107,
+          "total_tokens": 5563
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.146,
+          "input_tokens": 4772,
+          "output_tokens": 18,
+          "total_tokens": 4790
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.568,
+          "input_tokens": 5636,
+          "output_tokens": 26,
+          "total_tokens": 5662
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 3.038,
+          "input_tokens": 6825,
+          "output_tokens": 67,
+          "total_tokens": 6892
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.417,
+          "input_tokens": 7395,
+          "output_tokens": 26,
+          "total_tokens": 7421
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.018,
+          "input_tokens": 4763,
+          "output_tokens": 17,
+          "total_tokens": 4780
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 5.218,
+          "input_tokens": 6360,
+          "output_tokens": 182,
+          "total_tokens": 6542
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 4.729,
+          "input_tokens": 18555,
+          "output_tokens": 181,
+          "total_tokens": 18736
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 5.105,
+          "input_tokens": 18560,
+          "output_tokens": 180,
+          "total_tokens": 18740
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 6.97,
+          "input_tokens": 18559,
+          "output_tokens": 179,
+          "total_tokens": 18738
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 3.742,
+          "input_tokens": 9921,
+          "output_tokens": 181,
+          "total_tokens": 10102
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 3.985,
+          "input_tokens": 10551,
+          "output_tokens": 182,
+          "total_tokens": 10733
+        }
+      ]
+    }
+  }
+}

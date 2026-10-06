@@ -1,0 +1,256 @@
+{
+  "bug_id": "128717",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-08-05",
+    "resolved": "176e5452095444815207be02c16de0b1487a1b53"
+  },
+  "final_top10": [
+    "compiler/rustc_parse/src/parser/expr.rs",
+    "compiler/rustc_parse/src/lexer/unicode_chars.rs",
+    "compiler/rustc_parse/src/parser/diagnostics.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_typeck/src/callee.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_parse/src/lexer/mod.rs",
+    "compiler/rustc_hir_typeck/src/place_op.rs",
+    "compiler/rustc_ast/src/token.rs",
+    "compiler/rustc_hir_analysis/src/check/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Uses a normal `main` function as the crate entry point in a binary crate.",
+        "Calls `main` recursively, so the parser must interpret a function-call expression after the identifier.",
+        "Supplies an argument expression shaped like `arr[i]`, exercising parsing of indexing syntax inside a call.",
+        "Replaces ASCII parentheses with full-width Unicode parentheses `（` and `）`, testing lexer/token handling of non-ASCII punctuation.",
+        "Includes an undeclared identifier `arr`, which would trigger name-resolution errors if parsing succeeds far enough.",
+        "Includes an undeclared identifier `i`, further exercising resolution diagnostics after expression parsing.",
+        "Checks how rustc reports syntax versus semantic errors when visually similar Unicode characters appear in source.",
+        "Pins a specific nightly toolchain, targeting a parser/diagnostic regression in that compiler version."
+      ],
+      "summary": "The reproducer is a tiny binary whose `main` tries to call itself with an indexed argument expression. Its key stress point is the use of full-width Unicode parentheses instead of Rust’s required ASCII delimiters. This exercises rustc’s lexer/parser handling of confusable Unicode punctuation and the resulting diagnostics, plus potential follow-on name-resolution errors for `arr` and `i`."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE triggered during type checking after the compiler had already recognized user-facing errors (E0061, E0425). The reproducer is syntactically close to a normal function call and deliberately swaps ASCII call delimiters with full-width Unicode parentheses around an argument expression containing indexing syntax. This suggests the compiler accepted or partially recovered from invalid Unicode punctuation in expression parsing, built an inconsistent AST/HIR node for the call, and then later typeck/analysis encountered an internal invariant violation instead of cleanly stopping after parse/lower diagnostics. The common theme is parser error recovery around visually confusable non-ASCII delimiters in a call expression, followed by semantic processing of partially-invalid expression structure.",
+      "possible_causes": [
+        "A defect in rustc_parse lexer/parser handling of full-width Unicode parentheses (`（` `）`) in expression context, causing them to be mis-tokenized or routed through faulty recovery logic instead of producing a hard syntax error.",
+        "A bug in parser recovery for malformed call expressions where an identifier is followed by invalid delimiters but the parser still constructs a `Call`/expression node with inconsistent spans or argument structure.",
+        "A lowering/typeck robustness issue: rustc_hir_lowering or rustc_hir_typeck may assume recovered call/index expressions are structurally valid, and panic when recovery from invalid Unicode punctuation leaves missing or malformed children.",
+        "A diagnostics-related defect where confusable-Unicode suggestion machinery interacts incorrectly with parsing of delimiters, allowing later compilation stages to see invalid expression forms rather than an `Err` node.",
+        "An invariant bug in type-checking recursive function-call expressions with prior resolution/type errors, where the compiler should gracefully propagate `ErrorGuaranteed` but instead panics on a recovered malformed node."
+      ],
+      "evidence": [
+        "The query stack shows the panic occurs in `typeck` for `main`, not during initial parsing, indicating malformed input survived into semantic analysis.",
+        "Compiler output reports normal user errors E0061 and E0425 before the ICE, showing rustc partially recovered and continued despite invalid source.",
+        "The reproducer’s distinguishing feature is the use of full-width Unicode parentheses in place of ASCII `(` and `)`, directly stressing lexer/parser handling of confusable punctuation.",
+        "The inner expression `arr[i]` is otherwise a standard index expression inside a call, so the unusual trigger is not indexing itself but the invalid call delimiters around it.",
+        "The crate is minimal and centered on one statement in `main`, making a localized bug in parsing/recovery/lowering of that expression the most plausible production-code defect."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1830,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_parse/src/parser/expr.rs",
+        "reason": "Most suspicious because the reproducer centers on parsing a call-like expression using full-width Unicode parentheses around `arr[i]`. This file owns expression parsing, including postfix chains like calls and indexing plus recovery for malformed expressions. A bad recovery here could build an inconsistent AST/HIR that later reaches typeck and causes the ICE."
+      },
+      {
+        "path": "compiler/rustc_parse/src/lexer/unicode_chars.rs",
+        "reason": "The trigger is specifically confusable Unicode punctuation `（` and `）`. This module is dedicated to recognizing Unicode syntax lookalikes and emitting diagnostics/suggestions. If these characters are mishandled, incorrectly normalized, or only partially diagnosed, downstream parser recovery could receive invalid token structure."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/diagnostics.rs",
+        "reason": "The compiler both reported normal user errors and then ICEd, which strongly suggests faulty parser recovery/diagnostic synthesis rather than a clean hard parse failure. This file contains recovery helpers that fabricate AST nodes after malformed syntax; such synthesized nodes may violate invariants later in lowering/typeck."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "The query stack shows the panic occurs during `typeck` of `main`. Even if parsing/recovery is the root cause, this file is where malformed recovered expressions are checked. It should robustly handle error nodes and propagate `ErrorGuaranteed` instead of panicking on a structurally inconsistent expression."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/callee.rs",
+        "reason": "The malformed construct is interpreted near a function-call expression (`main ...`). This file specifically handles call expressions and callee analysis. If parser recovery produced a bogus call node or argument list, call checking here could hit an internal invariant and ICE."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "A parser recovery bug may survive into AST lowering, especially for malformed call/index expressions with unusual spans or missing children. This file lowers AST expressions to HIR and is a plausible place where partially-invalid recovered expressions are translated into malformed HIR consumed by typeck."
+      },
+      {
+        "path": "compiler/rustc_parse/src/lexer/mod.rs",
+        "reason": "If the full-width parentheses are tokenized incorrectly or diagnosed without properly terminating/rejecting the token stream, expression parsing can be led into inconsistent recovery paths. This top-level lexer coordinates tokenization and delimiter-related diagnostics, making it a likely contributor."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/place_op.rs",
+        "reason": "The argument shape includes indexing syntax `arr[i]`. While indexing itself is probably not the root trigger, this file checks indexing/place operations and could be exposed to malformed recovered HIR inside the call argument, contributing to the ICE during type checking."
+      },
+      {
+        "path": "compiler/rustc_ast/src/token.rs",
+        "reason": "Unicode punctuation problems can stem from token classification itself. This file defines the token model that parser and lexer layers rely on; an incorrect representation or categorization of confusable punctuation could allow invalid expression structure to slip through recovery paths."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/mod.rs",
+        "reason": "The panic is observed under the analysis/type-check pipeline. Although likely not the original bug site, this coordinator is involved in how typeck errors and tainting are propagated. A failure to stop cleanly after prior parsing/semantic errors could expose downstream ICEs."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 162.027,
+    "stage_times_sec": {
+      "checkout": 1.072,
+      "load_bug_context": 0.129,
+      "test_behavior_analysis": 6.102,
+      "test_failure_analysis": 9.539,
+      "load_file_candidates": 3.396,
+      "search_suspicious_files": 141.789
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 435457,
+      "output_tokens": 6855,
+      "total_tokens": 442312,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.102,
+          "input_tokens": 309,
+          "output_tokens": 247,
+          "total_tokens": 556
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 9.539,
+          "input_tokens": 2068,
+          "output_tokens": 522,
+          "total_tokens": 2590
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.781,
+          "input_tokens": 27568,
+          "output_tokens": 318,
+          "total_tokens": 27886
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.595,
+          "input_tokens": 27493,
+          "output_tokens": 299,
+          "total_tokens": 27792
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.594,
+          "input_tokens": 27030,
+          "output_tokens": 345,
+          "total_tokens": 27375
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.486,
+          "input_tokens": 27360,
+          "output_tokens": 316,
+          "total_tokens": 27676
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.157,
+          "input_tokens": 27307,
+          "output_tokens": 349,
+          "total_tokens": 27656
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.486,
+          "input_tokens": 27618,
+          "output_tokens": 365,
+          "total_tokens": 27983
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.532,
+          "input_tokens": 27421,
+          "output_tokens": 311,
+          "total_tokens": 27732
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.844,
+          "input_tokens": 27440,
+          "output_tokens": 343,
+          "total_tokens": 27783
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.586,
+          "input_tokens": 27513,
+          "output_tokens": 408,
+          "total_tokens": 27921
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.16,
+          "input_tokens": 27361,
+          "output_tokens": 320,
+          "total_tokens": 27681
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.36,
+          "input_tokens": 27446,
+          "output_tokens": 287,
+          "total_tokens": 27733
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.216,
+          "input_tokens": 27510,
+          "output_tokens": 307,
+          "total_tokens": 27817
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.254,
+          "input_tokens": 27682,
+          "output_tokens": 320,
+          "total_tokens": 28002
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.114,
+          "input_tokens": 27581,
+          "output_tokens": 389,
+          "total_tokens": 27970
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.447,
+          "input_tokens": 27475,
+          "output_tokens": 371,
+          "total_tokens": 27846
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 6.808,
+          "input_tokens": 8904,
+          "output_tokens": 324,
+          "total_tokens": 9228
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.341,
+          "input_tokens": 12371,
+          "output_tokens": 714,
+          "total_tokens": 13085
+        }
+      ]
+    }
+  }
+}

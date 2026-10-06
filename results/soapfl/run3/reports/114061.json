@@ -1,0 +1,243 @@
+{
+  "bug_id": "114061",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-07-24",
+    "resolved": "8771282d4e7a5c4569e49d1f878fb3ba90a974d0"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_borrowck/src/type_check/canonical.rs",
+    "compiler/rustc_borrowck/src/diagnostics/bound_region_errors.rs",
+    "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+    "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+    "compiler/rustc_borrowck/src/type_check/relate_tys.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Imports all public items from an external path dependency crate, so trait definitions and blanket implementations come from another crate boundary.",
+        "Defines a local type `Local` and implements `WithAssoc<'_>` for `Box<Local>`, using an elided placeholder lifetime in the impl header.",
+        "Sets the associated type `Assoc = ()`, exercising associated-type normalization for a trait implementation involving a boxed local type.",
+        "Uses `Box<Local>` as the impl target, testing trait solving through a standard library smart pointer wrapper around a local type.",
+        "Declares `impls_trait<T: Trait>()`, forcing compile-time proof that the chosen type satisfies another trait with no runtime behavior.",
+        "Calls `impls_trait::<Box<Local>>()`, which triggers trait selection for `Trait` on `Box<Local>` based on the `WithAssoc` implementation.",
+        "Exercises cross-crate coherence and obligation solving, where one crate supplies traits/blankets and the local crate supplies a concrete associated-type impl.",
+        "Targets nightly compiler behavior around lifetime elision in trait impls, associated types, and transitive trait satisfaction during type checking."
+      ],
+      "summary": "The reproducer is compile-time only. It imports traits from a dependency, implements a trait with an associated type for `Box<Local>`, then requires `Box<Local>` to satisfy another trait. This stresses nightly trait solving across crate boundaries, especially lifetime placeholder handling, associated-type normalization, and deriving a `Trait` obligation from the local `WithAssoc` impl."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is an unexpected trait-solver ambiguity for `Box<Local>: dep::Trait`. The compiler reports two applicable impls from the dependency crate: a direct blanket `impl<T> Trait for Box<T>` and a more general conditional blanket `impl<T> Trait for T where T: 'static, for<'a> T: WithAssoc<'a>, for<'a> <T as WithAssoc<'a>>::Assoc: IsUnit`. In this reproducer, the local crate provides `impl WithAssoc<'_> for Box<Local> { type Assoc = (); }`, which should make the conditional impl applicable for `T = Box<Local>`. However, because the impl uses an elided placeholder lifetime and must satisfy a higher-ranked `for<'a>` obligation across a crate boundary, the solver appears to treat the evidence imprecisely and concludes there are multiple satisfying impls instead of selecting or rejecting one coherently. The common theme is interaction between HRTB/lifetime placeholder handling, associated type normalization, and blanket impl candidate assembly for a boxed type defined through a local impl but consumed through foreign traits. This points to a compiler defect in trait selection / coherence-style overlap checking logic rather than in user code.",
+      "possible_causes": [
+        "Bug in trait solver candidate assembly or winnowing for blanket impls, causing both `impl<T> Trait for Box<T>` and the conditional `impl<T> Trait for T where ...` to remain as viable candidates for `Box<Local>` without proper disambiguation.",
+        "Incorrect handling of `impl WithAssoc<'_> for Box<Local>` when converting the elided `'_` lifetime in an impl header into obligations needed for `for<'a> T: WithAssoc<'a>`; the solver may be overgeneralizing or misinterpreting placeholder lifetimes as satisfying higher-ranked bounds.",
+        "Defect in higher-ranked trait bound reasoning across crate boundaries: the local impl for one lifetime is being incorrectly matched against the foreign blanket impl requiring `for<'a>` satisfaction, producing a false-positive candidate and hence ambiguity.",
+        "Associated-type normalization/projection bug for `<Box<Local> as WithAssoc<'a>>::Assoc`, especially under binders, causing the solver to incorrectly accept `Assoc = ()` for all lifetimes and keep the conditional blanket impl applicable.",
+        "Issue in coherence/overlap or specialization-related selection logic for nested nominal types like `Box<T>`, where a specific wrapper blanket impl should interact predictably with a generic self-type blanket impl but instead yields an ambiguous trait obligation."
+      ],
+      "evidence": [
+        "Compiler output explicitly says multiple impls for `Box<Local>: dep::Trait` were found in the dependency crate, indicating a trait selection ambiguity rather than a missing impl.",
+        "The call site is compile-time only (`impls_trait::<Box<Local>>()`), so the failure is entirely in obligation solving/type checking.",
+        "The local crate contributes only `impl WithAssoc<'_> for Box<Local> { type Assoc = (); }`, which is exactly the ingredient needed to make the foreign conditional blanket impl potentially apply.",
+        "The reproducer specifically stresses `for<'a>` bounds, placeholder lifetime `'_` in the impl header, and associated-type projection to `()`, all of which are known-sensitive areas of trait solving.",
+        "Cross-crate setup matters: the candidate `Trait` impls live in `dep`, while the concrete `WithAssoc` impl is local, so the bug likely involves integrating local impl evidence into foreign blanket impl selection.",
+        "The selected type is `Box<Local>`, matching both the explicit wrapper blanket impl `Trait for Box<T>` and the generic conditional blanket impl `Trait for T where ...`, which is the direct structural source of the ambiguity."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1648,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Most likely locus: the failure is an ambiguity during classic trait selection (`multiple impls satisfying Box<Local>: Trait`). This module performs candidate winnowing/selection and handles ambiguity between blanket impls, including intercrate considerations. The bug description points directly at incorrect retention of both `impl<T> Trait for Box<T>` and the conditional `impl<T> Trait for T where for<'a> ...` as viable candidates."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+        "reason": "Candidate assembly is highly suspect because the reproducer depends on whether the conditional blanket impl is considered applicable for `T = Box<Local>` when the only evidence is a local `impl WithAssoc<'_> for Box<Local>`. If placeholder lifetime `'_` is being overgeneralized into satisfying the foreign `for<'a>` bounds, that false-positive viability likely arises while assembling impl candidates."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The conditional blanket impl requires proving `for<'a> <T as WithAssoc<'a>>::Assoc: IsUnit`, so associated-type projection and normalization under binders are central. If `<Box<Local> as WithAssoc<'a>>::Assoc` is incorrectly normalized to `()` for all lifetimes from the single `'_` impl, this file is a prime source of the bug."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "The reproducer stresses higher-ranked reasoning: a local impl written with `WithAssoc<'_>` is used to satisfy foreign `for<'a> T: WithAssoc<'a>` obligations. Incorrect instantiation of binders/placeholders or higher-ranked subtyping/equality could make the solver wrongly accept that evidence, producing the ambiguous extra impl candidate."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "Even if candidate assembly admits both impls, confirmation determines whether a selected impl actually matches by generating and normalizing nested obligations. A bug here could incorrectly confirm the generic conditional impl for `Box<Local>` under the HRTB/associated-type obligations, leaving selection ambiguous."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/canonical.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/diagnostics/bound_region_errors.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 163.23,
+    "stage_times_sec": {
+      "checkout": 3.655,
+      "load_bug_context": 0.076,
+      "test_behavior_analysis": 5.394,
+      "test_failure_analysis": 16.457,
+      "load_file_candidates": 0.084,
+      "search_suspicious_files": 137.564
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 382985,
+      "output_tokens": 6656,
+      "total_tokens": 389641,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.394,
+          "input_tokens": 386,
+          "output_tokens": 309,
+          "total_tokens": 695
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 16.457,
+          "input_tokens": 1189,
+          "output_tokens": 766,
+          "total_tokens": 1955
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.077,
+          "input_tokens": 26706,
+          "output_tokens": 405,
+          "total_tokens": 27111
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.462,
+          "input_tokens": 26846,
+          "output_tokens": 201,
+          "total_tokens": 27047
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.605,
+          "input_tokens": 26390,
+          "output_tokens": 380,
+          "total_tokens": 26770
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.353,
+          "input_tokens": 26703,
+          "output_tokens": 316,
+          "total_tokens": 27019
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.263,
+          "input_tokens": 26646,
+          "output_tokens": 408,
+          "total_tokens": 27054
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.759,
+          "input_tokens": 27018,
+          "output_tokens": 459,
+          "total_tokens": 27477
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.7,
+          "input_tokens": 26830,
+          "output_tokens": 372,
+          "total_tokens": 27202
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.806,
+          "input_tokens": 26874,
+          "output_tokens": 390,
+          "total_tokens": 27264
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.267,
+          "input_tokens": 26827,
+          "output_tokens": 372,
+          "total_tokens": 27199
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 10.069,
+          "input_tokens": 26592,
+          "output_tokens": 350,
+          "total_tokens": 26942
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.506,
+          "input_tokens": 26930,
+          "output_tokens": 322,
+          "total_tokens": 27252
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.766,
+          "input_tokens": 26849,
+          "output_tokens": 304,
+          "total_tokens": 27153
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 11.139,
+          "input_tokens": 27087,
+          "output_tokens": 465,
+          "total_tokens": 27552
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.009,
+          "input_tokens": 20186,
+          "output_tokens": 361,
+          "total_tokens": 20547
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 9.752,
+          "input_tokens": 12926,
+          "output_tokens": 476,
+          "total_tokens": 13402
+        }
+      ]
+    }
+  }
+}

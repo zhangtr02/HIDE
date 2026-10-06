@@ -1,0 +1,257 @@
+{
+  "bug_id": "129075",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-08-13",
+    "resolved": "91376f416222a238227c84a848d168835ede2cc3"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+    "compiler/rustc_mir_build/src/build/expr/stmt.rs",
+    "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_typeck/src/pat.rs",
+    "compiler/rustc_middle/src/mir/tcx.rs",
+    "compiler/rustc_mir_transform/src/validate.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_mir_build/src/build/matches/match_pair.rs",
+    "compiler/rustc_middle/src/ty/assoc.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a tuple struct `Foo<T>([T; 2])`, exercising generic tuple structs with a fixed-size array field.",
+        "Implements `Default` for `Foo<T>` with bounds `T: Default + Copy`, using array repetition syntax `[Default::default(); 2]`.",
+        "The `default` method signature is invalid for the `Default` trait: it uses `fn default(&mut self) -> Self` instead of an associated function without `self`.",
+        "This tests trait method signature checking during impl validation, ensuring compiler rejects mismatched trait item definitions.",
+        "`field_array` declares uninitialized locals `a: i32` and `b`, exercising local variable declaration and type inference behavior.",
+        "The pattern assignment `Foo([a, b]) = Default::default();` destructures a value into previously declared bindings rather than creating new ones.",
+        "This assignment relies on `Default::default()` resolving to `Foo<i32>`, forcing type inference through tuple-struct and array-pattern matching.",
+        "The code combines array patterns, destructuring assignment, trait resolution, and uninitialized-place assignment, stressing compiler checking around pattern assignment semantics."
+      ],
+      "summary": "The reproducer builds a generic tuple struct over an array, gives it a malformed `Default` impl, and then uses destructuring assignment into previously declared locals from `Default::default()`. It exercises trait impl signature validation, generic trait resolution, array repetition and array patterns, type inference from assignment patterns, and compiler handling of uninitialized local bindings during destructuring assignment."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is an interaction between two independently invalid/complex features: (a) a malformed trait impl for `Default` (`fn default(&mut self) -> Self` instead of an associated function), and (b) destructuring assignment through a tuple-struct pattern containing an array pattern (`Foo([a, b]) = Default::default();`) over previously declared locals. The compiler should report the trait method signature mismatch cleanly, but instead it panics later during MIR optimization for `field_array`, meaning invalid semantic state likely survived earlier checks and reached MIR construction/optimization. Because the query stack shows the ICE in `optimized_mir` for `field_array`, the bug is likely not in trait-checking alone, but in how error recovery propagates into MIR generation/validation for destructuring assignment patterns involving ADTs and arrays. The reproducer also forces type inference of `Default::default()` from the assignment pattern, so an erroneous or partially-invalid trait selection may leave the assignment RHS or place pattern in an inconsistent typed state. Overall, the likely defect is missing error handling / invariant enforcement in MIR building or MIR optimization for destructuring assignment when trait resolution or impl item validation has already failed.",
+      "possible_causes": [
+        "Compiler error recovery bug: trait impl method-signature mismatch for `Default::default` is diagnosed but the impl is still treated as sufficiently available for later type checking/MIR lowering, leaving an invalid `Instance`/`FnSig`/trait item reference that later causes a panic.",
+        "MIR construction or optimization defect for destructuring assignment to existing bindings using tuple-struct + array patterns (`Foo([a, b]) = ...`), especially when the RHS type depends on trait-based inference and earlier type errors exist.",
+        "Invariant violation in assignment-pattern lowering: the compiler may assume the pattern `Foo([a, b])` has a well-formed ADT constructor and field layout after type checking, but error recovery from the bad `Default` impl may leave the ADT/RHS type as an error type that is not handled in MIR optimization.",
+        "Trait resolution / method lookup bug for `Default::default()` under an invalid impl: selection may produce a partially-resolved candidate instead of hard failure, which then contaminates MIR for `field_array`.",
+        "Missing guards in MIR validation/optimization (`-Z validate-mir` helps expose it) for locals introduced/used through destructuring assignment into previously declared uninitialized variables, when the assigned value's type comes from an erroneous trait obligation."
+      ],
+      "evidence": [
+        "Compiler output explicitly references `E0185`, confirming the reproducer triggers trait method signature mismatch in the `Default` impl.",
+        "Despite that front-end error, the actual ICE occurs later with query stack `#0 [optimized_mir] optimizing MIR for field_array`, showing invalid state escaped into MIR phases.",
+        "`field_array` uses destructuring assignment `Foo([a, b]) = Default::default();`, a nontrivial lowering path involving tuple-struct pattern decomposition and array element assignment into existing locals.",
+        "The RHS type must be inferred as `Foo<i32>` from the pattern/locals, so trait resolution for `Default::default()` is directly entangled with pattern assignment typing.",
+        "The stack mentions analysis and MIR optimization rather than only trait checking, which is consistent with a compiler-internal invariant failure during later passes after erroneous earlier recovery.",
+        "`-Z validate-mir` is enabled, increasing sensitivity to malformed MIR and supporting the hypothesis that MIR built for `field_array` is inconsistent rather than the parser/type checker simply rejecting the code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1832,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+        "reason": "Most suspicious because the ICE happens later in optimized MIR for `field_array` despite an earlier type error (E0185), and this file explicitly builds THIR while deciding whether to reject bodies already tainted by type-checking errors. A likely bug is that erroneous `field_array` still gets lowered into THIR/MIR during recovery, leaving malformed state for later MIR optimization/validation."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/stmt.rs",
+        "reason": "`Foo([a, b]) = Default::default();` is a destructuring assignment into existing bindings, and this file handles statement-expression MIR lowering, including assignment-specific lowering paths. The reproducer stresses assignment lowering with tuple-struct + array patterns plus an erroneous RHS type source, so missing error handling here could produce invalid MIR."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+        "reason": "The code definitely triggers trait impl method compatibility checking because `Default::default` is implemented with the wrong signature. If this checker diagnoses the error but leaves the impl item/associated item metadata in an inconsistent or partially accepted state, later type checking of `Default::default()` in `field_array` could be contaminated."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "Type inference for `Default::default()` on the RHS must derive `Foo<i32>` from the destructuring assignment context. This file is central for expression checking and recovery around erroneous calls/associated function resolution, so it is a plausible place where an invalid trait impl is treated as usable enough to continue with inconsistent types."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/pat.rs",
+        "reason": "The left-hand side uses a tuple-struct pattern containing an array pattern in assignment/destructuring context. This file handles pattern type checking and could mishandle error recovery when pattern typing is combined with inference from an invalid trait-based RHS, allowing bad pattern typing facts to flow into THIR/MIR."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/tcx.rs",
+        "reason": "Later MIR optimization/validation often relies on place/projection typing from this file. Since the pattern involves ADT field projection into an array and element projections, an unhandled error type or malformed place type created by earlier recovery could trip an invariant here during MIR typing or optimization."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/validate.rs",
+        "reason": "The compiler is run with `-Z validate-mir`, and the failure surfaces during MIR optimization/analysis. Even if this file is not the root cause, it is a plausible location for the actual panic if validation assumes well-typed MIR and does not gracefully handle MIR produced after earlier semantic errors involving destructuring assignment."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "This module explicitly treats broken MIR typing as an internal compiler bug. Given the query stack and the malformed combination of error recovery plus destructuring assignment, MIR type checking here could be where an invalid place/assignment shape is discovered and escalated to ICE-like behavior."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/match_pair.rs",
+        "reason": "Although this is mainly for pattern decomposition, destructuring assignment reuses pattern machinery for ADT and array decomposition. The tuple-struct-with-array pattern `Foo([a, b])` is exactly the kind of nested structured pattern this file reasons about, so an incorrect decomposition under error recovery is plausible."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/assoc.rs",
+        "reason": "Associated item metadata includes whether a function has a self receiver and links trait items to impl items. Since the bug centers on an impl method for `Default::default` incorrectly having `&mut self`, a mismatch or inconsistent metadata here could allow later stages to mis-handle the associated function as if it were a valid trait item implementation."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 162.812,
+    "stage_times_sec": {
+      "checkout": 1.391,
+      "load_bug_context": 0.081,
+      "test_behavior_analysis": 5.999,
+      "test_failure_analysis": 13.674,
+      "load_file_candidates": 0.097,
+      "search_suspicious_files": 141.569
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 440742,
+      "output_tokens": 7583,
+      "total_tokens": 448325,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.998,
+          "input_tokens": 388,
+          "output_tokens": 317,
+          "total_tokens": 705
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.674,
+          "input_tokens": 2190,
+          "output_tokens": 729,
+          "total_tokens": 2919
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.629,
+          "input_tokens": 27896,
+          "output_tokens": 406,
+          "total_tokens": 28302
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.502,
+          "input_tokens": 27912,
+          "output_tokens": 343,
+          "total_tokens": 28255
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.113,
+          "input_tokens": 27273,
+          "output_tokens": 344,
+          "total_tokens": 27617
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.299,
+          "input_tokens": 27696,
+          "output_tokens": 362,
+          "total_tokens": 28058
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.412,
+          "input_tokens": 27620,
+          "output_tokens": 357,
+          "total_tokens": 27977
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.651,
+          "input_tokens": 27976,
+          "output_tokens": 400,
+          "total_tokens": 28376
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.836,
+          "input_tokens": 27732,
+          "output_tokens": 352,
+          "total_tokens": 28084
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.709,
+          "input_tokens": 27768,
+          "output_tokens": 433,
+          "total_tokens": 28201
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.042,
+          "input_tokens": 27844,
+          "output_tokens": 429,
+          "total_tokens": 28273
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.296,
+          "input_tokens": 27705,
+          "output_tokens": 311,
+          "total_tokens": 28016
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.257,
+          "input_tokens": 27745,
+          "output_tokens": 344,
+          "total_tokens": 28089
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.129,
+          "input_tokens": 27834,
+          "output_tokens": 371,
+          "total_tokens": 28205
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.551,
+          "input_tokens": 28012,
+          "output_tokens": 261,
+          "total_tokens": 28273
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.269,
+          "input_tokens": 27912,
+          "output_tokens": 308,
+          "total_tokens": 28220
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.789,
+          "input_tokens": 27824,
+          "output_tokens": 332,
+          "total_tokens": 28156
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 7.087,
+          "input_tokens": 9638,
+          "output_tokens": 356,
+          "total_tokens": 9994
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.971,
+          "input_tokens": 11777,
+          "output_tokens": 828,
+          "total_tokens": 12605
+        }
+      ]
+    }
+  }
+}

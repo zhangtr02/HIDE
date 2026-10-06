@@ -1,0 +1,249 @@
+{
+  "bug_id": "121094",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-13",
+    "resolved": "b381d3ab27f788f990551100c4425bb782d26d76"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/check.rs",
+    "compiler/rustc_hir_typeck/src/coercion.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_middle/src/ty/adjustment.rs",
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_mir_transform/src/coroutine.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_borrowck/src/universal_regions.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a recursive `async fn foo(count: u32)` that stops at `count == 0`, otherwise recurses with `count - 1`.",
+        "Exercises async lowering: `async fn` is compiled into a hidden state-machine type implementing `Future<Output = ()>`.",
+        "Uses explicit dynamic dispatch with `Pin<Box<dyn Future<Output = ()>>>` to erase the concrete recursive future type.",
+        "Boxes the recursive call via `Box::pin(foo(count - 1))`, avoiding an infinitely sized self-referential future type.",
+        "Requires pinning semantics because trait-object futures are polled through `Pin`, preserving immovability guarantees for async state.",
+        "Awaits the boxed trait-object future with `fut.await`, exercising await desugaring and polling through a `dyn Future`.",
+        "Tests compiler handling of recursive async calls combined with boxing, trait objects, and pinning on nightly 2024-02-13.",
+        "`main` does nothing, so the reproducer is compile-focused rather than runtime-focused; the bug likely appears during type checking or async transformation."
+      ],
+      "summary": "The reproducer defines a recursively calling `async fn` that boxes each recursive future as `Pin<Box<dyn Future<Output = ()>>>` and then awaits it. This stresses Rust’s async lowering, recursive future sizing rules, trait-object coercion, and pinning requirements. Since `main` is empty, it is intended to trigger a compiler issue during compilation rather than execution."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is a recursive `async fn` where the recursive call is not awaited directly as the concrete opaque future type, but is first wrapped in `Box::pin` and coerced to `Pin<Box<dyn Future<Output = ()>>>`. This introduces heap indirection and type erasure, which should break the infinite-size cycle that E0733 is meant to detect. The compiler nevertheless emits E0733 at the definition of `foo`, indicating that the recursion check is likely operating on the presence of any recursive call inside the async body, without correctly recognizing that the recursive edge is mediated by boxing/trait-object coercion. Because the reproducer is compile-only and the failure happens as a front-end diagnostic, the defect is most likely in type checking / async recursion validation / MIR-HIR based recursion analysis rather than runtime code generation. In short, the compiler appears to conservatively reject a valid recursively boxed async call.",
+      "possible_causes": [
+        "Bug in the async recursion check that triggers E0733: it likely detects self-recursion syntactically or on the uncoerced future type, but fails to account for indirection introduced by `Box::pin(...)`.",
+        "The compiler may be performing the recursive-future size analysis before or without applying coercions to `Pin<Box<dyn Future<Output = ()>>>`, so it still treats `foo(count - 1)` as embedding the concrete opaque future of `foo` directly.",
+        "Defect in handling unsize coercion from `Pin<Box<impl Future<Output = ()>>>` to `Pin<Box<dyn Future<Output = ()>>>` within async bodies, causing the recursion validator to miss that the recursive future is type-erased behind a trait object.",
+        "The E0733 diagnostic logic may be based on HIR/typeck structure that does not distinguish direct `.await` on a recursive future from awaiting a separately boxed trait-object future, leading to a false positive.",
+        "Possible bug in the interaction between async lowering and recursion-cycle detection for opaque `impl Future` return types: the cycle detector may still see a self-referential generator layout even though heap allocation removes the layout recursion."
+      ],
+      "evidence": [
+        "The recursive call is explicitly boxed: `let fut: Pin<Box<dyn Future<Output = ()>>> = Box::pin(foo(count - 1));`. This is exactly the indirection E0733 says is required.",
+        "The compiler error says: `a recursive async fn call must introduce indirection such as Box::pin`, but the code already uses `Box::pin`, so the diagnostic contradicts the source.",
+        "The failure occurs during compilation, with no runtime execution involved, pointing to front-end analysis such as type checking, async lowering, or recursion validation.",
+        "The repro adds both boxing and trait-object erasure (`dyn Future`), suggesting the bug is specifically in recognizing valid indirection through coercions rather than in basic async recursion handling.",
+        "The error is reported at the async function item (`pub async fn foo`) instead of at an invalid operation inside the function, consistent with a whole-body recursion check rejecting the function too aggressively."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1741,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/check.rs",
+        "reason": "E0733 is emitted during front-end semantic checking of async fn recursion. The repro is rejected even though the recursive call is boxed, so the most likely bug is in the async recursion validation logic that decides whether recursion is sufficiently indirect."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/coercion.rs",
+        "reason": "The valid pattern relies on coercing `Box::pin(foo(...))` into `Pin<Box<dyn Future<Output = ()>>>`. If the recursion check runs on a pre-coercion view or coercion metadata is not exposed correctly, it could falsely treat the recursive call as direct."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "This file handles expression type checking, await expressions, and records adjustments/coercions on expressions. A false positive could arise if expression typing for the boxed recursive call does not preserve the indirection/trait-object erasure needed by the recursion checker."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/adjustment.rs",
+        "reason": "The crucial distinction in the repro is the unsizing/pointer coercion path from a concrete boxed future to `Pin<Box<dyn Future>>`. If adjustment kinds or targets are modeled incorrectly for this case, later validation may miss that the recursive future is behind indirection."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "THIR lowering applies type-checker-provided adjustments when building the lowered expression tree. If the async recursion analysis consults lowered expressions and boxing/unsize adjustments are dropped or represented too weakly here, the recursive edge may appear direct."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "This is the main driver for function body type checking, including async/coroutine setup. Since the error is attached to the async fn item as a whole, body-level setup or async-specific checking here is a plausible place where the recursion diagnostic is triggered too aggressively."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "reason": "Although the failure is an early diagnostic, async recursion is fundamentally about the generated coroutine/future layout. If the recursion check is tied to assumptions from coroutine lowering or frame layout, this async lowering pass is a secondary but plausible suspect."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/universal_regions.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 164.489,
+    "stage_times_sec": {
+      "checkout": 2.564,
+      "load_bug_context": 0.064,
+      "test_behavior_analysis": 5.858,
+      "test_failure_analysis": 13.699,
+      "load_file_candidates": 0.108,
+      "search_suspicious_files": 142.195
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 398850,
+      "output_tokens": 6104,
+      "total_tokens": 404954,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.858,
+          "input_tokens": 373,
+          "output_tokens": 309,
+          "total_tokens": 682
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.699,
+          "input_tokens": 1017,
+          "output_tokens": 636,
+          "total_tokens": 1653
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.441,
+          "input_tokens": 26600,
+          "output_tokens": 339,
+          "total_tokens": 26939
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 11.015,
+          "input_tokens": 26604,
+          "output_tokens": 329,
+          "total_tokens": 26933
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 4.284,
+          "input_tokens": 26123,
+          "output_tokens": 53,
+          "total_tokens": 26176
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 10.495,
+          "input_tokens": 26360,
+          "output_tokens": 333,
+          "total_tokens": 26693
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.556,
+          "input_tokens": 26333,
+          "output_tokens": 325,
+          "total_tokens": 26658
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 10.757,
+          "input_tokens": 26742,
+          "output_tokens": 461,
+          "total_tokens": 27203
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.406,
+          "input_tokens": 26503,
+          "output_tokens": 343,
+          "total_tokens": 26846
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.505,
+          "input_tokens": 26483,
+          "output_tokens": 321,
+          "total_tokens": 26804
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.98,
+          "input_tokens": 26607,
+          "output_tokens": 381,
+          "total_tokens": 26988
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.757,
+          "input_tokens": 26366,
+          "output_tokens": 327,
+          "total_tokens": 26693
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.549,
+          "input_tokens": 26715,
+          "output_tokens": 275,
+          "total_tokens": 26990
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.997,
+          "input_tokens": 26620,
+          "output_tokens": 231,
+          "total_tokens": 26851
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.018,
+          "input_tokens": 26754,
+          "output_tokens": 280,
+          "total_tokens": 27034
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.262,
+          "input_tokens": 26533,
+          "output_tokens": 327,
+          "total_tokens": 26860
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.353,
+          "input_tokens": 14402,
+          "output_tokens": 338,
+          "total_tokens": 14740
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.788,
+          "input_tokens": 11715,
+          "output_tokens": 496,
+          "total_tokens": 12211
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,238 @@
+{
+  "bug_id": "118876",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-08-10",
+    "resolved": "34a6cae28e7013ff0e640026a8e46f315426829d"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/type_check/input_output.rs",
+    "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+    "compiler/rustc_infer/src/infer/nll_relate/mod.rs",
+    "compiler/rustc_borrowck/src/region_infer/mod.rs",
+    "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+    "compiler/rustc_typeck/src/check/closure.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_typeck/src/check/regionck.rs",
+    "compiler/rustc_infer/src/infer/region_constraints/leak_check.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `extend` returning `&'static T` from an arbitrary `&'a T`, intentionally testing lifetime soundness and rejection of invalid lifetime extension.",
+        "Defines a local `Bounded<'a, 'b: 'static, T>` wrapper whose second zero-length array field imposes a `'b: 'static` outlives constraint without storing data.",
+        "Uses `Bounded<'static, '_, T>` so the first lifetime is explicitly `static` while the second is inferred, stressing placeholder lifetime inference in type arguments.",
+        "Boxes a closure as `dyn FnOnce(&T) -> Bounded<'static, '_, T>`, exercising trait-object coercion, higher-ranked callable behavior, and closure return-type lifetime checking.",
+        "The closure `|x| Bounded(x, [])` captures no environment and forwards its argument reference, testing whether rustc incorrectly accepts it as producing a `static`-parameterized wrapper.",
+        "`extend_mut` repeats the pattern with `&mut T` and `FnMut`, exercising mutable-reference variance, aliasing-sensitive lifetime checks, and object-call dispatch for mutable closures.",
+        "Calling `n(input).0` extracts the original borrowed reference and claims it is `&'static` or `&'static mut`, probing for unsound normalization or projection through local struct fields.",
+        "The reproducer mainly targets borrow checker and region inference around local type definitions, inferred lifetimes, and dyn-closure signatures on nightly 2022-08-10."
+      ],
+      "summary": "The reproducer tries to manufacture `'static` shared and mutable references from non-static inputs. It hides the borrow inside a local wrapper type constrained with a zero-sized lifetime field, then routes construction through boxed `FnOnce`/`FnMut` trait objects with `Bounded<'static, '_, T>` return types. This stresses rustc’s lifetime inference, outlives checking, closure-to-dyn coercion, and borrow-checker soundness, looking for an incorrect acceptance of illegal lifetime extension."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is unsound lifetime extension being accepted through an indirect path rather than a direct coercion. Both `extend` and `extend_mut` take a non-static reference, wrap it in a local struct `Bounded`, and then recover it as `&'static` / `&'static mut`. The key ingredients are: a local ADT with multiple lifetime parameters, a zero-sized field used only to encode an outlives constraint (`'b: 'static`), an explicitly written `'static` in one type argument combined with an inferred placeholder lifetime `'_` in another, and coercion of a closure to a boxed `dyn FnOnce` / `dyn FnMut` trait object. The compiler should reject the closure return type because `Bounded(x, [])` contains `x: &'a T` or `&'a mut T`, not a `'static` borrow. Instead, it accepts the program with only warnings, which strongly suggests a soundness bug in region inference / borrow checking around closure signature checking and trait-object coercion. The repeated success for both shared and mutable references indicates the issue is not specific to covariance alone, but more likely a mistaken lifetime relation when checking the closure’s returned ADT against `Bounded<'static, '_, T>`. A likely failure mode is that the compiler treats the local struct’s first lifetime parameter as satisfiable by the closure argument lifetime under dyn-callable normalization, or incorrectly ignores / weakens the relationship between the returned field type and the explicit `'static` parameter after coercion to `dyn FnOnce` / `dyn FnMut`. Another plausible factor is mishandling of inferred placeholder lifetime `'_` in type arguments for local types within trait object signatures, causing an unsound leak or fallback during region solving.",
+      "possible_causes": [
+        "Bug in borrow checker / region inference when validating closure return types against `dyn FnOnce`/`dyn FnMut` object signatures, allowing a returned local ADT containing `&'a T` or `&'a mut T` to satisfy `Bounded<'static, '_, T>`.",
+        "Incorrect handling of lifetime arguments for local struct types during closure-to-trait-object coercion, especially when one lifetime is explicitly `'static` and another is inferred as `'_`.",
+        "Unsound normalization or subtype checking of `Bounded<'a, 'b, T>` that fails to enforce that the first field `&'a T` must actually be `'static` when the expected return type is `Bounded<'static, '_, T>`.",
+        "Placeholder lifetime inference bug for `'_` in ADT type arguments inside callable trait object signatures, possibly causing region erasure, improper fallback, or accidental acceptance of incompatible lifetimes.",
+        "Defect in trait selection / coercion for boxed callable trait objects where the closure implementation is checked too weakly after conversion to `dyn FnOnce` or `dyn FnMut`, skipping necessary outlives constraints on the returned reference-bearing type.",
+        "Potential soundness bug in variance or outlives checking for local structs with zero-sized lifetime-carrying fields, where the artificial `'b: 'static` constraint interferes with correct enforcement of the independent `'a` lifetime on the stored reference."
+      ],
+      "evidence": [
+        "Program compiles successfully with return code 0, even though both functions claim to return `&'static T` / `&'static mut T` derived from arbitrary non-static inputs.",
+        "Both shared and mutable versions are accepted, showing the bug affects general lifetime soundness rather than only immutable-reference covariance.",
+        "The closure body `|x| Bounded(x, [])` directly stores the input borrow into the first field of `Bounded`, so the produced value cannot legitimately have `'static` in that lifetime position.",
+        "Expected type of the boxed closure is `dyn FnOnce(&T) -> Bounded<'static, '_, T>` and similarly for `FnMut`, meaning rustc accepted a closure returning a wrapper parameterized with explicit `'static` despite forwarding a non-static argument reference.",
+        "The local struct `Bounded<'a, 'b: 'static, T>(&'a T, [&'b ();0])` uses a zero-length array to carry a lifetime constraint without runtime data, which is a common pattern for exposing bugs in outlives and region reasoning.",
+        "Warnings only mention unnecessary lifetime parameter and dead code; there is no lifetime or borrow-check error, confirming the compiler failed to diagnose the illegal lifetime extension.",
+        "The failure pattern centers on local type definitions, inferred lifetimes `'_`, and dyn closure signatures, matching likely compiler defects in region solving, closure checking, or coercion logic rather than in the reproducer itself."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1471,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/input_output.rs",
+        "reason": "This reproducer centers on closure signature checking against an expected dyn FnOnce/FnMut return type containing explicit 'static and inferred '_ lifetimes. This file specifically reconciles closure signatures with expected annotations in borrowck, making it a prime suspect for accepting an invalid closure return type."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+        "reason": "The bug likely involves unsound subtype/equality relation of Bounded<'a, 'b, T> against Bounded<'static, '_, T> inside MIR borrow checking. This file implements the NLL type relation logic that generates region constraints from such type comparisons."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/nll_relate/mod.rs",
+        "reason": "If the erroneous acceptance comes from the generic NLL relation engine rather than borrowck glue, it would be here. The reproducer stresses variance-aware relation of regions in ADT arguments with placeholders and inferred lifetimes, exactly what this module handles."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/mod.rs",
+        "reason": "A plausible failure mode is that the right constraints are generated but solved too weakly, especially around placeholders/universes and inferred '_ lifetimes. This module is the core NLL region solver and is central to lifetime soundness bugs that compile unsafely."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+        "reason": "The reproducer may expose a bug in lowering outlives obligations from closure return-type checking into borrowck constraints, particularly for closure-related paths and local ADTs with lifetime parameters. This file explicitly converts such obligations into region constraints."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/closure.rs",
+        "reason": "Closure type checking determines the initial inferred signature before MIR borrowck. Since the closure is coerced to a boxed dyn FnOnce/FnMut with a suspicious return type, a bug in expectation-driven closure signature inference or return-type checking here is very plausible."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "Trait-object callable signatures often involve binders and higher-ranked instantiation. Because the reproducer uses dyn FnOnce/FnMut and inferred placeholder lifetimes, an error in higher-ranked instantiation or placeholder handling could let incompatible lifetimes pass."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "The local wrapper encodes lifetime constraints indirectly, so the bug may be in decomposing type-outlives obligations for ADTs with region parameters and zero-sized lifetime-carrying fields. This file translates those obligations into region constraints and deferred checks."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/regionck.rs",
+        "reason": "Before MIR borrowck, regionck adds lifetime constraints for expressions and borrows. Since the closure body forwards its argument reference into a returned wrapper and later extracts it as 'static, missing or weakened region constraints here could contribute to the acceptance."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/region_constraints/leak_check.rs",
+        "reason": "The inferred '_ combined with explicit 'static in a closure trait-object signature suggests possible placeholder leakage or universe misuse. If the bug is specifically that an inferred lifetime improperly escapes through placeholder-like reasoning, leak checking is a plausible site."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 139.811,
+    "stage_times_sec": {
+      "checkout": 5.334,
+      "load_bug_context": 0.042,
+      "test_behavior_analysis": 8.222,
+      "test_failure_analysis": 15.161,
+      "load_file_candidates": 0.112,
+      "search_suspicious_files": 110.94
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 347096,
+      "output_tokens": 6435,
+      "total_tokens": 353531,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 8.221,
+          "input_tokens": 507,
+          "output_tokens": 414,
+          "total_tokens": 921
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.161,
+          "input_tokens": 1458,
+          "output_tokens": 959,
+          "total_tokens": 2417
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.29,
+          "input_tokens": 27431,
+          "output_tokens": 404,
+          "total_tokens": 27835
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.537,
+          "input_tokens": 27005,
+          "output_tokens": 232,
+          "total_tokens": 27237
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.451,
+          "input_tokens": 26998,
+          "output_tokens": 385,
+          "total_tokens": 27383
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.557,
+          "input_tokens": 27263,
+          "output_tokens": 328,
+          "total_tokens": 27591
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.675,
+          "input_tokens": 27175,
+          "output_tokens": 379,
+          "total_tokens": 27554
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.004,
+          "input_tokens": 27253,
+          "output_tokens": 313,
+          "total_tokens": 27566
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.498,
+          "input_tokens": 27236,
+          "output_tokens": 401,
+          "total_tokens": 27637
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.981,
+          "input_tokens": 27128,
+          "output_tokens": 376,
+          "total_tokens": 27504
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.136,
+          "input_tokens": 26023,
+          "output_tokens": 337,
+          "total_tokens": 26360
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.243,
+          "input_tokens": 26970,
+          "output_tokens": 149,
+          "total_tokens": 27119
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.529,
+          "input_tokens": 27325,
+          "output_tokens": 343,
+          "total_tokens": 27668
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.462,
+          "input_tokens": 26961,
+          "output_tokens": 362,
+          "total_tokens": 27323
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 5.969,
+          "input_tokens": 8933,
+          "output_tokens": 340,
+          "total_tokens": 9273
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.583,
+          "input_tokens": 11430,
+          "output_tokens": 713,
+          "total_tokens": 12143
+        }
+      ]
+    }
+  }
+}

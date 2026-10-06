@@ -1,0 +1,252 @@
+{
+  "bug_id": "125767",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-05-30",
+    "resolved": "debd22da66cfa97c74040ebf68e420672ac8560e"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+    "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+    "compiler/rustc_hir_analysis/src/coherence/builtin.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/coherence.rs",
+    "compiler/rustc_trait_selection/src/traits/specialize/mod.rs",
+    "compiler/rustc_middle/src/traits/specialization_graph.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/lint.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Imports unstable marker traits `Unsize` and `CoerceUnsized`, exercising compiler support for custom unsizing and coercion relationships.",
+        "Declares `Foo<T: ?Sized>()`, allowing `Foo` to be instantiated with dynamically sized types like trait objects.",
+        "Defines trait `Baz`, which is later used as a trait-object target `dyn Baz` for unsizing/coercion.",
+        "Implements `CoerceUnsized<T>` for `Foo<Baz>` with a where-clause `Sized: Unsize<dyn Baz>`, stressing trait resolution on unusual self/target types.",
+        "Uses bare `Baz` in type position inside `Foo<Baz>`, exercising compiler handling of edition-era trait-object syntax and DST validity checks.",
+        "Adds a blanket impl `impl<T> CoerceUnsized<Foo<dyn Baz>> for Foo<T>`, testing generic coercion from any `Foo<T>` to `Foo<dyn Baz>`.",
+        "Creates overlapping/suspicious `CoerceUnsized` impls, probing coherence, overlap detection, and normalization around unsizing-related traits.",
+        "Has an empty `main`, so the reproducer isolates compile-time type-checking and trait-system behavior rather than runtime execution."
+      ],
+      "summary": "The reproducer is a compile-only test for nightly Rust’s unsizing machinery. It defines a DST-capable wrapper type, a trait object target, and two `CoerceUnsized` impls, including an unusual impl using `Foo<Baz>` and `Sized: Unsize<dyn Baz>`. This stresses trait-object syntax handling, custom unsizing/coercion trait resolution, coherence/overlap checks, and compiler validation of impl headers."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during trait coherence/specialization processing for the lang-item trait `CoerceUnsized`, while the compiler is also emitting normal user-facing diagnostics about invalid trait-object syntax (`Foo<Baz>` and `Sized` used as bare traits). The query stack shows the panic occurs when building the specialization graph for `core::ops::unsize::CoerceUnsized`, triggered while checking the well-formedness of the impl at `src/main.rs:6`. This suggests the compiler is attempting to include an already-erroneous impl in coherence/specialization analysis instead of cleanly rejecting or delaying it. The reproducer combines several stressors: unstable unsizing traits, DST wrapper `Foo<T: ?Sized>`, trait-object targets, a malformed impl header using bare traits in type position, and potentially overlapping `CoerceUnsized` impls. The common pattern is that invalid or partially-recovered types in a special built-in trait impl are reaching coherence/specialization code paths that likely assume valid self/target types and canonical impl shapes, causing an internal panic rather than graceful error handling.",
+      "possible_causes": [
+        "Missing error-recovery guard in coherence/specialization graph construction for `CoerceUnsized` impls: impls with `TyKind::Error` or invalid trait-object syntax may still be processed as if fully valid.",
+        "Defect in well-formedness or coherence handling of built-in unsizing traits (`CoerceUnsized`/`Unsize`) where malformed impl headers are not filtered out before overlap/specialization analysis.",
+        "Bug in validation of `CoerceUnsized` impl self/target types, especially for DST wrappers and trait objects, allowing illegal forms like `Foo<Baz>` or `Sized: Unsize<dyn Baz>` to reach later compiler stages.",
+        "Specialization graph construction may incorrectly assume `CoerceUnsized` impls have structurally valid, normalized types, and panic when encountering recovered trait-object types from edition diagnostics.",
+        "Overlap/coherence logic for `CoerceUnsized` may mishandle blanket impls combined with malformed impls, especially when one impl is generic (`impl<T> ... for Foo<T>`) and another contains invalid trait-object/DST forms.",
+        "Normalization or predicate processing bug for where-clauses involving `Unsize<dyn Baz>` and the trait `Sized`, where invalid recovered predicates are not rejected before coherence checking."
+      ],
+      "evidence": [
+        "Query stack ends at `specialization_graph_of` for trait `core::ops::unsize::CoerceUnsized`, then `coherent_trait`, showing the ICE happens in coherence/specialization rather than parsing or codegen.",
+        "The panic is triggered while `check_well_formed` processes the impl at `src/main.rs:6`, indicating an invalid impl is involved.",
+        "Compiler simultaneously emits `E0782` diagnostics for bare trait-object syntax at `Foo<Baz>` and `Sized`, proving the impl contains invalid/recovered types.",
+        "The reproducer uses `CoerceUnsized` and `Unsize`, which are compiler-special traits with extra structural/coherence rules, making bugs in impl validation more likely.",
+        "There are two `CoerceUnsized` impls that look overlapping or suspicious, which directly exercises specialization/coherence graph building.",
+        "`Foo<T: ?Sized>` plus `Foo<dyn Baz>` specifically drives DST and trait-object handling, matching the unsizing/coercion subsystem implicated by the query stack.",
+        "The program has no runtime behavior; failure is entirely compile-time analysis, narrowing the defect to trait-system/coherence handling in rustc production code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1786,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+        "reason": "The backtrace explicitly mentions `assemble_candidates_for_unsizing`, and the reproducer is built to stress candidate assembly for builtin unsizing/coercion traits. This file owns that assembly logic; its unsizing-specific path in particular may be assuming well-formed source and target types despite the earlier diagnostics, which makes it the prime suspect."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+        "reason": "The query stack ends in `specialization_graph_of` while building the specialization graph for `CoerceUnsized`, and the reproducer uses two suspicious/possibly overlapping `CoerceUnsized` impls, one of them malformed. This file is the most likely place where erroneous impls are inserted into the specialization graph without sufficient guarding against recovered error types."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/coherence/builtin.rs",
+        "reason": "`CoerceUnsized` is a built-in/lang-item trait with special impl validation handled here. The ICE likely comes from malformed `CoerceUnsized` impl headers (`Foo<Baz>`, `Sized: Unsize<dyn Baz>`) not being rejected early enough, allowing invalid impl metadata to proceed into coherence/specialization."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The panic is triggered during `check_well_formed` of the impl at `src/main.rs:6`. This suggests WF checking may be accepting or recovering invalid impl header/predicate types in a way that still lets coherence run, especially for built-in unsizing traits and invalid bare trait-object syntax."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+        "reason": "This is the coherence-phase entry point and contains the early skip logic for impls whose trait refs already contain error types. The bug may be that this malformed `CoerceUnsized` impl is not being filtered out here before coherence/specialization processing starts."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+        "reason": "If the crash is triggered while comparing the malformed impl against the blanket `CoerceUnsized` impl, overlap/coherence logic here may mishandle recovered error types or invalid unsizing impl headers during compatibility checks."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/specialize/mod.rs",
+        "reason": "This module contains the core specialization/overlap ordering logic used with the specialization graph. A malformed built-in trait impl that cannot be cleanly ordered against another impl could cause an ICE here or in its graph-building interactions."
+      },
+      {
+        "path": "compiler/rustc_middle/src/traits/specialization_graph.rs",
+        "reason": "This file defines the graph data structures and overlap mode used by specialization/coherence. If graph construction assumptions require structurally valid impl headers, malformed `CoerceUnsized` impls reaching this layer could expose missing defensive handling."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/lint.rs",
+        "reason": "The compiler emits `E0782` for bare trait objects in the malformed impl, so type lowering and recovery around bare trait-object syntax are directly involved. A recovery bug here could leave partially-invalid types that later confuse `CoerceUnsized` coherence logic."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "The reproducer stresses WF obligation generation for unusual predicates involving `Unsize<dyn Baz>` and `Sized` in a built-in unsizing context. If WF obligation generation normalizes or propagates these malformed predicates incorrectly, it could contribute to invalid impls surviving into coherence."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 150.06,
+    "stage_times_sec": {
+      "checkout": 0.534,
+      "load_bug_context": 0.066,
+      "test_behavior_analysis": 5.599,
+      "test_failure_analysis": 12.421,
+      "load_file_candidates": 0.108,
+      "search_suspicious_files": 131.332
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 426380,
+      "output_tokens": 7102,
+      "total_tokens": 433482,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.599,
+          "input_tokens": 377,
+          "output_tokens": 347,
+          "total_tokens": 724
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.421,
+          "input_tokens": 2122,
+          "output_tokens": 739,
+          "total_tokens": 2861
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.601,
+          "input_tokens": 27841,
+          "output_tokens": 373,
+          "total_tokens": 28214
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.213,
+          "input_tokens": 27760,
+          "output_tokens": 322,
+          "total_tokens": 28082
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.779,
+          "input_tokens": 27347,
+          "output_tokens": 361,
+          "total_tokens": 27708
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.669,
+          "input_tokens": 27642,
+          "output_tokens": 333,
+          "total_tokens": 27975
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.318,
+          "input_tokens": 27564,
+          "output_tokens": 375,
+          "total_tokens": 27939
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.195,
+          "input_tokens": 27894,
+          "output_tokens": 386,
+          "total_tokens": 28280
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.206,
+          "input_tokens": 27736,
+          "output_tokens": 332,
+          "total_tokens": 28068
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.935,
+          "input_tokens": 27680,
+          "output_tokens": 383,
+          "total_tokens": 28063
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 6.971,
+          "input_tokens": 27778,
+          "output_tokens": 326,
+          "total_tokens": 28104
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.113,
+          "input_tokens": 27531,
+          "output_tokens": 324,
+          "total_tokens": 27855
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.673,
+          "input_tokens": 27745,
+          "output_tokens": 368,
+          "total_tokens": 28113
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.3,
+          "input_tokens": 27741,
+          "output_tokens": 350,
+          "total_tokens": 28091
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.947,
+          "input_tokens": 27995,
+          "output_tokens": 310,
+          "total_tokens": 28305
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.262,
+          "input_tokens": 27816,
+          "output_tokens": 323,
+          "total_tokens": 28139
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.351,
+          "input_tokens": 24943,
+          "output_tokens": 400,
+          "total_tokens": 25343
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.759,
+          "input_tokens": 10868,
+          "output_tokens": 750,
+          "total_tokens": 11618
+        }
+      ]
+    }
+  }
+}

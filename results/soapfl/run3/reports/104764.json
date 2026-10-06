@@ -1,0 +1,236 @@
+{
+  "bug_id": "104764",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-11-22",
+    "resolved": "b7bc90fea3b441234a84b49fdafeb75815eebbab"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_infer/src/infer/canonical/canonicalizer.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+    "compiler/rustc_infer/src/infer/resolve.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with an associated type, then provides a blanket impl `impl<T> Trait for T` setting `Ty = ()` for every type.",
+        "Uses a generic function `test<T>()` to force type checking without needing to call the function at runtime.",
+        "Forms a projection type `<&'static T as Trait>::Ty`, exercising associated-type normalization on a reference to a generic parameter.",
+        "Relies on the blanket impl applying to `&'static T`, so the projected associated type should normalize to `()`.",
+        "Assigns `()` to a binding typed as the projection result, making the compiler prove the projection equals `()`.",
+        "Introduces a `'static` reference to an unconstrained generic `T`, stressing well-formedness and lifetime handling during type checking.",
+        "Exercises trait solving and projection in the presence of generic parameters, references, and higher-ranked compiler reasoning.",
+        "Uses nightly toolchain pinning, indicating the reproducer targets a compiler regression in trait/type normalization behavior."
+      ],
+      "summary": "The reproducer is a minimal trait-projection test. It defines an associated type through a blanket trait impl, then in a generic function asks rustc to resolve `<&'static T as Trait>::Ty` and verify it equals `()`. This stresses associated-type normalization, blanket impl selection, reference types over generic parameters, and lifetime/well-formedness handling on the pinned nightly compiler."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer is centered on associated-type projection normalization through a blanket impl. The key pattern is that `Trait` is implemented for all `T`, so `&'static T` should trivially satisfy `Trait` and `<&'static T as Trait>::Ty` should normalize to `()`. The generic function is never called, so the only compiler work involved is type checking and normalization of the projection in a generic context. The notable stressors are: projecting an associated type on a reference to a type parameter, carrying an explicit `'static` region, and requiring the compiler to prove the projection equals a concrete unit type. Since the observed compiler output is successful compilation with only a dead-code warning, the targeted bug is likely a prior rustc failure in trait solving / projection normalization that incorrectly rejected, ICEd on, or failed to normalize this form. The common theme across the reproducer behavior is interaction between blanket impl selection (`impl<T> Trait for T`), projection `<... as Trait>::Ty`, and well-formedness / region handling for `&'static T` inside a generic body. A plausible compiler defect is in the projection or trait-selection code path incorrectly treating `&'static T` as problematic in generic contexts, e.g. mishandling reference types with free regions during normalization, over-enforcing well-formedness of `T` under `'static`, or failing to instantiate/select the blanket impl for the referenced type.",
+      "possible_causes": [
+        "A defect in associated-type projection normalization where `<&'static T as Trait>::Ty` was not normalized using the blanket impl `impl<T> Trait for T`, especially when the self type is a reference to a generic parameter.",
+        "A bug in trait selection / obligation solving that mishandled blanket impl matching for self types of the form `&'static T`, causing the solver to miss the obvious `Trait` impl or produce spurious ambiguity/errors.",
+        "Incorrect well-formedness or region handling in type checking for `&'static T` inside a generic function, such as wrongly requiring additional `'static` bounds on `T` or conflating the reference lifetime with constraints on the referent type.",
+        "A compiler issue in the projection obligation pipeline (selection, normalization, or fulfillment) where references carrying explicit lifetimes were not canonicalized or instantiated correctly before resolving the associated type.",
+        "A regression in generic body type checking that evaluated projection obligations too eagerly or in the wrong parameter environment, leading to failure on otherwise valid associated-type projections involving generic parameters and references."
+      ],
+      "evidence": [
+        "The trait impl is blanket over all types: `impl<T> Trait for T { type Ty = (); }`, so `&'static T` must also implement `Trait` without extra bounds.",
+        "The expression `let _: <&'static T as Trait>::Ty = ();` forces rustc to normalize the projection and prove it equals `()`.",
+        "The only interesting type-system feature exercised is associated-type projection on a reference to a generic parameter with an explicit lifetime; there is no runtime behavior involved.",
+        "The function `test<T>` is generic and unused, so any failure would come from compile-time trait solving, normalization, or well-formedness checking rather than borrow checking at a call site.",
+        "Current output shows successful compilation with only a dead-code warning, indicating the reproducer targets a compiler regression that likely lived in the trait/projection machinery and has since been fixed or is nondeterministic across revisions.",
+        "The use of nightly pinning suggests the bug was specific to a compiler version/regression rather than invalid source code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1547,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "Most directly matches the reproducer: it resolves associated-type projections like `<&'static T as Trait>::Ty` through impl selection and normalization. A bug here could easily mishandle blanket impl projection on a reference to a generic parameter, especially with an explicit lifetime in the self type."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Trait selection must recognize that the blanket impl `impl<T> Trait for T` applies to `&'static T`. If candidate assembly, evaluation, or confirmation mishandled reference self types or generic contexts, the projection would fail before normalization."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "This is the query-based normalization entry point used during type checking to recursively normalize projection-containing types. Since the reproducer forces normalization of a projected associated type in a generic body, an error in this wrapper or its handling of obligations/escaping regions is highly plausible."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "Inference-layer projection support is responsible for deferring unresolved associated type projections via fresh inference vars and projection obligations. A bug here could cause incorrect deferral or obligation generation for `<&'static T as Trait>::Ty` in generic code."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The reproducer stresses well-formedness around `&'static T` inside a generic function. If rustc incorrectly imposed extra WF or lifetime requirements on `T` when forming that reference/projection, this WF checking layer is a likely source."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "WF obligation generation could incorrectly derive outlives requirements from `&'static T` or from the projected associated type, producing spurious obligations such as requiring `T: 'static` when only the reference type itself appears in a type-level projection."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/canonical/canonicalizer.rs",
+        "reason": "The bug description strongly suggests possible mishandling of explicit lifetimes and generic parameters during canonicalization of trait/projection goals. Incorrect canonicalization of `&'static T` could break solver cache keys or make normalization/selection behave incorrectly."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "Because `&'static T` introduces an explicit region over a generic parameter, incorrect lowering of type-outlives obligations could spuriously require the referent type to outlive `'static` or otherwise distort region constraints during type checking."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "The failing pattern occurs in a generic function body during ordinary type checking. This layer is where the let-binding type is checked, obligations are registered, and normalization is invoked, so a bug in how body type checking requests projection normalization is conceivable."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/resolve.rs",
+        "reason": "Projection/type-checking bugs around generic references sometimes come from premature or incorrect opportunistic resolution of inference variables and regions. While less direct than projection/selection code, it is still a plausible contributor in this obligation-solving path."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 144.943,
+    "stage_times_sec": {
+      "checkout": 1.533,
+      "load_bug_context": 0.042,
+      "test_behavior_analysis": 6.022,
+      "test_failure_analysis": 12.856,
+      "load_file_candidates": 0.091,
+      "search_suspicious_files": 124.399
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 354148,
+      "output_tokens": 5836,
+      "total_tokens": 359984,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.022,
+          "input_tokens": 364,
+          "output_tokens": 291,
+          "total_tokens": 655
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.856,
+          "input_tokens": 960,
+          "output_tokens": 730,
+          "total_tokens": 1690
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.37,
+          "input_tokens": 26429,
+          "output_tokens": 318,
+          "total_tokens": 26747
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 10.306,
+          "input_tokens": 26379,
+          "output_tokens": 366,
+          "total_tokens": 26745
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.222,
+          "input_tokens": 26248,
+          "output_tokens": 329,
+          "total_tokens": 26577
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.964,
+          "input_tokens": 26496,
+          "output_tokens": 319,
+          "total_tokens": 26815
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.208,
+          "input_tokens": 26508,
+          "output_tokens": 358,
+          "total_tokens": 26866
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.434,
+          "input_tokens": 26704,
+          "output_tokens": 317,
+          "total_tokens": 27021
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.981,
+          "input_tokens": 26560,
+          "output_tokens": 272,
+          "total_tokens": 26832
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.382,
+          "input_tokens": 26499,
+          "output_tokens": 291,
+          "total_tokens": 26790
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.673,
+          "input_tokens": 26612,
+          "output_tokens": 338,
+          "total_tokens": 26950
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.637,
+          "input_tokens": 25113,
+          "output_tokens": 317,
+          "total_tokens": 25430
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.657,
+          "input_tokens": 26637,
+          "output_tokens": 310,
+          "total_tokens": 26947
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.861,
+          "input_tokens": 26784,
+          "output_tokens": 301,
+          "total_tokens": 27085
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.42,
+          "input_tokens": 23530,
+          "output_tokens": 283,
+          "total_tokens": 23813
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.253,
+          "input_tokens": 12325,
+          "output_tokens": 696,
+          "total_tokens": 13021
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,252 @@
+{
+  "bug_id": "120421",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-01-27",
+    "resolved": "e7bbe8ce933123a8e327c79e38bcb790595e6a65"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/thir/pattern/mod.rs",
+    "compiler/rustc_mir_build/src/build/matches/mod.rs",
+    "compiler/rustc_mir_build/src/build/matches/simplify.rs",
+    "compiler/rustc_hir_typeck/src/pat.rs",
+    "compiler/rustc_middle/src/ty/inhabitedness/mod.rs",
+    "compiler/rustc_hir/src/pat_util.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_middle/src/thir.rs",
+    "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `never_patterns`, allowing `!` in patterns to denote unreachable matches for uninhabited types.",
+        "Defines `enum Void {}` as an uninhabited type, so `Result<bool, Void>` cannot contain an `Err` value at runtime.",
+        "Creates `res_void: Result<bool, Void> = Ok(true)`, giving the compiler concrete knowledge of an impossible error variant.",
+        "Uses a `for` loop over a one-element array, exercising pattern matching in `for`-loop destructuring rather than a `match` expression.",
+        "The loop pattern is an or-pattern: `Ok(mut _x) | Err(!)`, combining a normal binding arm with an unreachable arm.",
+        "`Err(!)` tests exhaustiveness and usefulness analysis with never patterns inside enum variant destructuring.",
+        "`mut _x` checks binding mode handling in or-patterns, even though the variable is intentionally unused via underscore naming.",
+        "The reproducer stresses HIR/type checking and pattern lowering around uninhabited types, never patterns, and or-patterns in loop patterns."
+      ],
+      "summary": "This reproducer uses a nightly feature to match an uninhabited error type through a `for`-loop destructuring pattern. By iterating over `[Result<bool, Void>]` with `Ok(mut _x) | Err(!)`, it exercises compiler handling of never patterns, uninhabited enums, or-patterns, exhaustiveness/usefulness reasoning, and pattern lowering in `for` loops."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on pattern matching over an uninhabited type using the nightly `never_patterns` feature, specifically inside a `for`-loop desugared pattern rather than a standalone `match`. The reproducer combines several uncommon pattern-analysis features at once: an uninhabited enum (`Void`), a `Result<bool, Void>` whose `Err` variant is impossible, an or-pattern (`Ok(mut _x) | Err(!)`), and a never pattern nested inside enum destructuring. The ICE occurs late in compilation during MIR-related analysis (`mir_drops_elaborated_and_const_checked`), which strongly suggests the frontend accepted or partially lowered the pattern, but later compiler stages encountered inconsistent assumptions about bindings, reachability, or variant inhabitation. A likely commonality is that the compiler mishandles normalization/checking of or-pattern branches when one branch contains a never pattern for an uninhabited variant and the other introduces a mutable binding. In a `for` loop, the pattern is applied to the iterator item via desugaring, so the bug may specifically lie in pattern lowering from HIR/THIR to MIR for irrefutable/destructuring loop patterns, where unreachable branches or absent bindings are not reconciled correctly. The stack trace pointing at drop elaboration / const-check MIR queries suggests malformed MIR or invalid local/binding state was produced earlier and only asserted or crashed when MIR was elaborated.",
+      "possible_causes": [
+        "Bug in pattern lowering for `for`-loop destructuring with or-patterns, where one alternative is an impossible `Err(!)` branch over an uninhabited type and the other binds `mut _x`, producing inconsistent binding sets or invalid lowered control flow.",
+        "Defect in never-pattern handling inside nested enum variant patterns (`Err(!)`) causing the compiler to incorrectly treat an unreachable branch as a normal branch during THIR/MIR construction, later breaking MIR drop elaboration.",
+        "Incorrect reconciliation of bindings across or-pattern alternatives when one side has a mutable binding and the other side is uninhabited/no-binding, especially in irrefutable-pattern contexts such as `for` loop heads.",
+        "Fault in inhabitation/usefulness/exhaustiveness information propagation for `Result<bool, Void>` that marks the pattern as accepted but leaves downstream MIR generation with impossible variant paths that are not properly eliminated.",
+        "Compiler bug in the `for`-loop desugaring path: the special handling of iterator item patterns may not correctly account for never patterns and uninhabited enum variants, unlike ordinary `match` expressions.",
+        "Potential mismatch between type checking and MIR-building for `never_patterns`, where typeck accepts `Err(!)` in an or-pattern but MIR construction/drop elaboration still expects structurally valid bindings/places for all alternatives."
+      ],
+      "evidence": [
+        "The reproducer explicitly uses nightly `#![feature(never_patterns)]`, so the failure is tied to experimental compiler logic for `!` in patterns.",
+        "`enum Void {}` is uninhabited, making `Result<bool, Void>`'s `Err` variant impossible; this stresses inhabitation reasoning.",
+        "The pattern `Ok(mut _x) | Err(!)` is an or-pattern combining a normal binding branch with an unreachable branch, a classic source of binding-set consistency bugs.",
+        "The pattern appears in a `for` loop head rather than a `match`, implying desugaring-specific lowering may be involved.",
+        "The crash happens during `mir_drops_elaborated_and_const_checked`, indicating the compiler got past parsing/typeck and likely produced invalid or inconsistent MIR for later analysis.",
+        "The query stack does not show a user-facing semantic error; instead it ends in an ICE, which is consistent with an internal compiler defect in pattern lowering or MIR generation.",
+        "The behavior summary specifically highlights never patterns, uninhabited enums, exhaustiveness/usefulness reasoning, and loop-pattern lowering as the stressed areas."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1736,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/thir/pattern/mod.rs",
+        "reason": "Most suspicious because the reproducer stresses THIR pattern lowering for an or-pattern combining `Ok(mut _x)` with nested never-pattern `Err(!)` over an uninhabited type. If this stage produces inconsistent binding/reachability info, later MIR drop elaboration can ICE."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/mod.rs",
+        "reason": "`for`-loop head patterns are lowered through match-like machinery after desugaring. A bug here could mishandle irrefutable or-patterns with an impossible branch, producing malformed MIR/control flow that only crashes in later MIR queries."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/simplify.rs",
+        "reason": "This file specifically simplifies irrefutable match pairs and handles or-pattern ordering/flattening. The pattern `Ok(mut _x) | Err(!)` is exactly the kind of case where one branch has bindings and the other is unreachable, so binding-set reconciliation bugs are very plausible here."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/pat.rs",
+        "reason": "HIR pattern type checking is responsible for validating never patterns, uninhabited variant patterns, and consistent bindings across or-pattern alternatives. If typeck accepts an invalid/incompletely-normalized pattern state, later THIR/MIR lowering may ICE."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/inhabitedness/mod.rs",
+        "reason": "The reproducer relies on `Void` making `Result<bool, Void>::Err` impossible. Incorrect inhabitedness propagation for nested enum variants could cause downstream lowering to keep impossible paths or misclassify the pattern as reachable."
+      },
+      {
+        "path": "compiler/rustc_hir/src/pat_util.rs",
+        "reason": "Utilities for traversing bindings in HIR patterns are relevant because this bug likely involves collecting/comparing bindings across or-pattern branches where one side has `mut _x` and the other has no binding due to `!`."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "This file drives body and pattern checking, including divergence caused by never-pattern parameters and body-local pattern contexts. Since the issue appears in a `for` loop body context rather than a standalone `match`, the surrounding body-check setup may contribute."
+      },
+      {
+        "path": "compiler/rustc_middle/src/thir.rs",
+        "reason": "If the THIR pattern representation or its invariants do not correctly model never-pattern/or-pattern combinations, MIR construction can receive inconsistent pattern structures and fail later during elaboration."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+        "reason": "The ICE surfaces during `mir_drops_elaborated_and_const_checked`, so this pass is a plausible crash site triggered by malformed MIR generated earlier. Less likely to be the root cause than pattern lowering, but still directly implicated by the stack context."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "MIR type checking often detects invalid MIR produced by earlier lowering stages and reports ICEs. Given the late failure, this file is a secondary suspect as the first place broken pattern-lowered MIR may be validated or trip invariants."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 149.34,
+    "stage_times_sec": {
+      "checkout": 1.124,
+      "load_bug_context": 0.118,
+      "test_behavior_analysis": 5.265,
+      "test_failure_analysis": 12.648,
+      "load_file_candidates": 0.209,
+      "search_suspicious_files": 129.974
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 416338,
+      "output_tokens": 7062,
+      "total_tokens": 423400,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.265,
+          "input_tokens": 373,
+          "output_tokens": 313,
+          "total_tokens": 686
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.648,
+          "input_tokens": 1959,
+          "output_tokens": 795,
+          "total_tokens": 2754
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.989,
+          "input_tokens": 27703,
+          "output_tokens": 403,
+          "total_tokens": 28106
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.095,
+          "input_tokens": 27707,
+          "output_tokens": 353,
+          "total_tokens": 28060
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.897,
+          "input_tokens": 27226,
+          "output_tokens": 339,
+          "total_tokens": 27565
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.367,
+          "input_tokens": 27463,
+          "output_tokens": 344,
+          "total_tokens": 27807
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.626,
+          "input_tokens": 27432,
+          "output_tokens": 344,
+          "total_tokens": 27776
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.041,
+          "input_tokens": 27845,
+          "output_tokens": 378,
+          "total_tokens": 28223
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 10.01,
+          "input_tokens": 27606,
+          "output_tokens": 379,
+          "total_tokens": 27985
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.044,
+          "input_tokens": 27598,
+          "output_tokens": 417,
+          "total_tokens": 28015
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.142,
+          "input_tokens": 27695,
+          "output_tokens": 396,
+          "total_tokens": 28091
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.91,
+          "input_tokens": 27526,
+          "output_tokens": 370,
+          "total_tokens": 27896
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.472,
+          "input_tokens": 27822,
+          "output_tokens": 312,
+          "total_tokens": 28134
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.031,
+          "input_tokens": 27734,
+          "output_tokens": 266,
+          "total_tokens": 28000
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.005,
+          "input_tokens": 27850,
+          "output_tokens": 303,
+          "total_tokens": 28153
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.449,
+          "input_tokens": 27600,
+          "output_tokens": 335,
+          "total_tokens": 27935
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.6,
+          "input_tokens": 14474,
+          "output_tokens": 339,
+          "total_tokens": 14813
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.267,
+          "input_tokens": 12725,
+          "output_tokens": 676,
+          "total_tokens": 13401
+        }
+      ]
+    }
+  }
+}

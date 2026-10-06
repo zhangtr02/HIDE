@@ -1,0 +1,251 @@
+{
+  "bug_id": "123457",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-04-02",
+    "resolved": "1684a753dbca5d23b2e03568e6fbbb48eb72d0e6"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/error_reporting/type_err_ctxt_ext.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/generics.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/prove_predicate.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_infer/src/infer/relate/type_relating.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines traits and schema types using const generics with `&'static str` keys, modeling a type-level key list via `KeyNil` and `KeyCons`.",
+        "Exercises nightly support for string const generics in traits, impls, and types, a fragile area of const-generic type checking.",
+        "Implements `SubsetExcept` with a blanket impl constrained by trait membership, associated-const arithmetic, and a const-evaluated helper expression in array lengths.",
+        "Uses array-length bounds like `[(); A - B]: Sized` to force compile-time evaluation of associated const arithmetic and schema-size relationships.",
+        "Declares `ContainsKey` for `KeyCons`, testing trait resolution over const generic string parameters and type-level key lookup.",
+        "Defines `RestrictedStringMap<S>` with `PhantomData<S>`, making schema information purely type-level without runtime storage.",
+        "`remove_key` introduces malformed/incomplete generic bounds (`Self:`, `S:`, missing generics like `K`), stressing parser, name resolution, and diagnostics around generic where-clauses.",
+        "`foo` calls `remove_key` with explicit type and const arguments that conflict with the starting schema, exercising method generic argument checking and inference under invalid bounds."
+      ],
+      "summary": "The reproducer builds a type-level key-schema API using nightly string const generics, trait bounds, and compile-time array-length checks. It intentionally includes inconsistent and incomplete generic definitions, impl headers, and method bounds, then calls the method with mismatched explicit generic arguments. This stresses rustc parsing, name resolution, trait solving, const-generic checking, and diagnostics in a complex invalid program."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is that the ICE happens while type-checking `foo`, not during code generation, and the reproducer combines several compiler-stress features in one invalid program: nightly `&'static str` const generics, trait impls parameterized by const strings, associated-const arithmetic in array lengths, and malformed/incomplete generic bounds and impl headers. The compiler already emits many front-end errors (E0107, E0207, E0277, E0308, E0392, E0412, E0425, E0747), so the key similarity is error recovery interacting with advanced generic/type-system machinery. In particular, the program leaves unresolved or missing generic parameters (`K`, `KEY_ID`), malformed where-predicates (`Self:`, `S:`), and inconsistent trait/impl argument counts, yet rustc continues into type checking of `foo` and appears to reach an internal state it did not expect. Given the feature mix, the most likely defect is in compiler error-recovery/diagnostic paths for method call type checking and trait obligation construction involving const generics and recovered predicates. A likely scenario is that rustc builds a partially-invalid predicate or generic argument list for `remove_key`/`SubsetExcept` and later assumes it is well-formed when normalizing, relating, or evaluating const expressions such as array-length bounds, causing the ICE.",
+      "possible_causes": [
+        "Bug in type-checking/error-recovery for malformed generic where-clauses on methods (`Self:`, `S:`), where rustc continues with invalid predicates and later panics instead of gracefully rejecting them.",
+        "Defect in trait obligation construction or trait selection for const-generic traits using `&'static str`, especially when impl headers and trait references have mismatched or missing generic/const arguments after recovery.",
+        "Bug in handling unresolved or erroneous const generic parameters inside impls (`K`, `KEY_ID`) leading to creation of malformed substitutions or `ParamConst` placeholders that later ICE during method call checking.",
+        "Failure in normalization or const-evaluation of array-length obligations like `[(); A - B]: Sized` when `A`/`B` come from erroneous associated consts or invalid recovered types, producing an internal inconsistency.",
+        "Diagnostic/recovery bug in method-call generic argument checking for `remove_key::<_, \"k2\">()` when the method signature itself is malformed and the explicit type/const arguments do not match the recovered generic parameter list.",
+        "Possible issue in HIR lowering or later typeck assumptions for recovered AST/HIR from invalid impl and where-clause syntax, especially for predicates involving const generics and associated const arithmetic."
+      ],
+      "evidence": [
+        "ICE query stack points to `typeck` of `foo`, indicating the crash occurs in semantic analysis of the method call rather than parsing or backend stages.",
+        "Compiler reports many ordinary user-facing errors first, showing rustc attempted to recover from invalid code and then crashed afterward.",
+        "Reproducer intentionally mixes malformed generics/bounds with advanced const-generic features (`&'static str` const params, trait bounds, array const expressions), a common trigger for ICEs in recovery paths.",
+        "`remove_key` has incomplete where-predicates and missing generic names, so any later trait obligations derived from its signature may be based on partially-recovered invalid compiler IR.",
+        "`SubsetExcept`/`ContainsKey` usage combines trait solving with const generic string parameters and associated const arithmetic, increasing risk in predicate construction and normalization.",
+        "The explicit erroneous method invocation in `foo` is the point being type-checked, matching a likely failure in method resolution or generic argument validation under recovery."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1765,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/error_reporting/type_err_ctxt_ext.rs",
+        "reason": "Right before the ICE, the stack enters `report_similar_impl_candidates` and `try_to_add_help_message`, both in this file. With the reproducer mixing malformed type and const generic arguments, the panic text - `relating different kinds: {const error}: &'static str KeyNil` - fits a diagnostic path that compares impl-candidate generic arguments positionally during trait error reporting without guarding against type-vs-const kind mismatches."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "The ICE occurs during `[typeck] type-checking foo`, and `foo` contains the explicit erroneous method call `map.remove_key::<_, \"k2\">()`. This file handles function-body type checking, method/callee resolution, generic argument count checking, lowering user-written generic args, and recovery in exactly this area. Given the malformed method signature and explicit type/const args, this is the most likely place where rustc continues with partially-invalid generic data and later panics."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "Expression checking drives method-call checking in bodies and integrates coercions, expectation handling, adjustments, and diagnostics. Since the crash happens while type-checking the call expression inside `foo`, and the reproducer stresses invalid method invocation plus const generics, this file is highly suspicious as the expression-level entry point that may mishandle recovered errors."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/generics.rs",
+        "reason": "The reproducer heavily stresses generic argument lowering and validation with explicit type and const arguments, including string const generics and likely arity/kind mismatches (E0747 appears). This file specifically checks generic argument kinds/order/arity and emits diagnostics for mismatches, making it a strong candidate for constructing malformed lowered generic args during recovery."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+        "reason": "Malformed bounds and const-generic trait references (`SubsetExcept`, `ContainsKey`, missing `K`/`KEY_ID`, invalid trait refs) require HIR-to-ty lowering of types, const args, trait refs, and predicates. If recovery from invalid syntax/name resolution leaves inconsistent HIR, this core lowering layer could produce bad `ty` structures later consumed by typeck."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/prove_predicate.rs",
+        "reason": "The reproducer combines malformed where-clauses, blanket impl bounds, trait obligations, and const-generic predicates. After recovery, type checking likely attempts to prove partially-invalid predicates for the method call and impl bounds. This file is the query/type-op bridge for proving predicates and is a plausible place where an unexpected malformed predicate causes an ICE."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "Type checking of `foo` will register many obligations from method resolution and where-clauses, then drive them through fulfillment. The bug description strongly suggests error recovery interacting with obligation construction/processing; fulfillment often exposes such latent inconsistencies when obligations involving unresolved consts/types are processed."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Trait selection is directly exercised by `ContainsKey`, `SubsetExcept`, and the array-length/const-evaluatable bounds. With mismatched or missing generic/const arguments after recovery, candidate assembly or selection may be assuming well-formed obligations and panic instead of gracefully failing."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "The reproducer uses array-length obligations like `[(); A - B]: Sized` and a const-evaluated helper in bounds, exactly the territory handled by const-evaluatability checking. If erroneous associated consts or malformed const args survive recovery, this file could mishandle `MentionsInfer`/`MentionsParam` or evaluatability classification and trigger the ICE."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+        "reason": "Once bad generic arguments or predicates are lowered, type checking and trait confirmation often relate types/consts under variance. This reproducer mixes invalid generic signatures, const params, and method-call type inference, so a faulty assumption in the core type-relating logic about well-formed const/type inputs is plausible."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 162.266,
+    "stage_times_sec": {
+      "checkout": 1.471,
+      "load_bug_context": 0.07,
+      "test_behavior_analysis": 7.603,
+      "test_failure_analysis": 13.952,
+      "load_file_candidates": 0.107,
+      "search_suspicious_files": 139.063
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 432631,
+      "output_tokens": 6963,
+      "total_tokens": 439594,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.603,
+          "input_tokens": 676,
+          "output_tokens": 338,
+          "total_tokens": 1014
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.952,
+          "input_tokens": 2508,
+          "output_tokens": 741,
+          "total_tokens": 3249
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.361,
+          "input_tokens": 28260,
+          "output_tokens": 376,
+          "total_tokens": 28636
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.182,
+          "input_tokens": 28127,
+          "output_tokens": 309,
+          "total_tokens": 28436
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.991,
+          "input_tokens": 27751,
+          "output_tokens": 272,
+          "total_tokens": 28023
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.29,
+          "input_tokens": 27920,
+          "output_tokens": 307,
+          "total_tokens": 28227
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.64,
+          "input_tokens": 27969,
+          "output_tokens": 302,
+          "total_tokens": 28271
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.162,
+          "input_tokens": 28300,
+          "output_tokens": 391,
+          "total_tokens": 28691
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.626,
+          "input_tokens": 28102,
+          "output_tokens": 330,
+          "total_tokens": 28432
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.959,
+          "input_tokens": 28090,
+          "output_tokens": 357,
+          "total_tokens": 28447
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.164,
+          "input_tokens": 28156,
+          "output_tokens": 292,
+          "total_tokens": 28448
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.242,
+          "input_tokens": 28013,
+          "output_tokens": 359,
+          "total_tokens": 28372
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 10.805,
+          "input_tokens": 28300,
+          "output_tokens": 340,
+          "total_tokens": 28640
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.125,
+          "input_tokens": 28136,
+          "output_tokens": 300,
+          "total_tokens": 28436
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.251,
+          "input_tokens": 28389,
+          "output_tokens": 301,
+          "total_tokens": 28690
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.516,
+          "input_tokens": 28128,
+          "output_tokens": 343,
+          "total_tokens": 28471
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.929,
+          "input_tokens": 21007,
+          "output_tokens": 392,
+          "total_tokens": 21399
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 14.789,
+          "input_tokens": 14799,
+          "output_tokens": 913,
+          "total_tokens": 15712
+        }
+      ]
+    }
+  }
+}

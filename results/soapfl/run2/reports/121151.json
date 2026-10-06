@@ -1,0 +1,248 @@
+{
+  "bug_id": "121151",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-15",
+    "resolved": "ee9c7c940c07d8b67c9a6b2ec930db70dcd23a46"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_ast_lowering/src/item.rs",
+    "compiler/rustc_parse/src/parser/item.rs",
+    "compiler/rustc_hir/src/hir.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_parse/src/parser/pat.rs",
+    "compiler/rustc_resolve/src/def_collector.rs",
+    "compiler/rustc_ast/src/ast.rs",
+    "compiler/rustc_middle/src/ty/adt.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a struct with a field named `_` and type `i32`.",
+        "Exercises Rust's parser for underscore used as an identifier in a struct field position.",
+        "Tests acceptance or rejection of `_` as a field name, distinct from wildcard pattern syntax.",
+        "Checks name resolution and AST/HIR lowering for a nonstandard field identifier.",
+        "Uses a minimal crate with an empty `main` to isolate type/item parsing from runtime behavior.",
+        "Compiles on a pinned nightly toolchain, targeting a regression in compiler front-end behavior."
+      ],
+      "summary": "The reproducer is a minimal Rust crate that only declares `struct D { _: i32 }` and an empty `main`. It specifically stresses compiler handling of `_` in a struct-field name position, where `_` normally appears as a wildcard pattern. The test isolates parsing, item validation, and lowering behavior on a specific nightly compiler to expose a front-end regression."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a front-end/compiler-internal bug in handling a struct field whose name token is `_`. The reproducer is minimal, involves no generics, no macros, no borrow checking, and no code execution, yet rustc panics during the `adt_def` / `type_of` / item collection query path. That strongly suggests the parser accepted or partially accepted `_` in a field-name position, but later compiler stages assume every named struct field has a valid normal identifier/symbol and do not robustly handle the underscore token. The common theme across the behavior description and query stack is inconsistent treatment of `_` between parsing, AST/HIR lowering, and ADT construction: `_` is special syntax in patterns/placeholders, but here appears in a field-definition slot. The ICE therefore likely comes from missing validation or an unchecked invariant in item collection / ADT definition code for record fields, where `_` should either be rejected gracefully with a diagnostic or represented consistently as a legal field name if intended.",
+      "possible_causes": [
+        "Missing front-end validation rejecting `_` as a struct field identifier before ADT/type collection, allowing an invalid AST/HIR form to reach `rustc_middle` queries.",
+        "A parser or AST-lowering bug that classifies `_` inconsistently: accepted as an identifier-like token for a field declaration, but later compiler code expects a regular `Ident` and panics when building the ADT definition.",
+        "Unchecked invariant in `adt_def` construction for record fields, such as assuming every field name has a normal interned identifier/name and not handling the underscore/wildcard form defensively.",
+        "A defect in name-resolution or HIR field-definition representation where `_` is treated as a placeholder/discard syntax instead of a field name, causing malformed field metadata consumed by `type_of`/`adt_def`.",
+        "Regression in diagnostic/error-recovery logic for reserved/special identifiers in item definitions: the compiler should emit a user-facing error (likely about invalid identifier usage) but instead continues into analysis and ICEs."
+      ],
+      "evidence": [
+        "The crate is extremely small and contains only `struct D { _: i32 }` plus `main`, so the bug is isolated to item parsing/collection rather than later semantic phases.",
+        "The query stack ends at `adt_def` for `D`, then `type_of`, then `collect_mod_item_types`, which localizes the failure to struct/field definition processing.",
+        "The test behavior explicitly targets underscore used as a field name, a syntactically special token that commonly has separate handling from ordinary identifiers.",
+        "There is no user code that accesses the field or instantiates the struct, so the panic is triggered purely by defining the type.",
+        "The compiler emits an ICE instead of a normal diagnostic, indicating an internal assumption violation rather than ordinary rejection of invalid syntax.",
+        "The nightly-specific reproducer and front-end-focused behavior summary are consistent with a regression in parser/lowering/validation around nonstandard identifiers in field position."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1742,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect.rs",
+        "reason": "The ICE occurs directly in the `adt_def` query for struct `D`, and this file wires/provides the `adt_def` and related collect queries. A malformed or unchecked field-name invariant for `_` is very likely surfacing here during ADT construction."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "The reproducer is front-end syntax involving `_` in a struct field position. AST validation is the natural place to reject invalid AST forms before lowering/analysis; failure to diagnose `_` as an invalid field identifier would allow a bad item to reach `adt_def` and ICE."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "If parsing/AST validation let `_: i32` through, item lowering of struct fields into HIR may mishandle underscore as a special token rather than a normal identifier, producing malformed field metadata later consumed by `type_of`/`adt_def`."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/item.rs",
+        "reason": "Parsing struct fields is driven here. The root bug may be that the parser incorrectly accepts `_` in a named field position without emitting a proper error, creating an AST shape that later stages are not prepared to handle."
+      },
+      {
+        "path": "compiler/rustc_hir/src/hir.rs",
+        "reason": "HIR representation of fields and identifiers may encode assumptions that named struct fields always have ordinary identifiers. If underscore is lowered inconsistently, the HIR data model or helper methods here could be the source of the invariant break."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "The query stack includes `type_of` immediately above `adt_def`. Even if the panic manifests in ADT construction, this file participates in early item-type computation and may contain assumptions about field defs/names that are violated by `_`."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/pat.rs",
+        "reason": "Underscore is heavily special-cased as wildcard pattern syntax here. A parser ambiguity or token-classification bug could leak into struct-field parsing, causing `_` to be treated inconsistently between pattern and identifier contexts."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/def_collector.rs",
+        "reason": "Definition collection creates local defs for fields before later queries run. If a field named `_` is assigned an invalid or special definition shape, downstream `adt_def` construction could panic on that malformed def metadata."
+      },
+      {
+        "path": "compiler/rustc_ast/src/ast.rs",
+        "reason": "The AST data structures define how field identifiers are represented. If `_` is represented with a special-case `Ident`/name form that later passes do not expect for record fields, the inconsistency may originate in this layer."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/adt.rs",
+        "reason": "Although later than the likely root cause, this file contains the middle-layer ADT representation and may assert or assume all named fields have valid identifiers. The ICE in `adt_def` suggests unchecked invariants here are also plausible."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 141.584,
+    "stage_times_sec": {
+      "checkout": 1.284,
+      "load_bug_context": 0.114,
+      "test_behavior_analysis": 4.999,
+      "test_failure_analysis": 11.893,
+      "load_file_candidates": 0.293,
+      "search_suspicious_files": 123.0
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 416737,
+      "output_tokens": 6146,
+      "total_tokens": 422883,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 4.999,
+          "input_tokens": 308,
+          "output_tokens": 191,
+          "total_tokens": 499
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.893,
+          "input_tokens": 1976,
+          "output_tokens": 607,
+          "total_tokens": 2583
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 6.697,
+          "input_tokens": 27531,
+          "output_tokens": 289,
+          "total_tokens": 27820
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.939,
+          "input_tokens": 27535,
+          "output_tokens": 279,
+          "total_tokens": 27814
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.765,
+          "input_tokens": 27054,
+          "output_tokens": 351,
+          "total_tokens": 27405
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.68,
+          "input_tokens": 27291,
+          "output_tokens": 369,
+          "total_tokens": 27660
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.585,
+          "input_tokens": 27264,
+          "output_tokens": 353,
+          "total_tokens": 27617
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.882,
+          "input_tokens": 27673,
+          "output_tokens": 383,
+          "total_tokens": 28056
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.918,
+          "input_tokens": 27423,
+          "output_tokens": 312,
+          "total_tokens": 27735
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.928,
+          "input_tokens": 27414,
+          "output_tokens": 298,
+          "total_tokens": 27712
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.183,
+          "input_tokens": 27538,
+          "output_tokens": 395,
+          "total_tokens": 27933
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.82,
+          "input_tokens": 27297,
+          "output_tokens": 313,
+          "total_tokens": 27610
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.142,
+          "input_tokens": 27646,
+          "output_tokens": 281,
+          "total_tokens": 27927
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.097,
+          "input_tokens": 27551,
+          "output_tokens": 142,
+          "total_tokens": 27693
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.077,
+          "input_tokens": 27685,
+          "output_tokens": 321,
+          "total_tokens": 28006
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.705,
+          "input_tokens": 27464,
+          "output_tokens": 308,
+          "total_tokens": 27772
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.856,
+          "input_tokens": 15548,
+          "output_tokens": 305,
+          "total_tokens": 15853
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.694,
+          "input_tokens": 14539,
+          "output_tokens": 649,
+          "total_tokens": 15188
+        }
+      ]
+    }
+  }
+}

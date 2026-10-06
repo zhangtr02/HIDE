@@ -1,0 +1,243 @@
+{
+  "bug_id": "108952",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-03-08",
+    "resolved": "e3dfeeaa45f117281b19773d67f3f253de65cee1"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_hir_analysis/src/astconv/generics.rs",
+    "compiler/rustc_hir_analysis/src/astconv/errors.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/misc.rs",
+    "compiler/rustc_ast_lowering/src/path.rs",
+    "compiler/rustc_resolve/src/late/diagnostics.rs",
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+    "compiler/rustc_hir_analysis/src/collect.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables unstable `adt_const_params`, allowing user-defined ADTs as const generic parameter types on nightly.",
+        "Suppresses `incomplete_features`, so the crate compiles far enough to exercise partially implemented compiler paths.",
+        "Defines `LifetimeGeneric<'a>` as a tuple struct containing a reference, introducing an explicit lifetime into an ADT.",
+        "Declares `UwU<'b, const T: LifetimeGeneric>(&'b ())`, using that lifetime-bearing ADT as a const generic parameter.",
+        "Exercises parsing and HIR/type lowering for const generics whose type itself has hidden lifetime parameters.",
+        "Forces const-generic well-formedness checks on a non-primitive const parameter type with reference-containing structure.",
+        "Stresses interaction between lifetime generics and const generics, an area with restrictions and unstable compiler support.",
+        "`main` is empty; the reproducer isolates the bug to item definition/type-checking rather than runtime behavior."
+      ],
+      "summary": "This reproducer targets nightly const-generics internals. It enables `adt_const_params` and defines a struct containing a reference, then uses that struct as the type of a const generic parameter. The code exercises compiler handling of ADT const parameters that implicitly depend on lifetimes, especially parsing, lowering, and well-formedness/type-checking of unstable lifetime-sensitive const generic types."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is an ICE during early type collection, not during code generation or runtime. The query stack shows the panic occurs while computing `type_of` for `UwU`, which means the compiler crashes when forming the type of an item whose const generic parameter type is `LifetimeGeneric`. The reproducer combines two unstable/partially implemented areas: `adt_const_params` and an ADT whose definition contains a reference lifetime parameter. A key commonality is that the const parameter type `LifetimeGeneric` is written without supplying its required lifetime argument, yet it is used specifically in const-generic position. That suggests the compiler path for collecting/lowering const parameter types is not correctly rejecting or normalizing lifetime-bearing ADTs before later assumptions are made. Instead of emitting a normal user error about missing lifetime/specification or disallowing lifetime-dependent const parameter types, rustc panics in the `type_of` computation for the item. The likely defect is in compiler logic that handles ADT const parameter eligibility, generic argument lowering, or well-formedness checks for const param types, where a type expected to be lifetime-free/'static or fully instantiated is accepted and later triggers an internal invariant violation.",
+      "possible_causes": [
+        "Missing validation in the const-generic type collection path for ADT const parameter types that still contain lifetime parameters or references, leading to an internal invariant violation during `type_of(UwU)`.",
+        "A bug in HIR-to-ty lowering or generic argument substitution for `LifetimeGeneric` used as a const parameter type, where omitted lifetime arguments are not diagnosed properly in this context and an ill-formed `Ty` is constructed.",
+        "Incorrect assumptions in `adt_const_params` support that user-defined const parameter types are lifetime-independent / structural-match-ready, while `LifetimeGeneric<'a>` embeds a reference and therefore violates those assumptions.",
+        "Well-formedness or eligibility checks for const parameter types are happening too late (after `type_of`), so the compiler reaches a panic instead of producing a proper error for a lifetime-sensitive const generic type.",
+        "The compiler may mishandle elided or hidden region parameters in item signatures for const generics, especially for tuple structs used as const param types, causing ICE when computing the item's generic parameter environment."
+      ],
+      "evidence": [
+        "Query stack pinpoints `#0 [type_of] computing type of 'UwU'`, so the bug is in item type construction/collection for the const-generic declaration itself.",
+        "The reproducer is minimal and `main` is empty, isolating the failure to front-end analysis of the item definition rather than borrow checking, MIR, or codegen.",
+        "`adt_const_params` is enabled and `incomplete_features` is allowed, so the code intentionally enters unstable compiler paths for ADT-valued const generic parameters.",
+        "`LifetimeGeneric<'a>` contains `&'a ()`, proving the ADT used as a const parameter type is lifetime-bearing and not a simple primitive or lifetime-free structural type.",
+        "`UwU<'b, const T: LifetimeGeneric>(&'b ())` uses `LifetimeGeneric` without explicit lifetime arguments specifically in const-parameter position, matching a likely missing-check or bad-lowering scenario.",
+        "Compiler output references `rustc --explain E0106`, consistent with missing lifetime handling, but instead of a regular diagnostic the compiler panics, indicating defective error handling or an unchecked assumption in production code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1592,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "The ICE occurs in query `type_of` while computing the type of `UwU`, directly matching this file’s responsibility. This code handles item type construction during collection, so a malformed const-generic parameter type like `LifetimeGeneric` with omitted lifetime arguments is most likely triggering an unchecked invariant here instead of a normal diagnostic."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "The failure likely involves HIR-to-ty conversion of the const parameter type `LifetimeGeneric` in item signature position. This module is the core AST/HIR type conversion layer, and a bug here could accept or mis-lower a lifetime-bearing ADT used as a const parameter type without properly rejecting missing lifetime arguments."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/generics.rs",
+        "reason": "This reproducer specifically stresses generic argument handling: `LifetimeGeneric` is used without its required lifetime argument, and in const-parameter type position. This file validates generic argument kinds/counts and builds generic args, making it highly suspicious for missing or incorrect checks that lead to an ICE later in `type_of`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/errors.rs",
+        "reason": "Compiler output references `E0106`, suggesting the compiler partially recognizes a missing lifetime situation but fails to emit a normal error and instead panics. This diagnostics support file is relevant because a missing-lifetime path in AST conversion may be mishandled or not propagated correctly, allowing invalid state to survive into `type_of`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The reproducer targets well-formedness of a const generic parameter type that embeds references/lifetimes. If WF checks for const parameter types happen too late or fail to reject lifetime-sensitive ADT const param types before `type_of` assumes validity, the bug could lie here."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/misc.rs",
+        "reason": "ADT const parameters depend on `ConstParamTy`-style structural restrictions, and this file contains logic for checking whether a type is allowed to implement const-param-related traits. A wrong assumption about references or lifetime-bearing fields being acceptable could contribute to the invalid type reaching a panic path."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "The problematic syntax is a path type `LifetimeGeneric` used without explicit lifetime arguments in a type/const-generic context. If AST lowering mishandles omitted lifetime arguments or preserves an invalid path form specifically in this position, it could set up the later ICE."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late/diagnostics.rs",
+        "reason": "Because the code should likely produce a missing lifetime diagnostic rather than ICE, the late-resolution missing-lifetime diagnostic path is relevant. A failure to properly diagnose or recover for omitted lifetime arguments in this unusual const-generic type position may allow invalid HIR to propagate downstream."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "`UwU` combines a normal lifetime parameter `'b` with a const parameter whose type is itself generic over a lifetime. Since the crash happens during item collection, generic parameter environment construction for the item may be mishandling dependencies between generics and const parameter types here."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect.rs",
+        "reason": "This file wires collection queries including `type_of`, `generics_of`, and related item metadata. While less likely than the specific implementations, the bug could stem from orchestration/order assumptions in collection that allow an invalid const param type to reach `type_of` before proper validation."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 147.648,
+    "stage_times_sec": {
+      "checkout": 2.387,
+      "load_bug_context": 0.311,
+      "test_behavior_analysis": 5.239,
+      "test_failure_analysis": 11.542,
+      "load_file_candidates": 0.198,
+      "search_suspicious_files": 127.971
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 385067,
+      "output_tokens": 6805,
+      "total_tokens": 391872,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.239,
+          "input_tokens": 370,
+          "output_tokens": 274,
+          "total_tokens": 644
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.542,
+          "input_tokens": 2170,
+          "output_tokens": 693,
+          "total_tokens": 2863
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.052,
+          "input_tokens": 27611,
+          "output_tokens": 372,
+          "total_tokens": 27983
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.233,
+          "input_tokens": 27714,
+          "output_tokens": 280,
+          "total_tokens": 27994
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.285,
+          "input_tokens": 27205,
+          "output_tokens": 379,
+          "total_tokens": 27584
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.656,
+          "input_tokens": 27647,
+          "output_tokens": 395,
+          "total_tokens": 28042
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.261,
+          "input_tokens": 27584,
+          "output_tokens": 376,
+          "total_tokens": 27960
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.932,
+          "input_tokens": 27912,
+          "output_tokens": 383,
+          "total_tokens": 28295
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.081,
+          "input_tokens": 27740,
+          "output_tokens": 396,
+          "total_tokens": 28136
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.824,
+          "input_tokens": 27643,
+          "output_tokens": 403,
+          "total_tokens": 28046
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.84,
+          "input_tokens": 27796,
+          "output_tokens": 349,
+          "total_tokens": 28145
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.179,
+          "input_tokens": 27221,
+          "output_tokens": 409,
+          "total_tokens": 27630
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.548,
+          "input_tokens": 27878,
+          "output_tokens": 358,
+          "total_tokens": 28236
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.759,
+          "input_tokens": 27897,
+          "output_tokens": 188,
+          "total_tokens": 28085
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.446,
+          "input_tokens": 27761,
+          "output_tokens": 392,
+          "total_tokens": 28153
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.528,
+          "input_tokens": 9545,
+          "output_tokens": 372,
+          "total_tokens": 9917
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.319,
+          "input_tokens": 13373,
+          "output_tokens": 786,
+          "total_tokens": 14159
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,213 @@
+{
+  "bug_id": "107898",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-02-09",
+    "resolved": "ef934d9b632b8ac00276558824664c104b92b5f0"
+  },
+  "final_top10": [
+    "compiler/rustc_infer/src/infer/combine.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_infer/src/infer/combine.rs",
+      "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "rank": 2
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/107898.json",
+    "graph_cache_hit": true,
+    "graph_cache_build_mode": "bug_cache",
+    "graph_cache_bug_id": "107898",
+    "graph_cache_checkout_commit": "ef934d9b632b8ac00276558824664c104b92b5f0",
+    "initial_graph_node_count": 50585,
+    "initial_graph_edge_count": 50584,
+    "graph_node_count": 50585,
+    "graph_edge_count": 86216,
+    "lazy_loaded_edge_count": 35632,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"is_const_evaluatable\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/const_evaluatable.rs\", \"content\": \"pub fn is_const_evaluatable<'tcx>(\\n    infcx: &InferCtxt<'tcx>,\\n    unexpanded_ct: ty::Const<'tcx>,\\n    param_env: ty::ParamEnv<'tcx>,\\n    span: Span,\\n) -> Result<(), NotConstEvaluatable> {\\n    let tcx = infcx.tcx;\\n    match tcx.expand_abstract_consts(unexpanded_ct).kind() {\\n        ty::ConstKind::Unevaluated(_) | ty::ConstKind::Expr(_) => (),\\n        ty::ConstKind::Param(_)\\n        | ty::ConstKind::Bound(_, _)\\n        | ty::ConstKind::Placeholder(_)\\n        | ty::ConstKind::Value(_)\\n        | ty::ConstKind::Error(_) => return Ok(()),\\n        ty::ConstKind::Infer(_) => return Err(NotConstEvaluatable::MentionsInfer),\\n    };\\n\\n    if tcx.features().generic_const_exprs {\\n        let ct = tcx.expand_abstract_consts(unexpanded_ct);\\n\\n        let is_anon_ct = if let ty::ConstKind::Unevaluated(uv) = ct.kind() {\\n            tcx.def_kind(uv.def.did) == DefKind::AnonConst\\n        } else {\\n            false\\n        };\\n\\n        if !is_anon_ct {\\n            if satisfied_from_param_env(tcx, infcx, ct, param_env) {\\n                return Ok(());\\n            }\\n            if ct.has_non_region_infer() {\\n                return Err(NotConstEvaluatable::MentionsInfer);\\n            } else if ct.has_non_region_param() {\\n                return Err(NotConstEvaluatable::MentionsParam);\\n            }\\n        }\\n\\n        match unexpanded_ct.kind() {\\n            ty::ConstKind::Expr(_) => {\\n                // FIXME(generic_const_exprs): we have a `ConstKind::Expr` which is fully concrete, but\\n                // currently it is not possible to evaluate `ConstKind::Expr` so we are unable to tell if it\\n                // is evaluatable or not. For now we just ICE until this is implemented.\\n                Err(NotConstEvaluatable::Error(tcx.sess.delay_span_bug(\\n                    span,\\n                    \\\"evaluating `ConstKind::Expr` is not currently supported\\\",\\n                )))\\n            }\\n            ty::ConstKind::Unevaluated(uv) => {\\n                let concrete = infcx.const_eval_resolve(param_env, uv, Some(span));\\n                match concrete {\\n                    Err(ErrorHandled::TooGeneric) => {\\n                        Err(NotConstEvaluatable::Error(infcx.tcx.sess.delay_span_bug(\\n                            span,\\n                            \\\"Missing value for constant, but no error reported?\\\",\\n                        )))\\n                    }\\n                    Err(ErrorHandled::Reported(e)) => Err(NotConstEvaluatable::Error(e)),\\n                    Ok(_) => Ok(()),\\n                }\\n            }\\n            _ => bug!(\\\"unexpected constkind in `is_const_evalautable: {unexpanded_ct:?}`\\\"),\\n        }\\n    } else {\\n        let uv = match unexpanded_ct.kind() {\\n            ty::ConstKind::Unevaluated(uv) => uv,\\n            ty::ConstKind::Expr(_) => {\\n                bug!(\\\"`ConstKind::Expr` without `feature(generic_const_exprs)` enabled\\\")\\n            }\\n            _ => bug!(\\\"unexpected constkind in `is_const_evalautable: {unexpanded_ct:?}`\\\"),\\n        };\\n\\n        // FIXME: We should only try to evaluate a given constant here if it is fully concrete\\n        // as we don't want to allow things like `[u8; std::mem::size_of::<*mut T>()]`.\\n        //\\n        // We previously did not check this, so we only emit a future compat warning if\\n        // const evaluation succeeds and the given constant is still polymorphic for now\\n        // and hopefully soon change this to an error.\\n        //\\n        // See #74595 for more details about this.\\n        let concrete = infcx.const_eval_resolve(param_env, uv, Some(span));\\n        match concrete {\\n            // If we're evaluating a generic foreign constant, under a nightly compiler while\\n            // the current crate does not enable `feature(generic_const_exprs)`, abort\\n            // compilation with a useful error.\\n            Err(_)\\n                if tcx.sess.is_nightly_build()\\n                    && satisfied_from_param_env(\\n                        tcx,\\n                        infcx,\\n                        tcx.expand_abstract_consts(unexpanded_ct),\\n                        param_env,\\n                    ) =>\\n            {\\n                tcx.sess\\n                    .struct_span_fatal(\\n                        // Slightly better span than just using `span` alone\\n                        if span == rustc_span::DUMMY_SP { tcx.def_span(uv.def.did) } else { span },\\n                        \\\"failed to evaluate generic const expression\\\",\\n                    )\\n                    .note(\\\"the crate this constant originates from uses `#![feature(generic_const_exprs)]`\\\")\\n                    .span_suggestion_verbose(\\n                        rustc_span::DUMMY_SP,\\n                        \\\"consider enabling this feature\\\",\\n                        \\\"#![feature(generic_const_exprs)]\\\\n\\\",\\n                        rustc_errors::Applicability::MaybeIncorrect,\\n                    )\\n                    .emit()\\n            }\\n\\n            Err(ErrorHandled::TooGeneric) => {\\n                let err = if uv.has_non_region_infer() {\\n                    NotConstEvaluatable::MentionsInfer\\n                } else if uv.has_non_region_param() {\\n                    NotConstEvaluatable::MentionsParam\\n                } else {\\n                    let guar = infcx\\n                        .tcx\\n                        .sess\\n                        .delay_span_bug(span, \\\"Missing value for constant, but no error reported?\\\");\\n                    NotConstEvaluatable::Error(guar)\\n                };\\n\\n                Err(err)\\n            }\\n            Err(ErrorHandled::Reported(e)) => Err(NotConstEvaluatable::Error(e)),\\n            Ok(_) => Ok(()),\\n        }\\n    }\\n}\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"super_combine_consts\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_infer/src/infer/combine.rs\", \"content\": \"pub fn super_combine_consts<R>(\\n        &self,\\n        relation: &mut R,\\n        a: ty::Const<'tcx>,\\n        b: ty::Const<'tcx>,\\n    ) -> RelateResult<'tcx, ty::Const<'tcx>>\\n    where\\n        R: ConstEquateRelation<'tcx>,\\n    {\\n        debug!(\\\"{}.consts({:?}, {:?})\\\", relation.tag(), a, b);\\n        if a == b {\\n            return Ok(a);\\n        }\\n\\n        let a = self.shallow_resolve(a);\\n        let b = self.shallow_resolve(b);\\n\\n        match (a.kind(), b.kind()) {\\n            (\\n                ty::ConstKind::Infer(InferConst::Var(a_vid)),\\n                ty::ConstKind::Infer(InferConst::Var(b_vid)),\\n            ) => {\\n                self.inner.borrow_mut().const_unification_table().union(a_vid, b_vid);\\n                return Ok(a);\\n            }\\n\\n            // All other cases of inference with other variables are errors.\\n            (ty::ConstKind::Infer(InferConst::Var(_)), ty::ConstKind::Infer(_))\\n            | (ty::ConstKind::Infer(_), ty::ConstKind::Infer(InferConst::Var(_))) => {\\n                bug!(\\\"tried to combine ConstKind::Infer/ConstKind::Infer(InferConst::Var)\\\")\\n            }\\n\\n            (ty::ConstKind::Infer(InferConst::Var(vid)), _) => {\\n                return self.unify_const_variable(vid, b);\\n            }\\n\\n            (_, ty::ConstKind::Infer(InferConst::Var(vid))) => {\\n                return self.unify_const_variable(vid, a);\\n            }\\n            (ty::ConstKind::Unevaluated(..), _) if self.tcx.lazy_normalization() => {\\n                // FIXME(#59490): Need to remove the leak check to accommodate\\n                // escaping bound variables here.\\n                if !a.has_escaping_bound_vars() && !b.has_escaping_bound_vars() {\\n                    relation.const_equate_obligation(a, b);\\n                }\\n                return Ok(b);\\n            }\\n            (_, ty::ConstKind::Unevaluated(..)) if self.tcx.lazy_normalization() => {\\n                // FIXME(#59490): Need to remove the leak check to accommodate\\n                // escaping bound variables here.\\n                if !a.has_escaping_bound_vars() && !b.has_escaping_bound_vars() {\\n                    relation.const_equate_obligation(a, b);\\n                }\\n                return Ok(a);\\n            }\\n            _ => {}\\n        }\\n\\n        ty::relate::super_relate_consts(relation, a, b)\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"super_relate_consts\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/ty/relate.rs\", \"content\": \"pub fn super_relate_consts<'tcx, R: TypeRelation<'tcx>>(\\n    relation: &mut R,\\n    mut a: ty::Const<'tcx>,\\n    mut b: ty::Const<'tcx>,\\n) -> RelateResult<'tcx, ty::Const<'tcx>> {\\n    debug!(\\\"{}.super_relate_consts(a = {:?}, b = {:?})\\\", relation.tag(), a, b);\\n    let tcx = relation.tcx();\\n\\n    let a_ty;\\n    let b_ty;\\n    if relation.tcx().features().adt_const_params {\\n        a_ty = tcx.normalize_erasing_regions(relation.param_env(), a.ty());\\n        b_ty = tcx.normalize_erasing_regions(relation.param_env(), b.ty());\\n    } else {\\n        a_ty = tcx.erase_regions(a.ty());\\n        b_ty = tcx.erase_regions(b.ty());\\n    }\\n    if a_ty != b_ty {\\n        relation.tcx().sess.delay_span_bug(\\n            DUMMY_SP,\\n            &format!(\\n                \\\"cannot relate constants ({:?}, {:?}) of different types: {} != {}\\\",\\n                a, b, a_ty, b_ty\\n            ),\\n        );\\n    }\\n\\n    // HACK(const_generics): We still need to eagerly evaluate consts when\\n    // relating them because during `normalize_param_env_or_error`,\\n    // we may relate an evaluated constant in a obligation against\\n    // an unnormalized (i.e. unevaluated) const in the param-env.\\n    // FIXME(generic_const_exprs): Once we always lazily unify unevaluated constants\\n    // these `eval` calls can be removed.\\n    if !tcx.features().generic_const_exprs {\\n        a = a.eval(tcx, relation.param_env());\\n        b = b.eval(tcx, relation.param_env());\\n    }\\n\\n    if tcx.features().generic_const_exprs {\\n        a = tcx.expand_abstract_consts(a);\\n        b = tcx.expand_abstract_consts(b);\\n    }\\n\\n    debug!(\\\"{}.super_relate_consts(normed_a = {:?}, normed_b = {:?})\\\", relation.tag(), a, b);\\n\\n    // Currently, the values that can be unified are primitive types,\\n    // and those that derive both `PartialEq` and `Eq`, corresponding\\n    // to structural-match types.\\n    let is_match = match (a.kind(), b.kind()) {\\n        (ty::ConstKind::Infer(_), _) | (_, ty::ConstKind::Infer(_)) => {\\n            // The caller should handle these cases!\\n            bug!(\\\"var types encountered in super_relate_consts: {:?} {:?}\\\", a, b)\\n        }\\n\\n        (ty::ConstKind::Error(_), _) => return Ok(a),\\n        (_, ty::ConstKind::Error(_)) => return Ok(b),\\n\\n        (ty::ConstKind::Param(a_p), ty::ConstKind::Param(b_p)) => a_p.index == b_p.index,\\n        (ty::ConstKind::Placeholder(p1), ty::ConstKind::Placeholder(p2)) => p1 == p2,\\n        (ty::ConstKind::Value(a_val), ty::ConstKind::Value(b_val)) => a_val == b_val,\\n\\n        // While this is slightly incorrect, it shouldn't matter for `min_const_generics`\\n        // and is the better alternative to waiting until `generic_const_exprs` can\\n        // be stabilized.\\n        (ty::ConstKind::Unevaluated(au), ty::ConstKind::Unevaluated(bu)) if au.def == bu.def => {\\n            assert_eq!(a.ty(), b.ty());\\n            let substs = relation.relate_with_variance(\\n                ty::Variance::Invariant,\\n                ty::VarianceDiagInfo::default(),\\n                au.substs,\\n                bu.substs,\\n            )?;\\n            return Ok(tcx.mk_const(ty::UnevaluatedConst { def: au.def, substs }, a.ty()));\\n        }\\n        // Before calling relate on exprs, it is necessary to ensure that the nested consts\\n        // have identical types.\\n        (ty::ConstKind::Expr(ae), ty::ConstKind::Expr(be)) => {\\n            let r = relation;\\n\\n            // FIXME(generic_const_exprs): is it possible to relate two consts which are not identical\\n            // exprs? Should we care about that?\\n            // FIXME(generic_const_exprs): relating the `ty()`s is a little weird since it is supposed to\\n            // ICE If they mismatch. Unfortunately `ConstKind::Expr` is a little special and can be thought\\n            // of as being generic over the argument types, however this is implicit so these types don't get\\n            // related when we relate the substs of the item this const arg is for.\\n            let expr = match (ae, be) {\\n                (Expr::Binop(a_op, al, ar), Expr::Binop(b_op, bl, br)) if a_op == b_op => {\\n                    r.relate(al.ty(), bl.ty())?;\\n                    r.relate(ar.ty(), br.ty())?;\\n                    Expr::Binop(a_op, r.consts(al, bl)?, r.consts(ar, br)?)\\n                }\\n                (Expr::UnOp(a_op, av), Expr::UnOp(b_op, bv)) if a_op == b_op => {\\n                    r.relate(av.ty(), bv.ty())?;\\n                    Expr::UnOp(a_op, r.consts(av, bv)?)\\n                }\\n                (Expr::Cast(ak, av, at), Expr::Cast(bk, bv, bt)) if ak == bk => {\\n                    r.relate(av.ty(), bv.ty())?;\\n                    Expr::Cast(ak, r.consts(av, bv)?, r.tys(at, bt)?)\\n                }\\n                (Expr::FunctionCall(af, aa), Expr::FunctionCall(bf, ba))\\n                    if aa.len() == ba.len() =>\\n                {\\n                    r.relate(af.ty(), bf.ty())?;\\n                    let func = r.consts(af, bf)?;\\n                    let mut related_args = Vec::with_capacity(aa.len());\\n                    for (a_arg, b_arg) in aa.iter().zip(ba.iter()) {\\n                        related_args.push(r.consts(a_arg, b_arg)?);\\n                    }\\n                    let related_args = tcx.mk_const_list(related_args.iter());\\n                    Expr::FunctionCall(func, related_args)\\n                }\\n                _ => return Err(TypeError::ConstMismatch(expected_found(r, a, b))),\\n            };\\n            let kind = ty::ConstKind::Expr(expr);\\n            return Ok(tcx.mk_const(kind, a.ty()));\\n        }\\n        _ => false,\\n    };\\n    if is_match { Ok(a) } else { Err(TypeError::ConstMismatch(expected_found(relation, a, b))) }\\n}\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"satisfied_from_param_env\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/const_evaluatable.rs\", \"content\": \"fn satisfied_from_param_env<'tcx>(\\n    tcx: TyCtxt<'tcx>,\\n    infcx: &InferCtxt<'tcx>,\\n    ct: ty::Const<'tcx>,\\n    param_env: ty::ParamEnv<'tcx>,\\n) -> bool {\\n    // Try to unify with each subtree in the AbstractConst to allow for\\n    // `N + 1` being const evaluatable even if theres only a `ConstEvaluatable`\\n    // predicate for `(N + 1) * 2`\\n    struct Visitor<'a, 'tcx> {\\n        ct: ty::Const<'tcx>,\\n        param_env: ty::ParamEnv<'tcx>,\\n\\n        infcx: &'a InferCtxt<'tcx>,\\n        single_match: Option<Result<ty::Const<'tcx>, ()>>,\\n    }\\n\\n    impl<'a, 'tcx> TypeVisitor<'tcx> for Visitor<'a, 'tcx> {\\n        type BreakTy = ();\\n        fn visit_const(&mut self, c: ty::Const<'tcx>) -> ControlFlow<Self::BreakTy> {\\n            debug!(\\\"is_const_evaluatable: candidate={:?}\\\", c);\\n            if self.infcx.probe(|_| {\\n                let ocx = ObligationCtxt::new_in_snapshot(self.infcx);\\n                ocx.eq(&ObligationCause::dummy(), self.param_env, c.ty(), self.ct.ty()).is_ok()\\n                    && ocx.eq(&ObligationCause::dummy(), self.param_env, c, self.ct).is_ok()\\n                    && ocx.select_all_or_error().is_empty()\\n            }) {\\n                self.single_match = match self.single_match {\\n                    None => Some(Ok(c)),\\n                    Some(Ok(o)) if o == c => Some(Ok(c)),\\n                    Some(_) => Some(Err(())),\\n                };\\n            }\\n\\n            if let ty::ConstKind::Expr(e) = c.kind() {\\n                e.visit_with(self)\\n            } else {\\n                // FIXME(generic_const_exprs): This doesn't recurse into `<T as Trait<U>>::ASSOC`'s substs.\\n                // This is currently unobservable as `<T as Trait<{ U + 1 }>>::ASSOC` creates an anon const\\n                // with its own `ConstEvaluatable` bound in the param env which we will visit separately.\\n                //\\n                // If we start allowing directly writing `ConstKind::Expr` without an intermediate anon const\\n                // this will be incorrect. It might be worth investigating making `predicates_of` elaborate\\n                // all of the `ConstEvaluatable` bounds rather than having a visitor here.\\n                ControlFlow::Continue(())\\n            }\\n        }\\n    }\\n\\n    let mut single_match: Option<Result<ty::Const<'tcx>, ()>> = None;\\n\\n    for pred in param_env.caller_bounds() {\\n        match pred.kind().skip_binder() {\\n            ty::PredicateKind::ConstEvaluatable(ce) => {\\n                let b_ct = tcx.expand_abstract_consts(ce);\\n                let mut v = Visitor { ct, infcx, param_env, single_match };\\n                let _ = b_ct.visit_with(&mut v);\\n\\n                single_match = v.single_match;\\n            }\\n            _ => {} // don't care\\n        }\\n    }\\n\\n    if let Some(Ok(c)) = single_match {\\n        let ocx = ObligationCtxt::new_in_snapshot(infcx);\\n        assert!(ocx.eq(&ObligationCause::dummy(), param_env, c.ty(), ct.ty()).is_ok());\\n        assert!(ocx.eq(&ObligationCause::dummy(), param_env, c, ct).is_ok());\\n        assert!(ocx.select_all_or_error().is_empty());\\n        return true;\\n    }\\n\\n    debug!(\\\"is_const_evaluatable: no\\\");\\n    false\\n}\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_infer/src/infer/combine.rs",
+      "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "B",
+          "name": "Const unification falls through to super_relate_consts without normalizing or reconciling generic_const_expr-related function-call const representations",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "super_combine_consts",
+              "file": "compiler/rustc_infer/src/infer/combine.rs",
+              "content": "pub fn super_combine_consts<R>(\n        &self,\n        relation: &mut R,\n        a: ty::Const<'tcx>,\n        b: ty::Const<'tcx>,\n    ) -> RelateResult<'tcx, ty::Const<'tcx>>\n    where\n        R: ConstEquateRelation<'tcx>,\n    {\n        debug!(\"{}.consts({:?}, {:?})\", relation.tag(), a, b);\n        if a == b {\n            return Ok(a);\n        }\n\n        let a = self.shallow_resolve(a);\n        let b = self.shallow_resolve(b);\n\n        match (a.kind(), b.kind()) {\n            (\n                ty::ConstKind::Infer(InferConst::Var(a_vid)),\n                ty::ConstKind::Infer(InferConst::Var(b_vid)),\n            ) => {\n                self.inner.borrow_mut().const_unification_table().union(a_vid, b_vid);\n                return Ok(a);\n            }\n\n            // All other cases of inference with other variables are errors.\n            (ty::ConstKind::Infer(InferConst::Var(_)), ty::ConstKind::Infer(_))\n            | (ty::ConstKind::Infer(_), ty::ConstKind::Infer(InferConst::Var(_))) => {\n                bug!(\"tried to combine ConstKind::Infer/ConstKind::Infer(InferConst::Var)\")\n            }\n\n            (ty::ConstKind::Infer(InferConst::Var(vid)), _) => {\n                return self.unify_const_variable(vid, b);\n            }\n\n            (_, ty::ConstKind::Infer(InferConst::Var(vid))) => {\n                return self.unify_const_variable(vid, a);\n            }\n            (ty::ConstKind::Unevaluated(..), _) if self.tcx.lazy_normalization() => {\n                // FIXME(#59490): Need to remove the leak check to accommodate\n                // escaping bound variables here.\n                if !a.has_escaping_bound_vars() && !b.has_escaping_bound_vars() {\n                    relation.const_equate_obligation(a, b);\n                }\n                return Ok(b);\n            }\n            (_, ty::ConstKind::Unevaluated(..)) if self.tcx.lazy_normalization() => {\n                // FIXME(#59490): Need to remove the leak check to accommodate\n                // escaping bound variables here.\n                if !a.has_escaping_bound_vars() && !b.has_escaping_bound_vars() {\n                    relation.const_equate_obligation(a, b);\n                }\n                return Ok(a);\n            }\n            _ => {}\n        }\n\n        ty::relate::super_relate_consts(relation, a, b)\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "C",
+          "name": "Const-evaluatable checking tries to equate candidate consts from the param environment, triggering problematic const relation on generic const expressions",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "is_const_evaluatable",
+              "file": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+              "content": "pub fn is_const_evaluatable<'tcx>(\n    infcx: &InferCtxt<'tcx>,\n    unexpanded_ct: ty::Const<'tcx>,\n    param_env: ty::ParamEnv<'tcx>,\n    span: Span,\n) -> Result<(), NotConstEvaluatable> {\n    let tcx = infcx.tcx;\n    match tcx.expand_abstract_consts(unexpanded_ct).kind() {\n        ty::ConstKind::Unevaluated(_) | ty::ConstKind::Expr(_) => (),\n        ty::ConstKind::Param(_)\n        | ty::ConstKind::Bound(_, _)\n        | ty::ConstKind::Placeholder(_)\n        | ty::ConstKind::Value(_)\n        | ty::ConstKind::Error(_) => return Ok(()),\n        ty::ConstKind::Infer(_) => return Err(NotConstEvaluatable::MentionsInfer),\n    };\n\n    if tcx.features().generic_const_exprs {\n        let ct = tcx.expand_abstract_consts(unexpanded_ct);\n\n        let is_anon_ct = if let ty::ConstKind::Unevaluated(uv) = ct.kind() {\n            tcx.def_kind(uv.def.did) == DefKind::AnonConst\n        } else {\n            false\n        };\n\n        if !is_anon_ct {\n            if satisfied_from_param_env(tcx, infcx, ct, param_env) {\n                return Ok(());\n            }\n            if ct.has_non_region_infer() {\n                return Err(NotConstEvaluatable::MentionsInfer);\n            } else if ct.has_non_region_param() {\n                return Err(NotConstEvaluatable::MentionsParam);\n            }\n        }\n\n        match unexpanded_ct.kind() {\n            ty::ConstKind::Expr(_) => {\n                // FIXME(generic_const_exprs): we have a `ConstKind::Expr` which is fully concrete, but\n                // currently it is not possible to evaluate `ConstKind::Expr` so we are unable to tell if it\n                // is evaluatable or not. For now we just ICE until this is implemented.\n                Err(NotConstEvaluatable::Error(tcx.sess.delay_span_bug(\n                    span,\n                    \"evaluating `ConstKind::Expr` is not currently supported\",\n                )))\n            }\n            ty::ConstKind::Unevaluated(uv) => {\n                let concrete = infcx.const_eval_resolve(param_env, uv, Some(span));\n                match concrete {\n                    Err(ErrorHandled::TooGeneric) => {\n                        Err(NotConstEvaluatable::Error(infcx.tcx.sess.delay_span_bug(\n                            span,\n                            \"Missing value for constant, but no error reported?\",\n                        )))\n                    }\n                    Err(ErrorHandled::Reported(e)) => Err(NotConstEvaluatable::Error(e)),\n                    Ok(_) => Ok(()),\n                }\n            }\n            _ => bug!(\"unexpected constkind in `is_const_evalautable: {unexpanded_ct:?}`\"),\n        }\n    } else {\n        let uv = match unexpanded_ct.kind() {\n            ty::ConstKind::Unevaluated(uv) => uv,\n            ty::ConstKind::Expr(_) => {\n                bug!(\"`ConstKind::Expr` without `feature(generic_const_exprs)` enabled\")\n            }\n            _ => bug!(\"unexpected constkind in `is_const_evalautable: {unexpanded_ct:?}`\"),\n        };\n\n        // FIXME: We should only try to evaluate a given constant here if it is fully concrete\n        // as we don't want to allow things like `[u8; std::mem::size_of::<*mut T>()]`.\n        //\n        // We previously did not check this, so we only emit a future compat warning if\n        // const evaluation succeeds and the given constant is still polymorphic for now\n        // and hopefully soon change this to an error.\n        //\n        // See #74595 for more details about this.\n        let concrete = infcx.const_eval_resolve(param_env, uv, Some(span));\n        match concrete {\n            // If we're evaluating a generic foreign constant, under a nightly compiler while\n            // the current crate does not enable `feature(generic_const_exprs)`, abort\n            // compilation with a useful error.\n            Err(_)\n                if tcx.sess.is_nightly_build()\n                    && satisfied_from_param_env(\n                        tcx,\n                        infcx,\n                        tcx.expand_abstract_consts(unexpanded_ct),\n                        param_env,\n                    ) =>\n            {\n                tcx.sess\n                    .struct_span_fatal(\n                        // Slightly better span than just using `span` alone\n                        if span == rustc_span::DUMMY_SP { tcx.def_span(uv.def.did) } else { span },\n                        \"failed to evaluate generic const expression\",\n                    )\n                    .note(\"the crate this constant originates from uses `#![feature(generic_const_exprs)]`\")\n                    .span_suggestion_verbose(\n                        rustc_span::DUMMY_SP,\n                        \"consider enabling this feature\",\n                        \"#![feature(generic_const_exprs)]\\n\",\n                        rustc_errors::Applicability::MaybeIncorrect,\n                    )\n                    .emit()\n            }\n\n            Err(ErrorHandled::TooGeneric) => {\n                let err = if uv.has_non_region_infer() {\n                    NotConstEvaluatable::MentionsInfer\n                } else if uv.has_non_region_param() {\n                    NotConstEvaluatable::MentionsParam\n                } else {\n                    let guar = infcx\n                        .tcx\n                        .sess\n                        .delay_span_bug(span, \"Missing value for constant, but no error reported?\");\n                    NotConstEvaluatable::Error(guar)\n                };\n\n                Err(err)\n            }\n            Err(ErrorHandled::Reported(e)) => Err(NotConstEvaluatable::Error(e)),\n            Ok(_) => Ok(()),\n        }\n    }\n}"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "satisfied_from_param_env visitor performs eq on both const types and const values, exposing mismatch for abstract const subtrees involving unbound generic T",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "satisfied_from_param_env",
+              "file": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+              "content": "fn satisfied_from_param_env<'tcx>(\n    tcx: TyCtxt<'tcx>,\n    infcx: &InferCtxt<'tcx>,\n    ct: ty::Const<'tcx>,\n    param_env: ty::ParamEnv<'tcx>,\n) -> bool {\n    // Try to unify with each subtree in the AbstractConst to allow for\n    // `N + 1` being const evaluatable even if theres only a `ConstEvaluatable`\n    // predicate for `(N + 1) * 2`\n    struct Visitor<'a, 'tcx> {\n        ct: ty::Const<'tcx>,\n        param_env: ty::ParamEnv<'tcx>,\n\n        infcx: &'a InferCtxt<'tcx>,\n        single_match: Option<Result<ty::Const<'tcx>, ()>>,\n    }\n\n    impl<'a, 'tcx> TypeVisitor<'tcx> for Visitor<'a, 'tcx> {\n        type BreakTy = ();\n        fn visit_const(&mut self, c: ty::Const<'tcx>) -> ControlFlow<Self::BreakTy> {\n            debug!(\"is_const_evaluatable: candidate={:?}\", c);\n            if self.infcx.probe(|_| {\n                let ocx = ObligationCtxt::new_in_snapshot(self.infcx);\n                ocx.eq(&ObligationCause::dummy(), self.param_env, c.ty(), self.ct.ty()).is_ok()\n                    && ocx.eq(&ObligationCause::dummy(), self.param_env, c, self.ct).is_ok()\n                    && ocx.select_all_or_error().is_empty()\n            }) {\n                self.single_match = match self.single_match {\n                    None => Some(Ok(c)),\n                    Some(Ok(o)) if o == c => Some(Ok(c)),\n                    Some(_) => Some(Err(())),\n                };\n            }\n\n            if let ty::ConstKind::Expr(e) = c.kind() {\n                e.visit_with(self)\n            } else {\n                // FIXME(generic_const_exprs): This doesn't recurse into `<T as Trait<U>>::ASSOC`'s substs.\n                // This is currently unobservable as `<T as Trait<{ U + 1 }>>::ASSOC` creates an anon const\n                // with its own `ConstEvaluatable` bound in the param env which we will visit separately.\n                //\n                // If we start allowing directly writing `ConstKind::Expr` without an intermediate anon const\n                // this will be incorrect. It might be worth investigating making `predicates_of` elaborate\n                // all of the `ConstEvaluatable` bounds rather than having a visitor here.\n                ControlFlow::Continue(())\n            }\n        }\n    }\n\n    let mut single_match: Option<Result<ty::Const<'tcx>, ()>> = None;\n\n    for pred in param_env.caller_bounds() {\n        match pred.kind().skip_binder() {\n            ty::PredicateKind::ConstEvaluatable(ce) => {\n                let b_ct = tcx.expand_abstract_consts(ce);\n                let mut v = Visitor { ct, infcx, param_env, single_match };\n                let _ = b_ct.visit_with(&mut v);\n\n                single_match = v.single_match;\n            }\n            _ => {} // don't care\n        }\n    }\n\n    if let Some(Ok(c)) = single_match {\n        let ocx = ObligationCtxt::new_in_snapshot(infcx);\n        assert!(ocx.eq(&ObligationCause::dummy(), param_env, c.ty(), ct.ty()).is_ok());\n        assert!(ocx.eq(&ObligationCause::dummy(), param_env, c, ct).is_ok());\n        assert!(ocx.select_all_or_error().is_empty());\n        return true;\n    }\n\n    debug!(\"is_const_evaluatable: no\");\n    false\n}"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.99
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.86
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.98
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 372.205,
+    "stage_times_sec": {
+      "load_bug_context": 0.023,
+      "checkout": 1.471,
+      "load_or_build_graph": 33.455,
+      "symptom_vertices_locating": 315.05,
+      "dynamic_cig_discovering": 20.22,
+      "convert_results": 0.004
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 9,
+      "input_tokens": 183766,
+      "output_tokens": 1219,
+      "total_tokens": 184985,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 4.105,
+          "input_tokens": 15998,
+          "output_tokens": 130,
+          "total_tokens": 16128
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 3.242,
+          "input_tokens": 17329,
+          "output_tokens": 93,
+          "total_tokens": 17422
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 4.239,
+          "input_tokens": 18386,
+          "output_tokens": 86,
+          "total_tokens": 18472
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 3.5,
+          "input_tokens": 19517,
+          "output_tokens": 81,
+          "total_tokens": 19598
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 4.235,
+          "input_tokens": 20284,
+          "output_tokens": 107,
+          "total_tokens": 20391
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 6.589,
+          "input_tokens": 19257,
+          "output_tokens": 281,
+          "total_tokens": 19538
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 4.976,
+          "input_tokens": 21499,
+          "output_tokens": 147,
+          "total_tokens": 21646
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 4.564,
+          "input_tokens": 29253,
+          "output_tokens": 146,
+          "total_tokens": 29399
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 4.082,
+          "input_tokens": 22243,
+          "output_tokens": 148,
+          "total_tokens": 22391
+        }
+      ]
+    }
+  }
+}

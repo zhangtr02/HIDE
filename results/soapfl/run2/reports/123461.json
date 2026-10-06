@@ -1,0 +1,524 @@
+{
+  "bug_id": "123461",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-04-02",
+    "resolved": "1684a753dbca5d23b2e03568e6fbbb48eb72d0e6"
+  },
+  "final_top10": [
+    "compiler/rustc_const_eval/src/const_eval/valtrees.rs",
+    "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+    "compiler/rustc_hir_typeck/src/intrinsicck.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_middle/src/mir/interpret/queries.rs",
+    "compiler/rustc_ty_utils/src/consts.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_const_eval/src/transform/check_consts/check.rs",
+    "compiler/rustc_mir_transform/src/promote_consts.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Declares a local binding with type-only pattern `let _: ...;`, forcing rustc to type-check a type expression without constructing a runtime value.",
+        "Uses an array type `[_; N]` where the element type is inferred `_` and the length `N` must be a compile-time const expression.",
+        "Places `unsafe { std::mem::transmute(...) }` inside the array-length position, exercising const-evaluation checks on a non-const, unsafe expression.",
+        "Calls `std::mem::transmute` without explicit source or destination types, requiring heavy type inference from surrounding context.",
+        "Provides a closure `|o_b: Option<_>| {}` as the transmute source, exercising closure type inference and anonymous function-item typing.",
+        "Uses `Option<_>` inside the closure parameter, introducing nested placeholder inference in a function signature.",
+        "Forces rustc to reject or diagnose using a function/closure-derived value as an array length, stressing const-generic-like array-size validation.",
+        "Exercises compiler interaction between unsafe operations, type placeholders `_`, closure inference, and array length constant requirements."
+      ],
+      "summary": "The reproducer is a type-only `let` statement whose array length expression is an unsafe `transmute` of a closure taking `Option<_>`. It combines placeholder type inference, closure typing, and `transmute` inference in a context that requires a compile-time constant. This stresses rustc’s diagnostics and internal handling of invalid const array lengths built from non-const, inferred, unsafe expressions."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on an invalid array-length const expression being built from a highly underconstrained, unsafe, inferred expression: `unsafe { std::mem::transmute(|o_b: Option<_>| {}) }`. The reproducer combines several stressors at once: array length requires CTFE/type-level constant evaluation, while the expression itself is non-const, uses `transmute`, depends on closure typing, and contains nested placeholder inference (`Option<_>` and transmute source/destination `_`). The query stack shows the ICE happens while processing the promoted/const path for `main::{constant#0}` and later during `eval_to_valtree`, meaning the compiler incorrectly allowed or attempted to normalize/type-check this malformed expression as a type-level constant instead of cleanly rejecting it earlier. The common pattern is a compiler path that mixes type inference for closures and transmute with const-eval of array lengths, likely leaving an unconstrained or erroneous type/const in an unexpected state that later code assumes is fully resolved. This suggests a missing validation/error propagation in constant checking or valtree conversion for array lengths involving inference variables and non-const unsafe expressions.",
+      "possible_causes": [
+        "A defect in array-length constant validation where rustc proceeds into const-eval/valtree generation for an expression that is not const-evaluable and still contains inference variables or unresolved types.",
+        "A bug in type checking of `transmute` with inferred source/destination types inside a const-required context, causing an ambiguous or error type to escape instead of emitting a normal diagnostic.",
+        "Improper handling of closure signature inference with nested placeholders (`Option<_>`) when the closure is used as the operand of `transmute`, leaving the constant body in an inconsistent typed state.",
+        "Missing early rejection or error recovery in the `main::{constant#0}` pipeline, so later MIR const qualification/promotion/CTFE code assumes a well-typed constant and panics on invalid MIR or unresolved types.",
+        "A defect in `eval_to_valtree` or its callers when converting malformed type-level constants for array sizes, especially if the constant originated from an unsafe cast of a function/closure value.",
+        "Insufficient guarding around error-tainted constants in match-check/MIR building/const promotion, allowing an `ErrorGuaranteed` situation to continue into internal compiler code paths that expect successful type resolution."
+      ],
+      "evidence": [
+        "The array length position `[_; N]` requires a compile-time constant, but the provided `N` is `unsafe { std::mem::transmute(|o_b: Option<_>| {}) }`, which is non-const and semantically invalid for array size evaluation.",
+        "The reproducer uses multiple placeholder `_` types and an inferred closure parameter type `Option<_>`, making type inference underconstrained exactly where const evaluation expects a fully resolved value/type.",
+        "The stack/query sequence reaches `mir_const_qualif`, `mir_promoted`, `mir_for_ctfe`, `eval_to_allocation_raw`, and `eval_to_valtree`, showing rustc advanced into constant-evaluation machinery instead of stopping with a front-end error.",
+        "The panic is associated with `main::{constant#0}`, indicating the compiler synthesized/processed the array length as a constant and failed internally while type-checking/const-checking that constant.",
+        "The test behavior explicitly stresses the interaction of unsafe operations, closure inference, transmute inference, and array-size validation, matching the observed ICE in const/type evaluation code paths.",
+        "A normal compiler response should be a user-facing error about non-constant or invalid array length / invalid transmute typing; the ICE implies defective error handling or an unchecked assumption in production compiler code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1765,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/valtrees.rs",
+        "reason": "Most suspicious because the query stack ends at `eval_to_valtree` while evaluating the array-length anonymous constant. This reproducer feeds an invalid, error-tainted, inference-containing const into type-level constant conversion, so a missing guard or bad assumption in valtree construction is a prime ICE source."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+        "reason": "Directly involved in the `eval_to_allocation_raw` / CTFE query path seen in the stack. If rustc should have stopped on a non-const, ill-typed expression but instead continued into evaluation, the bug may be in how eval queries propagate `ErrorHandled`/tainted constants or invoke CTFE on malformed anon consts."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/intrinsicck.rs",
+        "reason": "`std::mem::transmute` with fully inferred source/destination types and a closure operand is central to the reproducer. This file specifically validates transmutes and unresolved inference in transmute operands; a failure to reject or correctly error on underconstrained transmute types could let an invalid constant body proceed downstream."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "The closure `|o_b: Option<_>| {}` introduces nested placeholder inference in a highly constrained context. If closure signature inference leaves unresolved or erroneous types in the anonymous const body, later const-eval machinery could ICE instead of seeing a clean type error."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "Array lengths require const-evaluatability checks. This file decides whether constants mentioning inference variables or otherwise malformed inputs are accepted, rejected, or sent onward for evaluation, making it plausible that an invalid anon const was incorrectly treated as evaluatable."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/interpret/queries.rs",
+        "reason": "This is the middle-layer wrapper around const-eval queries and explicitly rejects unsupported inputs such as inference-containing constants. The reproducer strongly suggests an inference-containing anonymous const escaped that rejection and reached CTFE anyway."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This file builds and validates abstract constants from THIR/anonymous const expressions. Since the problematic code is an array-length anon const with unsafe transmute and inference holes, a bug here could misclassify or inadequately reject the expression before later const-eval stages."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "The ICE is on `main::{constant#0}`, so anonymous-const typing is relevant. If the anon const’s type in the array-length context is computed inconsistently or with insufficient validation, downstream typeck/CTFE could observe an impossible state."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/check_consts/check.rs",
+        "reason": "The query stack passes through `mir_const_qualif` and const checking for the anonymous constant. This file enforces const legality on MIR bodies, so a missed rejection of unsafe/non-const operations in this malformed body could explain why evaluation continued into internal assumptions."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/promote_consts.rs",
+        "reason": "The stack includes `mir_promoted`, and the reproducer is processed as `main::{constant#0}` through promotion/const MIR pipelines. If promotion or its error-skipping logic mishandles invalid anonymous const MIR with unresolved types, it could contribute to the later ICE."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 351.99,
+    "stage_times_sec": {
+      "checkout": 1.09,
+      "load_bug_context": 0.164,
+      "test_behavior_analysis": 6.826,
+      "test_failure_analysis": 14.409,
+      "load_file_candidates": 180.292,
+      "search_suspicious_files": 149.209
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 57,
+      "input_tokens": 452252,
+      "output_tokens": 15830,
+      "total_tokens": 468082,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.826,
+          "input_tokens": 322,
+          "output_tokens": 312,
+          "total_tokens": 634
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.409,
+          "input_tokens": 2098,
+          "output_tokens": 742,
+          "total_tokens": 2840
+        },
+        {
+          "stage": "file_summary:compiler_rustc_data_structures_src_macros_rs",
+          "latency_sec": 4.314,
+          "input_tokens": 505,
+          "output_tokens": 213,
+          "total_tokens": 718
+        },
+        {
+          "stage": "file_summary:compiler_rustc_data_structures_src_tiny_list_rs",
+          "latency_sec": 6.496,
+          "input_tokens": 841,
+          "output_tokens": 220,
+          "total_tokens": 1061
+        },
+        {
+          "stage": "file_summary:compiler_rustc_data_structures_src_tiny_list_rs_repair",
+          "latency_sec": 4.233,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_data_structures_src_tiny_list_tests_rs",
+          "latency_sec": 5.354,
+          "input_tokens": 1291,
+          "output_tokens": 220,
+          "total_tokens": 1511
+        },
+        {
+          "stage": "file_summary:compiler_rustc_data_structures_src_tiny_list_tests_rs_repair",
+          "latency_sec": 4.311,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_data_structures_src_vec_linked_list_rs",
+          "latency_sec": 6.433,
+          "input_tokens": 687,
+          "output_tokens": 220,
+          "total_tokens": 907
+        },
+        {
+          "stage": "file_summary:compiler_rustc_data_structures_src_vec_linked_list_rs_repair",
+          "latency_sec": 3.332,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_expand_src_mut_visit_tests_rs",
+          "latency_sec": 6.343,
+          "input_tokens": 940,
+          "output_tokens": 220,
+          "total_tokens": 1160
+        },
+        {
+          "stage": "file_summary:compiler_rustc_expand_src_mut_visit_tests_rs_repair",
+          "latency_sec": 3.497,
+          "input_tokens": 255,
+          "output_tokens": 183,
+          "total_tokens": 438
+        },
+        {
+          "stage": "file_summary:compiler_rustc_expand_src_parse_tests_rs",
+          "latency_sec": 5.375,
+          "input_tokens": 1295,
+          "output_tokens": 220,
+          "total_tokens": 1515
+        },
+        {
+          "stage": "file_summary:compiler_rustc_expand_src_parse_tests_rs_repair",
+          "latency_sec": 5.565,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_expand_src_tests_rs",
+          "latency_sec": 5.074,
+          "input_tokens": 1410,
+          "output_tokens": 220,
+          "total_tokens": 1630
+        },
+        {
+          "stage": "file_summary:compiler_rustc_expand_src_tests_rs_repair",
+          "latency_sec": 3.679,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_expand_src_tokenstream_tests_rs",
+          "latency_sec": 5.377,
+          "input_tokens": 1211,
+          "output_tokens": 220,
+          "total_tokens": 1431
+        },
+        {
+          "stage": "file_summary:compiler_rustc_expand_src_tokenstream_tests_rs_repair",
+          "latency_sec": 3.135,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_typeck_src_mem_categorization_rs",
+          "latency_sec": 6.0,
+          "input_tokens": 1423,
+          "output_tokens": 220,
+          "total_tokens": 1643
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_typeck_src_mem_categorization_rs_repair",
+          "latency_sec": 3.394,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_typeck_src_method_prelude2021_rs",
+          "latency_sec": 4.937,
+          "input_tokens": 1305,
+          "output_tokens": 220,
+          "total_tokens": 1525
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_typeck_src_method_prelude2021_rs_repair",
+          "latency_sec": 4.002,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_lint_src_array_into_iter_rs",
+          "latency_sec": 4.564,
+          "input_tokens": 1301,
+          "output_tokens": 220,
+          "total_tokens": 1521
+        },
+        {
+          "stage": "file_summary:compiler_rustc_lint_src_array_into_iter_rs_repair",
+          "latency_sec": 3.809,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_traits_solve_inspect_rs",
+          "latency_sec": 4.97,
+          "input_tokens": 1354,
+          "output_tokens": 220,
+          "total_tokens": 1574
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_traits_solve_inspect_rs_repair",
+          "latency_sec": 4.379,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_traits_solve_inspect_format_rs",
+          "latency_sec": 5.333,
+          "input_tokens": 1355,
+          "output_tokens": 220,
+          "total_tokens": 1575
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_traits_solve_inspect_format_rs_repair",
+          "latency_sec": 3.189,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_check_unsafety_rs",
+          "latency_sec": 4.674,
+          "input_tokens": 1303,
+          "output_tokens": 220,
+          "total_tokens": 1523
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_check_unsafety_rs_repair",
+          "latency_sec": 4.748,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_uninhabited_enum_branching_rs",
+          "latency_sec": 4.072,
+          "input_tokens": 1347,
+          "output_tokens": 220,
+          "total_tokens": 1567
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_uninhabited_enum_branching_rs_repair",
+          "latency_sec": 3.397,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_resolve_src_diagnostics_tests_rs",
+          "latency_sec": 3.865,
+          "input_tokens": 760,
+          "output_tokens": 220,
+          "total_tokens": 980
+        },
+        {
+          "stage": "file_summary:compiler_rustc_resolve_src_diagnostics_tests_rs_repair",
+          "latency_sec": 3.924,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_symbol_mangling_src_typeid_rs",
+          "latency_sec": 5.683,
+          "input_tokens": 1145,
+          "output_tokens": 220,
+          "total_tokens": 1365
+        },
+        {
+          "stage": "file_summary:compiler_rustc_symbol_mangling_src_typeid_rs_repair",
+          "latency_sec": 8.134,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_symbol_mangling_src_typeid_typeid_itanium_cxx_abi_rs",
+          "latency_sec": 3.969,
+          "input_tokens": 1475,
+          "output_tokens": 220,
+          "total_tokens": 1695
+        },
+        {
+          "stage": "file_summary:compiler_rustc_symbol_mangling_src_typeid_typeid_itanium_cxx_abi_rs_repair",
+          "latency_sec": 3.814,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_eval_ctxt_commit_if_ok_rs",
+          "latency_sec": 4.733,
+          "input_tokens": 665,
+          "output_tokens": 220,
+          "total_tokens": 885
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_eval_ctxt_commit_if_ok_rs_repair",
+          "latency_sec": 2.813,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_type_ir_src_new_rs",
+          "latency_sec": 5.113,
+          "input_tokens": 381,
+          "output_tokens": 220,
+          "total_tokens": 601
+        },
+        {
+          "stage": "file_summary:compiler_rustc_type_ir_src_new_rs_repair",
+          "latency_sec": 4.109,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 11.336,
+          "input_tokens": 27853,
+          "output_tokens": 465,
+          "total_tokens": 28318
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.631,
+          "input_tokens": 27720,
+          "output_tokens": 300,
+          "total_tokens": 28020
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.922,
+          "input_tokens": 27344,
+          "output_tokens": 333,
+          "total_tokens": 27677
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.571,
+          "input_tokens": 27513,
+          "output_tokens": 391,
+          "total_tokens": 27904
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.725,
+          "input_tokens": 27562,
+          "output_tokens": 327,
+          "total_tokens": 27889
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.585,
+          "input_tokens": 27893,
+          "output_tokens": 410,
+          "total_tokens": 28303
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.003,
+          "input_tokens": 27695,
+          "output_tokens": 356,
+          "total_tokens": 28051
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.555,
+          "input_tokens": 27683,
+          "output_tokens": 341,
+          "total_tokens": 28024
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.355,
+          "input_tokens": 27749,
+          "output_tokens": 365,
+          "total_tokens": 28114
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.388,
+          "input_tokens": 27606,
+          "output_tokens": 361,
+          "total_tokens": 27967
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.342,
+          "input_tokens": 27893,
+          "output_tokens": 303,
+          "total_tokens": 28196
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.417,
+          "input_tokens": 27729,
+          "output_tokens": 362,
+          "total_tokens": 28091
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.5,
+          "input_tokens": 27982,
+          "output_tokens": 385,
+          "total_tokens": 28367
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.857,
+          "input_tokens": 27721,
+          "output_tokens": 421,
+          "total_tokens": 28142
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 9.869,
+          "input_tokens": 20600,
+          "output_tokens": 385,
+          "total_tokens": 20985
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 15.123,
+          "input_tokens": 14450,
+          "output_tokens": 750,
+          "total_tokens": 15200
+        }
+      ]
+    }
+  }
+}

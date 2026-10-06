@@ -1,0 +1,250 @@
+{
+  "bug_id": "117602",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-04",
+    "resolved": "1bb6553b967b69eed9ed8147e78b4f65cfc48e11"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_middle/src/ty/trait_def.rs",
+    "compiler/rustc_hir_analysis/src/astconv/object_safety.rs",
+    "compiler/rustc_middle/src/ty/mod.rs",
+    "compiler/rustc_middle/src/traits/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `SomethingSomething: Send`, forcing all trait-object implementors to be `Send` and making `Box<dyn SomethingSomething>` a sendable field constraint.",
+        "Declares generic `Wrapper<T>` combining a trait object field with an unconstrained generic field, so auto-trait derivation depends on both stored members.",
+        "Introduces trait `HasSend` with a generic associated type `IsSend<T: Send>: Send`, exercising GAT syntax plus bounds on both the parameter and resulting associated type.",
+        "Implements `HasSend` for `Wrapper<T>` using `type IsSend<S: Send> = Wrapper<S>`, mapping the GAT to a concrete generic struct instantiation.",
+        "This implementation relies on the compiler proving `Wrapper<S>: Send` from field analysis: `S: Send` and `Box<dyn SomethingSomething>: Send`.",
+        "The impl’s outer generic `T` is unused in the associated type definition, exercising normalization and well-formedness checking across unrelated impl generics.",
+        "The code is compile-only; `main` is empty, so the reproducer targets trait solving, GAT bound checking, and auto-trait inference rather than runtime behavior.",
+        "Using nightly pins compiler behavior around unstable or recently changed trait-system internals, helping expose a rustc regression in associated-type bound validation."
+      ],
+      "summary": "The reproducer is a minimal compile-time test for trait-system correctness. It defines a sendable trait object, wraps it in a generic struct, and uses a generic associated type requiring both `S: Send` and the resulting type to be `Send`. The impl resolves that GAT to `Wrapper<S>`, forcing rustc to infer `Send` through struct fields and validate GAT bounds inside an impl with an otherwise irrelevant generic parameter `T`. This stresses GAT checking, auto-trait derivation, and trait solver behavior on nightly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on trait solving for a generic associated type whose definition must satisfy an explicit `: Send` bound. The reproducer constructs `Wrapper<S>` from two fields: `other: S` and `something: Box<dyn SomethingSomething>`. Since `SomethingSomething: Send`, the trait object `dyn SomethingSomething` should carry `Send`, so `Box<dyn SomethingSomething>` should also be `Send`. Therefore, under `S: Send`, `Wrapper<S>` should satisfy the required `Send` bound. Instead, rustc reports that `dyn SomethingSomething` is not `Send`, which indicates the compiler is losing or failing to propagate the supertrait `Send` when forming or checking the trait object inside the associated type definition. The common theme across the reproducer behavior, diagnostics, and type structure is incorrect interaction between GAT bound checking, auto-trait evaluation, and trait-object/supertrait elaboration. The impl also includes an unrelated outer generic parameter `T`, which may trigger a bug in normalization or well-formedness checking of the associated type under the impl’s parameter environment.",
+      "possible_causes": [
+        "A defect in trait-object lowering/elaboration where `dyn SomethingSomething` does not inherit the supertrait auto-trait `Send` from `SomethingSomething: Send` during type checking.",
+        "A bug in GAT associated-type bound validation causing rustc to check `type IsSend<S> = Wrapper<S>` under an incomplete or incorrect parameter environment, dropping implied bounds needed to prove `Box<dyn SomethingSomething>: Send`.",
+        "An error in auto-trait evaluation for structs containing trait-object fields, specifically failing to recognize `Box<dyn TraitWithSendSupertrait>` as `Send` when verifying the associated type’s `: Send` requirement.",
+        "A normalization or well-formedness bug in impl checking where the outer impl generic `T` interferes with the associated type definition `Wrapper<S>`, leading rustc to evaluate trait obligations with the wrong generic substitutions or erased implied bounds.",
+        "A regression in the new trait solver / obligation generation path for generic associated types, producing a spurious E0277 by treating `dyn SomethingSomething` as plain `dyn Trait` instead of `dyn Trait + Send` derived from the trait’s supertraits."
+      ],
+      "evidence": [
+        "The diagnostic directly claims `(dyn SomethingSomething + 'static)` does not implement `Send`, even though the trait is declared as `trait SomethingSomething: Send {}`.",
+        "`Wrapper<S>` should be `Send` if both fields are `Send`; `other: S` is constrained by `S: Send`, and `something: Box<dyn SomethingSomething>` should be sendable via the supertrait bound.",
+        "The failure occurs at the associated type definition `type IsSend<S: Send> = Wrapper<S>;`, showing the bug is in compiler validation of the GAT result bound `: Send`, not in runtime code.",
+        "The reproducer specifically stresses GAT checking plus auto-trait inference, and `main` is empty, so the observed issue is isolated to compile-time trait obligation solving.",
+        "The outer impl parameter `T` is unused in the associated type body, matching a pattern where unrelated impl generics can expose normalization or parameter-environment bugs in compiler trait checking.",
+        "The notes in the error trace show the failed proof path goes through `Box<dyn SomethingSomething>` to `Wrapper<S>`, pinpointing trait-object/auto-trait reasoning as the source of the incorrect rejection."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1702,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The error is emitted while validating the associated type definition `type IsSend<S: Send> = Wrapper<S>;` against the trait-declared bound `: Send`. That is classic HIR/type-level well-formedness checking territory, and this file is responsible for normalizing associated types and registering WF obligations for item signatures and impl items. A bug here could easily cause the GAT result to be checked under an incomplete parameter environment, losing the implied `SomethingSomething: Send` information needed to prove `Box<dyn SomethingSomething>: Send`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+        "reason": "This reproducer specifically stresses generic associated types and associated-type bounds. This file collects and remaps associated type/GAT bounds from the trait into the associated item’s own generic context. If that remapping is wrong, the `type IsSend<T: Send>: Send;` requirement may be mis-expressed for the impl item, leading to an incorrect obligation where `Wrapper<S>` is checked without the right inherited/implied bounds."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Once the associated type value `Wrapper<S>` is formed, rustc must generate and prove WF obligations for it, including the `: Send` requirement. This file is the core WF-obligation generator in trait selection. A defect here could produce the spurious `dyn SomethingSomething` not `Send` obligation by failing to elaborate supertraits or by generating obligations under the wrong environment for the impl-defined GAT."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "The observed failure is an E0277 from trait proving: rustc tries to confirm whether `Wrapper<S>: Send` holds and concludes that `dyn SomethingSomething` is not `Send`. Confirmation is where candidate selection results are unified and nested obligations are produced. If supertrait-derived auto-trait information for the trait object is dropped during confirmation/normalization, this exact symptom can appear."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+        "reason": "The bug may lie earlier in trait solving, when rustc assembles candidates for `Send` on `Wrapper<S>` and its fields. Since the error specifically treats `dyn SomethingSomething` as lacking `Send` despite the supertrait, candidate assembly for trait-object/auto-trait obligations is a plausible source of regression, especially on nightly trait-solver paths."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "This file computes generic predicates and injects implicit trait-related predicates. If the impl or associated type’s predicate environment is missing a needed inherited predicate from the trait declaration or trait self-bounds, the associated type bound check could run with incomplete information and reject `Wrapper<S>` incorrectly."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/trait_def.rs",
+        "reason": "The root symptom is that `dyn SomethingSomething` is treated as if it did not inherit `Send` from `trait SomethingSomething: Send`. Trait metadata and supertrait-related semantic flags live here. If trait definition metadata or traversal of supertraits is wrong, trait-object formation and later auto-trait reasoning can fail in exactly this way."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/object_safety.rs",
+        "reason": "Although this is not primarily an object-safety bug, the reproducer depends on lowering `dyn SomethingSomething` correctly with its erased existential bounds. This file handles trait-object lowering and separates trait/object bounds. A bug here could produce a trait object missing the implied `Send` auto-trait from the supertrait, which matches the diagnostic."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/mod.rs",
+        "reason": "If the issue is in the internal representation or query plumbing for dyn traits and predicates rather than in a single checking pass, this top-level type-system module is a plausible location. The failure suggests a mismatch in how the compiler represents or queries trait-object existential predicates and implied bounds during GAT validation."
+      },
+      {
+        "path": "compiler/rustc_middle/src/traits/mod.rs",
+        "reason": "The error path is fundamentally about obligation construction and evaluation for `Send`. This module defines the common trait-obligation data model and cause machinery shared across selection and WF checking. If obligation causes or derived obligations for the associated type bound are built incorrectly, later trait solving may see the wrong predicate set and emit the observed E0277."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 161.665,
+    "stage_times_sec": {
+      "checkout": 5.252,
+      "load_bug_context": 0.131,
+      "test_behavior_analysis": 7.761,
+      "test_failure_analysis": 11.509,
+      "load_file_candidates": 0.088,
+      "search_suspicious_files": 136.924
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 399261,
+      "output_tokens": 7467,
+      "total_tokens": 406728,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.761,
+          "input_tokens": 399,
+          "output_tokens": 387,
+          "total_tokens": 786
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.509,
+          "input_tokens": 1325,
+          "output_tokens": 713,
+          "total_tokens": 2038
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 13.331,
+          "input_tokens": 26741,
+          "output_tokens": 362,
+          "total_tokens": 27103
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.816,
+          "input_tokens": 26971,
+          "output_tokens": 365,
+          "total_tokens": 27336
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.66,
+          "input_tokens": 26506,
+          "output_tokens": 330,
+          "total_tokens": 26836
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.119,
+          "input_tokens": 26779,
+          "output_tokens": 342,
+          "total_tokens": 27121
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.897,
+          "input_tokens": 26709,
+          "output_tokens": 361,
+          "total_tokens": 27070
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 6.994,
+          "input_tokens": 27127,
+          "output_tokens": 387,
+          "total_tokens": 27514
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.788,
+          "input_tokens": 26923,
+          "output_tokens": 404,
+          "total_tokens": 27327
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.781,
+          "input_tokens": 26913,
+          "output_tokens": 343,
+          "total_tokens": 27256
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.064,
+          "input_tokens": 26923,
+          "output_tokens": 385,
+          "total_tokens": 27308
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.732,
+          "input_tokens": 26695,
+          "output_tokens": 365,
+          "total_tokens": 27060
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.527,
+          "input_tokens": 27081,
+          "output_tokens": 378,
+          "total_tokens": 27459
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.762,
+          "input_tokens": 26864,
+          "output_tokens": 360,
+          "total_tokens": 27224
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.113,
+          "input_tokens": 27153,
+          "output_tokens": 280,
+          "total_tokens": 27433
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.43,
+          "input_tokens": 26988,
+          "output_tokens": 405,
+          "total_tokens": 27393
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.457,
+          "input_tokens": 6681,
+          "output_tokens": 353,
+          "total_tokens": 7034
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 15.423,
+          "input_tokens": 14483,
+          "output_tokens": 947,
+          "total_tokens": 15430
+        }
+      ]
+    }
+  }
+}

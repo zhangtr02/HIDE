@@ -1,0 +1,265 @@
+{
+  "bug_id": "98821",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-07-03",
+    "resolved": "f2d93935ffba3ab9d7ccb5300771a2d29b4c8bf3"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/inline.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_mir_transform/src/inline.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_mir_transform/src/inline.rs",
+        "rank": 1
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/98821.json",
+    "graph_cache_hit": false,
+    "graph_cache_build_mode": "skeleton",
+    "graph_cache_bug_id": "98821",
+    "graph_cache_checkout_commit": "f2d93935ffba3ab9d7ccb5300771a2d29b4c8bf3",
+    "initial_graph_node_count": 46067,
+    "initial_graph_edge_count": 46066,
+    "graph_node_count": 46067,
+    "graph_edge_count": 56159,
+    "lazy_loaded_edge_count": 10093,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FILE\", \"name\": \"inline.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"inline.rs\"}",
+      "{\"type\": \"CLASS\", \"name\": \"try_inlining\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"\"}",
+      "{\"type\": \"STRUCTURE\", \"name\": \"Inliner\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"struct Inliner<'tcx> {\\n    tcx: TyCtxt<'tcx>,\\n    param_env: ParamEnv<'tcx>,\\n    /// Caller codegen attributes.\\n    codegen_fn_attrs: &'tcx CodegenFnAttrs,\\n    /// Stack of inlined Instances.\\n    history: Vec<ty::Instance<'tcx>>,\\n    /// Indicates that the caller body has been modified.\\n    changed: bool,\\n}\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"try_inlining\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"fn try_inlining(\\n        &self,\\n        caller_body: &mut Body<'tcx>,\\n        callsite: &CallSite<'tcx>,\\n    ) -> Result<std::ops::Range<BasicBlock>, &'static str> {\\n        let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());\\n        self.check_codegen_attributes(callsite, callee_attrs)?;\\n        self.check_mir_is_available(caller_body, &callsite.callee)?;\\n        let callee_body = self.tcx.instance_mir(callsite.callee.def);\\n        self.check_mir_body(callsite, callee_body, callee_attrs)?;\\n\\n        if !self.tcx.consider_optimizing(|| {\\n            format!(\\\"Inline {:?} into {:?}\\\", callsite.callee, caller_body.source)\\n        }) {\\n            return Err(\\\"optimization fuel exhausted\\\");\\n        }\\n\\n        let Ok(callee_body) = callsite.callee.try_subst_mir_and_normalize_erasing_regions(\\n            self.tcx,\\n            self.param_env,\\n            callee_body.clone(),\\n        ) else {\\n            return Err(\\\"failed to normalize callee body\\\");\\n        };\\n\\n        // Check call signature compatibility.\\n        // Normally, this shouldn't be required, but trait normalization failure can create a\\n        // validation ICE.\\n        let terminator = caller_body[callsite.block].terminator.as_ref().unwrap();\\n        let TerminatorKind::Call { args, destination, .. } = &terminator.kind else { bug!() };\\n        let destination_ty = destination.ty(&caller_body.local_decls, self.tcx).ty;\\n        let output_type = callee_body.return_ty();\\n        if !equal_up_to_regions(self.tcx, self.param_env, output_type, destination_ty) {\\n            trace!(?output_type, ?destination_ty);\\n            return Err(\\\"failed to normalize return type\\\");\\n        }\\n        if callsite.fn_sig.abi() == Abi::RustCall {\\n            let mut args = args.into_iter();\\n            let _ = args.next(); // Skip `self` argument.\\n            let arg_tuple_ty = args.next().unwrap().ty(&caller_body.local_decls, self.tcx);\\n            assert!(args.next().is_none());\\n\\n            let ty::Tuple(arg_tuple_tys) = arg_tuple_ty.kind() else {\\n                bug!(\\\"Closure arguments are not passed as a tuple\\\");\\n            };\\n\\n            for (arg_ty, input) in arg_tuple_tys.iter().zip(callee_body.args_iter().skip(1)) {\\n                let input_type = callee_body.local_decls[input].ty;\\n                if !equal_up_to_regions(self.tcx, self.param_env, arg_ty, input_type) {\\n                    trace!(?arg_ty, ?input_type);\\n                    return Err(\\\"failed to normalize tuple argument type\\\");\\n                }\\n            }\\n        } else {\\n            for (arg, input) in args.iter().zip(callee_body.args_iter()) {\\n                let input_type = callee_body.local_decls[input].ty;\\n                let arg_ty = arg.ty(&caller_body.local_decls, self.tcx);\\n                if !equal_up_to_regions(self.tcx, self.param_env, arg_ty, input_type) {\\n                    trace!(?arg_ty, ?input_type);\\n                    return Err(\\\"failed to normalize argument type\\\");\\n                }\\n            }\\n        }\\n\\n        let old_blocks = caller_body.basic_blocks().next_index();\\n        self.inline_call(caller_body, &callsite, callee_body);\\n        let new_blocks = old_blocks..caller_body.basic_blocks().next_index();\\n\\n        Ok(new_blocks)\\n    }\"}",
+      "{\"type\": \"STRUCTURE\", \"name\": \"CallSite\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"struct CallSite<'tcx> {\\n    callee: Instance<'tcx>,\\n    fn_sig: ty::PolyFnSig<'tcx>,\\n    block: BasicBlock,\\n    target: Option<BasicBlock>,\\n    source_info: SourceInfo,\\n}\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_mir_transform/src/inline.rs"
+    ],
+    "found_modules": [
+      "compiler/rustc_mir_transform/src/inline.rs::CallSite",
+      "compiler/rustc_mir_transform/src/inline.rs::Inliner"
+    ],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Unchecked unwrap on second RustCall argument for tuple extraction",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "try_inlining",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "fn try_inlining(\n        &self,\n        caller_body: &mut Body<'tcx>,\n        callsite: &CallSite<'tcx>,\n    ) -> Result<std::ops::Range<BasicBlock>, &'static str> {\n        let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());\n        self.check_codegen_attributes(callsite, callee_attrs)?;\n        self.check_mir_is_available(caller_body, &callsite.callee)?;\n        let callee_body = self.tcx.instance_mir(callsite.callee.def);\n        self.check_mir_body(callsite, callee_body, callee_attrs)?;\n\n        if !self.tcx.consider_optimizing(|| {\n            format!(\"Inline {:?} into {:?}\", callsite.callee, caller_body.source)\n        }) {\n            return Err(\"optimization fuel exhausted\");\n        }\n\n        let Ok(callee_body) = callsite.callee.try_subst_mir_and_normalize_erasing_regions(\n            self.tcx,\n            self.param_env,\n            callee_body.clone(),\n        ) else {\n            return Err(\"failed to normalize callee body\");\n        };\n\n        // Check call signature compatibility.\n        // Normally, this shouldn't be required, but trait normalization failure can create a\n        // validation ICE.\n        let terminator = caller_body[callsite.block].terminator.as_ref().unwrap();\n        let TerminatorKind::Call { args, destination, .. } = &terminator.kind else { bug!() };\n        let destination_ty = destination.ty(&caller_body.local_decls, self.tcx).ty;\n        let output_type = callee_body.return_ty();\n        if !equal_up_to_regions(self.tcx, self.param_env, output_type, destination_ty) {\n            trace!(?output_type, ?destination_ty);\n            return Err(\"failed to normalize return type\");\n        }\n        if callsite.fn_sig.abi() == Abi::RustCall {\n            let mut args = args.into_iter();\n            let _ = args.next(); // Skip `self` argument.\n            let arg_tuple_ty = args.next().unwrap().ty(&caller_body.local_decls, self.tcx);\n            assert!(args.next().is_none());\n\n            let ty::Tuple(arg_tuple_tys) = arg_tuple_ty.kind() else {\n                bug!(\"Closure arguments are not passed as a tuple\");\n            };\n\n            for (arg_ty, input) in arg_tuple_tys.iter().zip(callee_body.args_iter().skip(1)) {\n                let input_type = callee_body.local_decls[input].ty;\n                if !equal_up_to_regions(self.tcx, self.param_env, arg_ty, input_type) {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize tuple argument type\");\n                }\n            }\n        } else {\n            for (arg, input) in args.iter().zip(callee_body.args_iter()) {\n                let input_type = callee_body.local_decls[input].ty;\n                let arg_ty = arg.ty(&caller_body.local_decls, self.tcx);\n                if !equal_up_to_regions(self.tcx, self.param_env, arg_ty, input_type) {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize argument type\");\n                }\n            }\n        }\n\n        let old_blocks = caller_body.basic_blocks().next_index();\n        self.inline_call(caller_body, &callsite, callee_body);\n        let new_blocks = old_blocks..caller_body.basic_blocks().next_index();\n\n        Ok(new_blocks)\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Incorrect assumption that every RustCall call has an initial `self` argument to skip",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "try_inlining",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "fn try_inlining(\n        &self,\n        caller_body: &mut Body<'tcx>,\n        callsite: &CallSite<'tcx>,\n    ) -> Result<std::ops::Range<BasicBlock>, &'static str> {\n        let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());\n        self.check_codegen_attributes(callsite, callee_attrs)?;\n        self.check_mir_is_available(caller_body, &callsite.callee)?;\n        let callee_body = self.tcx.instance_mir(callsite.callee.def);\n        self.check_mir_body(callsite, callee_body, callee_attrs)?;\n\n        if !self.tcx.consider_optimizing(|| {\n            format!(\"Inline {:?} into {:?}\", callsite.callee, caller_body.source)\n        }) {\n            return Err(\"optimization fuel exhausted\");\n        }\n\n        let Ok(callee_body) = callsite.callee.try_subst_mir_and_normalize_erasing_regions(\n            self.tcx,\n            self.param_env,\n            callee_body.clone(),\n        ) else {\n            return Err(\"failed to normalize callee body\");\n        };\n\n        // Check call signature compatibility.\n        // Normally, this shouldn't be required, but trait normalization failure can create a\n        // validation ICE.\n        let terminator = caller_body[callsite.block].terminator.as_ref().unwrap();\n        let TerminatorKind::Call { args, destination, .. } = &terminator.kind else { bug!() };\n        let destination_ty = destination.ty(&caller_body.local_decls, self.tcx).ty;\n        let output_type = callee_body.return_ty();\n        if !equal_up_to_regions(self.tcx, self.param_env, output_type, destination_ty) {\n            trace!(?output_type, ?destination_ty);\n            return Err(\"failed to normalize return type\");\n        }\n        if callsite.fn_sig.abi() == Abi::RustCall {\n            let mut args = args.into_iter();\n            let _ = args.next(); // Skip `self` argument.\n            let arg_tuple_ty = args.next().unwrap().ty(&caller_body.local_decls, self.tcx);\n            assert!(args.next().is_none());\n\n            let ty::Tuple(arg_tuple_tys) = arg_tuple_ty.kind() else {\n                bug!(\"Closure arguments are not passed as a tuple\");\n            };\n\n            for (arg_ty, input) in arg_tuple_tys.iter().zip(callee_body.args_iter().skip(1)) {\n                let input_type = callee_body.local_decls[input].ty;\n                if !equal_up_to_regions(self.tcx, self.param_env, arg_ty, input_type) {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize tuple argument type\");\n                }\n            }\n        } else {\n            for (arg, input) in args.iter().zip(callee_body.args_iter()) {\n                let input_type = callee_body.local_decls[input].ty;\n                let arg_ty = arg.ty(&caller_body.local_decls, self.tcx);\n                if !equal_up_to_regions(self.tcx, self.param_env, arg_ty, input_type) {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize argument type\");\n                }\n            }\n        }\n\n        let old_blocks = caller_body.basic_blocks().next_index();\n        self.inline_call(caller_body, &callsite, callee_body);\n        let new_blocks = old_blocks..caller_body.basic_blocks().next_index();\n\n        Ok(new_blocks)\n    }"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Generic `extern \\\"rust-call\\\"` function shape not matching closure-style argument handling",
+          "code_elements": [
+            {
+              "type": "STRUCTURE",
+              "name": "CallSite",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "struct CallSite<'tcx> {\n    callee: Instance<'tcx>,\n    fn_sig: ty::PolyFnSig<'tcx>,\n    block: BasicBlock,\n    target: Option<BasicBlock>,\n    source_info: SourceInfo,\n}"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Inlining path specifically triggers RustCall ABI signature validation under MIR opt level 3",
+          "code_elements": [
+            {
+              "type": "STRUCTURE",
+              "name": "Inliner",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "struct Inliner<'tcx> {\n    tcx: TyCtxt<'tcx>,\n    param_env: ParamEnv<'tcx>,\n    /// Caller codegen attributes.\n    codegen_fn_attrs: &'tcx CodegenFnAttrs,\n    /// Stack of inlined Instances.\n    history: Vec<ty::Instance<'tcx>>,\n    /// Indicates that the caller body has been modified.\n    changed: bool,\n}"
+            }
+          ]
+        },
+        {
+          "id": "E",
+          "name": "Missing defensive validation before tuple-argument access in `try_inlining`",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "inline.rs",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "inline.rs"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.995
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.97
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.975
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.94
+        },
+        {
+          "source": "E",
+          "target": "I",
+          "weight": 0.94
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 134.477,
+    "stage_times_sec": {
+      "load_bug_context": 0.012,
+      "checkout": 3.12,
+      "load_or_build_graph": 30.407,
+      "symptom_vertices_locating": 71.331,
+      "dynamic_cig_discovering": 28.078,
+      "convert_results": 0.047
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 12,
+      "input_tokens": 107298,
+      "output_tokens": 1458,
+      "total_tokens": 108756,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.527,
+          "input_tokens": 5925,
+          "output_tokens": 133,
+          "total_tokens": 6058
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.183,
+          "input_tokens": 5282,
+          "output_tokens": 17,
+          "total_tokens": 5299
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 3.369,
+          "input_tokens": 6131,
+          "output_tokens": 48,
+          "total_tokens": 6179
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.652,
+          "input_tokens": 6350,
+          "output_tokens": 50,
+          "total_tokens": 6400
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.495,
+          "input_tokens": 6414,
+          "output_tokens": 51,
+          "total_tokens": 6465
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 3.091,
+          "input_tokens": 7424,
+          "output_tokens": 83,
+          "total_tokens": 7507
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 4.717,
+          "input_tokens": 6417,
+          "output_tokens": 181,
+          "total_tokens": 6598
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 6.025,
+          "input_tokens": 18619,
+          "output_tokens": 180,
+          "total_tokens": 18799
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 5.048,
+          "input_tokens": 18625,
+          "output_tokens": 179,
+          "total_tokens": 18804
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.889,
+          "input_tokens": 7501,
+          "output_tokens": 178,
+          "total_tokens": 7679
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 4.484,
+          "input_tokens": 10176,
+          "output_tokens": 180,
+          "total_tokens": 10356
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 3.823,
+          "input_tokens": 8434,
+          "output_tokens": 178,
+          "total_tokens": 8612
+        }
+      ]
+    }
+  }
+}

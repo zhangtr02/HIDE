@@ -1,0 +1,243 @@
+{
+  "bug_id": "114597",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-08-07",
+    "resolved": "f3623871cfa0763c95ebd6ceafaa6dc2e44ca68f"
+  },
+  "final_top10": [
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_infer/src/infer/opaque_types/table.rs",
+    "compiler/rustc_hir_typeck/src/writeback.rs",
+    "compiler/rustc_middle/src/ty/erase_regions.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a lifetime-parameterized struct `A<'a>` holding a borrowed reference, exercising lifetime propagation through method receivers.",
+        "Implements an `async fn` method returning `impl Stream<Item = ()>`, combining opaque return types with async lowering to a hidden future.",
+        "The method captures `&self` inside the async state machine, so the compiler must track borrowed data across suspension points.",
+        "Builds an infinite stream with `futures::stream::repeat(())`, exercising trait-based stream combinators from the `futures` crate.",
+        "Uses `.map(|()| futures::stream::repeat(()))` to produce a stream of inner streams, involving closure type inference and nested opaque generic types.",
+        "Calls `.flatten_unordered(None)` to concurrently flatten nested streams, exercising complex associated-type resolution for `StreamExt` combinators.",
+        "The return type is an opaque stream built from layered combinators, stressing rustc’s normalization and hidden-type inference for `impl Trait`.",
+        "This nightly reproducer targets compiler behavior around async + `impl Stream` + nested stream combinators, likely exposing a type/lifetime inference or opaque-type bug."
+      ],
+      "summary": "The reproducer is minimal: an async method on a borrowed struct returns `impl Stream<Item=()>` created by chaining `repeat`, `map`, and `flatten_unordered`. It exercises async lowering, `impl Trait` opacity, lifetime capture of `&self`, nested stream combinators, and associated-type inference in `futures`. The bug likely appears in rustc’s handling of hidden types, normalization, or lifetimes for this async stream-returning method."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on an `async fn` method with a borrowed receiver returning `impl Stream`, where the body constructs a deeply nested stream-combinator type (`repeat -> map -> flatten_unordered`). The compiler reports `concrete type differs from previous defining opaque type use` even though the printed expected and got types are textually identical. This strongly suggests an internal mismatch in opaque type identity/hidden-type inference rather than a real user-level type mismatch. Common stressors here are: async lowering introduces a hidden future, the method captures `&self` with lifetime `'a`, the return position uses RPIT (`impl Stream`), and the combinator chain includes closure-generated and projection-heavy nested types. The identical printed types indicate rustc likely distinguishes two internally different instantiations of the same normalized type, possibly due to region-erasure, binder handling, or duplicated opaque type registration across async/body type checking. In short, the bug is most plausibly in compiler handling of opaque return types in async methods when normalization of complex stream combinators and captured lifetimes interact.",
+      "possible_causes": [
+        "Bug in rustc opaque type hidden-type inference for return-position `impl Trait` inside `async fn` methods, causing the same normalized stream type to be registered as conflicting hidden types.",
+        "Incorrect comparison/canonicalization of hidden types involving bound regions or late-bound lifetimes from `&self` captured by the async state machine, leading to a false mismatch.",
+        "Defect in async lowering/type checking interaction: the async method's generated future and the inner RPIT stream type may be defined/checked in multiple contexts, producing non-identical internal opaque definitions for an otherwise identical concrete type.",
+        "Normalization/projection bug when resolving complex `futures::StreamExt` combinator types (`map` + `flatten_unordered`), especially with closure types and associated types, causing duplicate but non-equal internal representations.",
+        "Issue in region/inference handling for nested opaque and closure-generated types, where lifetime capture from the method receiver leaks into hidden-type identity and triggers spurious `concrete type differs` diagnostics."
+      ],
+      "evidence": [
+        "The key diagnostic is `concrete type differs from previous defining opaque type use`, which is rustc's opaque-type consistency error rather than a trait-resolution or user-code type error.",
+        "The `expected` and `got` concrete types printed in the diagnostic are textually identical, indicating the mismatch is in internal compiler identity/equality handling, not an actual semantic difference visible in source.",
+        "The reproducer combines several known compiler-stressing features: `async fn`, RPIT (`impl Stream`), borrowed `&self`, nested stream combinators, closure inference, and associated-type-heavy normalization.",
+        "The method receiver `&self` on `A<'a>` means async lowering must preserve lifetimes through the generated state machine, which commonly interacts with opaque-type hidden-type inference.",
+        "`flatten_unordered(None)` over a mapped `repeat` stream creates a deeply nested combinator type from the `futures` crate, increasing reliance on normalization and projection machinery.",
+        "The bug reproduces during compilation before runtime and independent of the missing `main`; the E0601 is incidental, while the opaque-type error pinpoints the compiler subsystem likely at fault."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1649,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Most suspicious because the error is a classic opaque hidden-type consistency failure (`concrete type differs from previous defining opaque type use`) in return-position `impl Trait` inside an `async fn`. This file owns inference-time registration and unification of opaque hidden types, where duplicate-but-not-equal internal hidden types can arise."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Very likely involved because the reproducer mixes RPIT with `&self` lifetime capture through async lowering. This file rewrites and canonicalizes opaque hidden types after region inference, and a bug here could make two textually identical hidden types compare as different due to region handling."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "This file handles remapping generics and regions between the enclosing item and the opaque type. The reproducer stresses lifetime capture from the method receiver plus async/RPIT interaction, making generic-argument or region remapping for opaques a strong candidate."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "Type checking of function bodies, including replacing opaque return types with inference variables and handling coroutine/async setup, happens here. Since the bug appears during body type checking of an `async fn` method returning `impl Stream`, this is a plausible point where conflicting opaque definitions are introduced."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types/table.rs",
+        "reason": "If the same opaque key is being recorded twice with internally distinct hidden types across snapshots or nested inference contexts, the bug may live in the storage/rollback machinery for opaque declarations maintained by this file."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/writeback.rs",
+        "reason": "Writeback finalizes body-local typeck results, including opaque types and coroutine internals. A mismatch between two resolved forms of the same hidden type could surface here after inference resolution, especially for closure-heavy combinator types."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/erase_regions.rs",
+        "reason": "The printed expected and got types are textually identical, which strongly hints at a hidden distinction in regions/binders. Region erasure and anonymization are central to comparing opaque hidden types canonically, so a defect here is plausible."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Opaque hidden type inference with captured lifetimes relies on member constraints. Because the method captures `&self` and the bug likely involves lifetime-sensitive hidden-type identity, incorrect member-constraint handling could cause spurious opaque mismatches."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "This file resolves late-/early-bound lifetime structure and records captured lifetimes for opaque types. Async methods with borrowed receivers are exactly the sort of case where incorrect bound-var resolution could make equivalent hidden types appear distinct internally."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The returned stream type is built from projection-heavy `futures` combinators (`map` + `flatten_unordered`). If normalization yields two non-identical internal representations for the same apparent type, this normalization path could be the source of the false opaque-type conflict."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 166.888,
+    "stage_times_sec": {
+      "checkout": 2.507,
+      "load_bug_context": 0.114,
+      "test_behavior_analysis": 7.672,
+      "test_failure_analysis": 13.557,
+      "load_file_candidates": 0.15,
+      "search_suspicious_files": 142.886
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 385718,
+      "output_tokens": 6550,
+      "total_tokens": 392268,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.672,
+          "input_tokens": 417,
+          "output_tokens": 334,
+          "total_tokens": 751
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.557,
+          "input_tokens": 1454,
+          "output_tokens": 660,
+          "total_tokens": 2114
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.251,
+          "input_tokens": 26817,
+          "output_tokens": 409,
+          "total_tokens": 27226
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 10.087,
+          "input_tokens": 27047,
+          "output_tokens": 316,
+          "total_tokens": 27363
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.973,
+          "input_tokens": 26483,
+          "output_tokens": 309,
+          "total_tokens": 26792
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.397,
+          "input_tokens": 26954,
+          "output_tokens": 328,
+          "total_tokens": 27282
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.204,
+          "input_tokens": 26805,
+          "output_tokens": 359,
+          "total_tokens": 27164
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.941,
+          "input_tokens": 27179,
+          "output_tokens": 395,
+          "total_tokens": 27574
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.248,
+          "input_tokens": 26974,
+          "output_tokens": 315,
+          "total_tokens": 27289
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.035,
+          "input_tokens": 27016,
+          "output_tokens": 308,
+          "total_tokens": 27324
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.214,
+          "input_tokens": 26986,
+          "output_tokens": 297,
+          "total_tokens": 27283
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 11.458,
+          "input_tokens": 26768,
+          "output_tokens": 382,
+          "total_tokens": 27150
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 11.33,
+          "input_tokens": 27039,
+          "output_tokens": 420,
+          "total_tokens": 27459
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.567,
+          "input_tokens": 27054,
+          "output_tokens": 333,
+          "total_tokens": 27387
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.525,
+          "input_tokens": 27215,
+          "output_tokens": 299,
+          "total_tokens": 27514
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.864,
+          "input_tokens": 20553,
+          "output_tokens": 390,
+          "total_tokens": 20943
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.715,
+          "input_tokens": 12957,
+          "output_tokens": 696,
+          "total_tokens": 13653
+        }
+      ]
+    }
+  }
+}

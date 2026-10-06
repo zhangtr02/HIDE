@@ -1,0 +1,2882 @@
+{
+  "bug_id": "104312",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2021-04-26",
+    "resolved": "3709ae324c9daabbdabe048faa6fbedbeccf27ec"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/collect.rs",
+    "compiler/rustc_middle/src/ty/generics.rs",
+    "compiler/rustc_typeck/src/astconv/mod.rs",
+    "compiler/rustc_typeck/src/astconv/generics.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_ast_lowering/src/item.rs",
+    "compiler/rustc_typeck/src/collect/type_of.rs",
+    "compiler/rustc_typeck/src/check/wfcheck.rs",
+    "compiler/rustc_resolve/src/lib.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Declares a trait with const generics on nightly Rust, exercising the early const-generics feature gate and parser/type checker paths.",
+        "Uses two const generic parameters with the same identifier `M`, testing name resolution and duplicate generic parameter detection.",
+        "Gives the second const parameter a default value `= M`, referencing a previous generic parameter in a const-generic default.",
+        "Combines duplicate parameter naming with dependent default values, stressing generic parameter scope handling during trait definition.",
+        "Implements `Foo<2>` for `()`, relying on the defaulted second const argument during trait instantiation.",
+        "Exercises trait implementation matching for const-generic traits where some const arguments are omitted and inferred from defaults.",
+        "Checks compiler diagnostics around invalid generic parameter lists before code generation, since `main` itself is trivial."
+      ],
+      "summary": "The reproducer is a minimal const-generics trait definition on nightly. It intentionally declares two const generic parameters with the same name and makes the second default to the first, then implements the trait using only one const argument. This stresses parsing, generic-parameter scoping, duplicate-name validation, default const argument handling, and trait impl resolution for const-generic traits."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in compiler handling of invalid const-generic trait definitions, specifically during trait impl metadata/type collection rather than graceful diagnostic emission. The reproducer combines three stressors in one generic parameter list: unstable early const generics, duplicate const parameter names (`const M: u8, const M: u8`), and a default value on the second parameter that references `M`. The compiler does emit user-facing errors (E0403/E0658), but still later panics in the `impl_trait_ref` query while computing the implemented trait for `impl Foo<2> for () {}`. This strongly suggests that after duplicate-name and feature-gate errors are recorded, the compiler continues building or querying an inconsistent generic parameter environment for the trait/impl. The common pattern is a malformed generic parameter list leading to corrupted or ambiguous name resolution for const defaults, then an internal query assumes well-formed generics and crashes during `collect_mod_item_types` / type checking. The most likely defect is missing error recovery or validation in trait ref construction for impls of const-generic traits with duplicate generic parameter identifiers and dependent defaults.",
+      "possible_causes": [
+        "Bug in generic parameter collection/validation for const generics: duplicate const parameter names are diagnosed but still inserted into the generics scope, leaving an inconsistent parameter set later consumed by trait-ref computation.",
+        "Bug in resolution of const-generic default values: the default `= M` on the second duplicated parameter may resolve ambiguously or bind to the wrong `DefId`, causing malformed generic defaults to survive into later queries.",
+        "Missing bail-out/error propagation in `impl_trait_ref` or surrounding trait-impl lowering code: after earlier errors on the trait definition, rustc still attempts to compute the impl's trait reference as if the trait generics were well-formed.",
+        "Defect in AST/HIR lowering for duplicate generic params with defaults, especially for const params, where duplicate identifiers may overwrite each other in name maps or generic parameter indices.",
+        "Incorrect assumptions in trait impl matching/substitution for defaulted const arguments: `impl Foo<2>` may attempt to instantiate omitted const defaults from a broken trait generic list, triggering panic instead of producing only diagnostics.",
+        "Insufficient recovery in `collect_mod_item_types` / type collection for erroneous const-generic traits, allowing later queries to observe partially constructed predicates or trait refs."
+      ],
+      "evidence": [
+        "Query stack ends at `impl_trait_ref` while computing trait implemented by `impl Foo<2> for ()`, showing the crash happens when building the impl's trait reference rather than in codegen or borrow checking.",
+        "The reproducer's key malformed construct is `trait Foo<const M: u8, const M: u8 = M> {}`, which combines duplicate generic parameter names with a default expression referencing `M` in the same parameter list.",
+        "Compiler output includes E0403 and E0658, proving rustc already detected front-end issues but still proceeded far enough to ICE, indicating defective recovery after diagnostics.",
+        "Stack trace passes through `collect_mod_item_types` and `rustc_typeck::check_crate`, consistent with an internal inconsistency during item type collection/type checking of trait/impl generics.",
+        "`impl Foo<2> for () {}` relies on the defaulted second const argument, so trait-ref construction must consult the trait's generic defaults; this directly exercises the broken path if defaults or parameter indices are corrupted.",
+        "The behavior summary specifically stresses generic parameter scope handling, duplicate-name validation, default const argument handling, and trait impl resolution; all align with the observed panic site and query stack."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1258,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/collect.rs",
+        "reason": "Most suspicious because the ICE occurs during `collect_mod_item_types`, and the query stack specifically panics while computing `impl_trait_ref` for the impl. This file owns item type collection and the provider wiring for trait/impl metadata, so missing recovery after duplicate const-generic params or malformed defaults would naturally surface here."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/generics.rs",
+        "reason": "Highly relevant to duplicate const parameter handling and const-param defaults. The bug likely involves an inconsistent generic parameter environment surviving after diagnostics, and this file defines generic parameter metadata plus retrieval of const defaults (`const_param_default`), making it a prime place for bad assumptions about well-formed generics."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/astconv/mod.rs",
+        "reason": "Trait refs and generic argument substitution are lowered through AST/HIR-to-ty conversion here. `impl Foo<2>` relies on omitted const arguments being filled from defaults, so malformed trait generics with duplicate names could cause this layer to build an invalid trait ref instead of bailing out cleanly."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/astconv/generics.rs",
+        "reason": "Directly responsible for validating and constructing generic arguments for paths/trait refs, especially const generics. Since the reproducer stresses defaulted const args and omitted arguments in `impl Foo<2>`, this file is a strong suspect for mishandling erroneous generic definitions during substitution creation or argument checking."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "Duplicate generic parameter names and the default expression `= M` depend on correct name resolution and scoping inside generic parameter lists. If resolver records both `M` bindings or resolves the default ambiguously, later type collection could observe corrupted generic metadata and ICE."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "AST-to-HIR lowering of trait items and generics may be failing to recover correctly when duplicate const params with defaults are present. If lowering produces overlapping or overwritten HIR generic params, later `impl_trait_ref` computation could panic on inconsistent indices or defaults."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect/type_of.rs",
+        "reason": "This file participates in declared-type computation during collection and interacts with generic contexts before full checking. If the trait's lowered generic/default information is malformed, type computation for the trait or impl could propagate broken state into `impl_trait_ref`."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "Well-formedness checking often assumes previously collected generics are coherent. Since the compiler already emitted E0403/E0658 but continued, insufficient WF bailout around erroneous trait generics could contribute to querying `impl_trait_ref` after the item should have been considered unusable."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/lib.rs",
+        "reason": "As the central resolver orchestration module, it is a plausible source if duplicate generic parameter diagnostics are emitted but bad bindings remain installed in resolver outputs consumed by lowering/typeck. Less direct than `late.rs`, but still relevant to generic-scope corruption."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "This pass may be expected to reject or sanitize invalid generic parameter shapes before lowering. If duplicate const generic names with dependent defaults are only diagnosed but not structurally contained, downstream phases can crash; thus weak but plausible suspicion belongs here."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 1647.954,
+    "stage_times_sec": {
+      "checkout": 2.05,
+      "load_bug_context": 0.064,
+      "test_behavior_analysis": 5.362,
+      "test_failure_analysis": 14.025,
+      "load_file_candidates": 1530.758,
+      "search_suspicious_files": 95.695
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 394,
+      "input_tokens": 579330,
+      "output_tokens": 88246,
+      "total_tokens": 667576,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.362,
+          "input_tokens": 345,
+          "output_tokens": 243,
+          "total_tokens": 588
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.025,
+          "input_tokens": 2154,
+          "output_tokens": 735,
+          "total_tokens": 2889
+        },
+        {
+          "stage": "file_summary:compiler_rustc_builtin_macros_src_global_asm_rs",
+          "latency_sec": 5.707,
+          "input_tokens": 854,
+          "output_tokens": 220,
+          "total_tokens": 1074
+        },
+        {
+          "stage": "file_summary:compiler_rustc_builtin_macros_src_global_asm_rs_repair",
+          "latency_sec": 3.728,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_src_backend_rs",
+          "latency_sec": 4.552,
+          "input_tokens": 1282,
+          "output_tokens": 220,
+          "total_tokens": 1502
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_src_backend_rs_repair",
+          "latency_sec": 3.435,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_src_metadata_rs",
+          "latency_sec": 4.515,
+          "input_tokens": 1304,
+          "output_tokens": 220,
+          "total_tokens": 1524
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_src_metadata_rs_repair",
+          "latency_sec": 2.917,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_src_optimize_code_layout_rs",
+          "latency_sec": 4.658,
+          "input_tokens": 559,
+          "output_tokens": 220,
+          "total_tokens": 779
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_src_optimize_code_layout_rs_repair",
+          "latency_sec": 5.687,
+          "input_tokens": 255,
+          "output_tokens": 242,
+          "total_tokens": 497
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_src_optimize_stack2reg_rs",
+          "latency_sec": 4.341,
+          "input_tokens": 1278,
+          "output_tokens": 220,
+          "total_tokens": 1498
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_src_optimize_stack2reg_rs_repair",
+          "latency_sec": 4.086,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_llvm_src_metadata_rs",
+          "latency_sec": 4.109,
+          "input_tokens": 1283,
+          "output_tokens": 220,
+          "total_tokens": 1503
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_llvm_src_metadata_rs_repair",
+          "latency_sec": 3.602,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_data_structures_src_box_region_rs",
+          "latency_sec": 4.543,
+          "input_tokens": 1345,
+          "output_tokens": 220,
+          "total_tokens": 1565
+        },
+        {
+          "stage": "file_summary:compiler_rustc_data_structures_src_box_region_rs_repair",
+          "latency_sec": 3.536,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_metadata_src_dynamic_lib_rs",
+          "latency_sec": 4.778,
+          "input_tokens": 1280,
+          "output_tokens": 220,
+          "total_tokens": 1500
+        },
+        {
+          "stage": "file_summary:compiler_rustc_metadata_src_dynamic_lib_rs_repair",
+          "latency_sec": 2.758,
+          "input_tokens": 255,
+          "output_tokens": 192,
+          "total_tokens": 447
+        },
+        {
+          "stage": "file_summary:compiler_rustc_metadata_src_dynamic_lib_tests_rs",
+          "latency_sec": 3.357,
+          "input_tokens": 343,
+          "output_tokens": 177,
+          "total_tokens": 520
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_hir_exports_rs",
+          "latency_sec": 4.88,
+          "input_tokens": 533,
+          "output_tokens": 220,
+          "total_tokens": 753
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_hir_exports_rs_repair",
+          "latency_sec": 4.963,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_hir_map_blocks_rs",
+          "latency_sec": 8.545,
+          "input_tokens": 1447,
+          "output_tokens": 220,
+          "total_tokens": 1667
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_hir_map_blocks_rs_repair",
+          "latency_sec": 3.321,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_hir_map_collector_rs",
+          "latency_sec": 3.599,
+          "input_tokens": 1436,
+          "output_tokens": 220,
+          "total_tokens": 1656
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_hir_map_collector_rs_repair",
+          "latency_sec": 3.264,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ich_hcx_rs",
+          "latency_sec": 3.887,
+          "input_tokens": 1416,
+          "output_tokens": 220,
+          "total_tokens": 1636
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ich_hcx_rs_repair",
+          "latency_sec": 3.233,
+          "input_tokens": 255,
+          "output_tokens": 225,
+          "total_tokens": 480
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ich_impls_hir_rs",
+          "latency_sec": 4.443,
+          "input_tokens": 1403,
+          "output_tokens": 220,
+          "total_tokens": 1623
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ich_impls_hir_rs_repair",
+          "latency_sec": 2.868,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ich_impls_syntax_rs",
+          "latency_sec": 4.383,
+          "input_tokens": 1319,
+          "output_tokens": 220,
+          "total_tokens": 1539
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ich_impls_syntax_rs_repair",
+          "latency_sec": 3.467,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ich_impls_ty_rs",
+          "latency_sec": 5.682,
+          "input_tokens": 1413,
+          "output_tokens": 220,
+          "total_tokens": 1633
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ich_impls_ty_rs_repair",
+          "latency_sec": 3.48,
+          "input_tokens": 255,
+          "output_tokens": 203,
+          "total_tokens": 458
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ich_mod_rs",
+          "latency_sec": 4.5,
+          "input_tokens": 391,
+          "output_tokens": 220,
+          "total_tokens": 611
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ich_mod_rs_repair",
+          "latency_sec": 3.36,
+          "input_tokens": 255,
+          "output_tokens": 231,
+          "total_tokens": 486
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_middle_cstore_rs",
+          "latency_sec": 4.602,
+          "input_tokens": 1403,
+          "output_tokens": 220,
+          "total_tokens": 1623
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_middle_cstore_rs_repair",
+          "latency_sec": 3.32,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_mir_abstract_const_rs",
+          "latency_sec": 5.301,
+          "input_tokens": 538,
+          "output_tokens": 220,
+          "total_tokens": 758
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_mir_abstract_const_rs_repair",
+          "latency_sec": 3.386,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ty_outlives_rs",
+          "latency_sec": 4.741,
+          "input_tokens": 1320,
+          "output_tokens": 220,
+          "total_tokens": 1540
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ty_outlives_rs_repair",
+          "latency_sec": 3.429,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ty_query_mod_rs",
+          "latency_sec": 4.747,
+          "input_tokens": 1494,
+          "output_tokens": 220,
+          "total_tokens": 1714
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ty_query_mod_rs_repair",
+          "latency_sec": 3.138,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ty_query_on_disk_cache_rs",
+          "latency_sec": 5.044,
+          "input_tokens": 1385,
+          "output_tokens": 220,
+          "total_tokens": 1605
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ty_query_on_disk_cache_rs_repair",
+          "latency_sec": 3.344,
+          "input_tokens": 255,
+          "output_tokens": 244,
+          "total_tokens": 499
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_borrow_set_rs",
+          "latency_sec": 4.483,
+          "input_tokens": 1335,
+          "output_tokens": 220,
+          "total_tokens": 1555
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_borrow_set_rs_repair",
+          "latency_sec": 3.836,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_constraint_generation_rs",
+          "latency_sec": 4.635,
+          "input_tokens": 1335,
+          "output_tokens": 220,
+          "total_tokens": 1555
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_constraint_generation_rs_repair",
+          "latency_sec": 3.18,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_constraints_graph_rs",
+          "latency_sec": 4.172,
+          "input_tokens": 1345,
+          "output_tokens": 220,
+          "total_tokens": 1565
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_constraints_graph_rs_repair",
+          "latency_sec": 3.676,
+          "input_tokens": 255,
+          "output_tokens": 203,
+          "total_tokens": 458
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_constraints_mod_rs",
+          "latency_sec": 4.728,
+          "input_tokens": 1281,
+          "output_tokens": 220,
+          "total_tokens": 1501
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_constraints_mod_rs_repair",
+          "latency_sec": 3.101,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_def_use_rs",
+          "latency_sec": 5.019,
+          "input_tokens": 1087,
+          "output_tokens": 220,
+          "total_tokens": 1307
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_def_use_rs_repair",
+          "latency_sec": 4.297,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_conflict_errors_rs",
+          "latency_sec": 4.646,
+          "input_tokens": 1319,
+          "output_tokens": 220,
+          "total_tokens": 1539
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_conflict_errors_rs_repair",
+          "latency_sec": 3.152,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_explain_borrow_rs",
+          "latency_sec": 4.458,
+          "input_tokens": 1228,
+          "output_tokens": 220,
+          "total_tokens": 1448
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_explain_borrow_rs_repair",
+          "latency_sec": 3.016,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_find_use_rs",
+          "latency_sec": 4.319,
+          "input_tokens": 1308,
+          "output_tokens": 220,
+          "total_tokens": 1528
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_find_use_rs_repair",
+          "latency_sec": 3.28,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_mod_rs",
+          "latency_sec": 3.82,
+          "input_tokens": 1287,
+          "output_tokens": 220,
+          "total_tokens": 1507
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_mod_rs_repair",
+          "latency_sec": 3.462,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_move_errors_rs",
+          "latency_sec": 4.302,
+          "input_tokens": 1283,
+          "output_tokens": 220,
+          "total_tokens": 1503
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_move_errors_rs_repair",
+          "latency_sec": 3.416,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_mutability_errors_rs",
+          "latency_sec": 4.607,
+          "input_tokens": 1243,
+          "output_tokens": 220,
+          "total_tokens": 1463
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_mutability_errors_rs_repair",
+          "latency_sec": 4.046,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_outlives_suggestion_rs",
+          "latency_sec": 6.621,
+          "input_tokens": 1259,
+          "output_tokens": 220,
+          "total_tokens": 1479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_outlives_suggestion_rs_repair",
+          "latency_sec": 2.914,
+          "input_tokens": 255,
+          "output_tokens": 204,
+          "total_tokens": 459
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_region_errors_rs",
+          "latency_sec": 4.086,
+          "input_tokens": 1230,
+          "output_tokens": 220,
+          "total_tokens": 1450
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_region_errors_rs_repair",
+          "latency_sec": 3.452,
+          "input_tokens": 255,
+          "output_tokens": 205,
+          "total_tokens": 460
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_region_name_rs",
+          "latency_sec": 4.541,
+          "input_tokens": 1282,
+          "output_tokens": 220,
+          "total_tokens": 1502
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_region_name_rs_repair",
+          "latency_sec": 3.331,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_var_name_rs",
+          "latency_sec": 4.445,
+          "input_tokens": 1372,
+          "output_tokens": 220,
+          "total_tokens": 1592
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_diagnostics_var_name_rs_repair",
+          "latency_sec": 3.556,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_facts_rs",
+          "latency_sec": 4.043,
+          "input_tokens": 1391,
+          "output_tokens": 220,
+          "total_tokens": 1611
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_facts_rs_repair",
+          "latency_sec": 4.005,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_invalidation_rs",
+          "latency_sec": 4.146,
+          "input_tokens": 1215,
+          "output_tokens": 220,
+          "total_tokens": 1435
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_invalidation_rs_repair",
+          "latency_sec": 3.024,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_location_rs",
+          "latency_sec": 4.378,
+          "input_tokens": 1227,
+          "output_tokens": 220,
+          "total_tokens": 1447
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_location_rs_repair",
+          "latency_sec": 3.256,
+          "input_tokens": 254,
+          "output_tokens": 224,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_member_constraints_rs",
+          "latency_sec": 4.757,
+          "input_tokens": 1324,
+          "output_tokens": 220,
+          "total_tokens": 1544
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_member_constraints_rs_repair",
+          "latency_sec": 3.813,
+          "input_tokens": 255,
+          "output_tokens": 208,
+          "total_tokens": 463
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_mod_rs",
+          "latency_sec": 4.826,
+          "input_tokens": 1481,
+          "output_tokens": 220,
+          "total_tokens": 1701
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_mod_rs_repair",
+          "latency_sec": 5.413,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_nll_rs",
+          "latency_sec": 4.386,
+          "input_tokens": 1370,
+          "output_tokens": 220,
+          "total_tokens": 1590
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_nll_rs_repair",
+          "latency_sec": 3.819,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_path_utils_rs",
+          "latency_sec": 4.267,
+          "input_tokens": 1320,
+          "output_tokens": 220,
+          "total_tokens": 1540
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_path_utils_rs_repair",
+          "latency_sec": 9.072,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_place_ext_rs",
+          "latency_sec": 4.031,
+          "input_tokens": 1036,
+          "output_tokens": 220,
+          "total_tokens": 1256
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_place_ext_rs_repair",
+          "latency_sec": 3.27,
+          "input_tokens": 255,
+          "output_tokens": 208,
+          "total_tokens": 463
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_places_conflict_rs",
+          "latency_sec": 4.605,
+          "input_tokens": 1384,
+          "output_tokens": 220,
+          "total_tokens": 1604
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_places_conflict_rs_repair",
+          "latency_sec": 3.209,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_prefixes_rs",
+          "latency_sec": 4.424,
+          "input_tokens": 1215,
+          "output_tokens": 220,
+          "total_tokens": 1435
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_prefixes_rs_repair",
+          "latency_sec": 4.241,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_dump_mir_rs",
+          "latency_sec": 5.073,
+          "input_tokens": 1156,
+          "output_tokens": 220,
+          "total_tokens": 1376
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_dump_mir_rs_repair",
+          "latency_sec": 3.242,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_graphviz_rs",
+          "latency_sec": 4.688,
+          "input_tokens": 1498,
+          "output_tokens": 220,
+          "total_tokens": 1718
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_graphviz_rs_repair",
+          "latency_sec": 3.0,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_mod_rs",
+          "latency_sec": 4.489,
+          "input_tokens": 1281,
+          "output_tokens": 220,
+          "total_tokens": 1501
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_mod_rs_repair",
+          "latency_sec": 3.782,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_opaque_types_rs",
+          "latency_sec": 4.98,
+          "input_tokens": 1293,
+          "output_tokens": 220,
+          "total_tokens": 1513
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_opaque_types_rs_repair",
+          "latency_sec": 3.314,
+          "input_tokens": 255,
+          "output_tokens": 207,
+          "total_tokens": 462
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_reverse_sccs_rs",
+          "latency_sec": 3.841,
+          "input_tokens": 933,
+          "output_tokens": 220,
+          "total_tokens": 1153
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_reverse_sccs_rs_repair",
+          "latency_sec": 3.36,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_values_rs",
+          "latency_sec": 4.282,
+          "input_tokens": 1267,
+          "output_tokens": 220,
+          "total_tokens": 1487
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_region_infer_values_rs_repair",
+          "latency_sec": 2.927,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_renumber_rs",
+          "latency_sec": 4.255,
+          "input_tokens": 1208,
+          "output_tokens": 220,
+          "total_tokens": 1428
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_renumber_rs_repair",
+          "latency_sec": 3.173,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_constraint_conversion_rs",
+          "latency_sec": 4.23,
+          "input_tokens": 1297,
+          "output_tokens": 220,
+          "total_tokens": 1517
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_constraint_conversion_rs_repair",
+          "latency_sec": 3.318,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_free_region_relations_rs",
+          "latency_sec": 4.569,
+          "input_tokens": 1343,
+          "output_tokens": 220,
+          "total_tokens": 1563
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_free_region_relations_rs_repair",
+          "latency_sec": 3.154,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_input_output_rs",
+          "latency_sec": 4.404,
+          "input_tokens": 1166,
+          "output_tokens": 220,
+          "total_tokens": 1386
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_input_output_rs_repair",
+          "latency_sec": 3.921,
+          "input_tokens": 249,
+          "output_tokens": 205,
+          "total_tokens": 454
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_liveness_local_use_map_rs",
+          "latency_sec": 4.033,
+          "input_tokens": 1318,
+          "output_tokens": 220,
+          "total_tokens": 1538
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_liveness_local_use_map_rs_repair",
+          "latency_sec": 2.948,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_liveness_mod_rs",
+          "latency_sec": 4.739,
+          "input_tokens": 1348,
+          "output_tokens": 220,
+          "total_tokens": 1568
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_liveness_mod_rs_repair",
+          "latency_sec": 2.925,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_liveness_polonius_rs",
+          "latency_sec": 4.233,
+          "input_tokens": 1316,
+          "output_tokens": 220,
+          "total_tokens": 1536
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_liveness_polonius_rs_repair",
+          "latency_sec": 3.581,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_liveness_trace_rs",
+          "latency_sec": 4.172,
+          "input_tokens": 1392,
+          "output_tokens": 220,
+          "total_tokens": 1612
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_liveness_trace_rs_repair",
+          "latency_sec": 2.995,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_mod_rs",
+          "latency_sec": 4.365,
+          "input_tokens": 1376,
+          "output_tokens": 220,
+          "total_tokens": 1596
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_mod_rs_repair",
+          "latency_sec": 2.799,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_relate_tys_rs",
+          "latency_sec": 4.058,
+          "input_tokens": 1416,
+          "output_tokens": 220,
+          "total_tokens": 1636
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_type_check_relate_tys_rs_repair",
+          "latency_sec": 3.019,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_universal_regions_rs",
+          "latency_sec": 5.484,
+          "input_tokens": 1327,
+          "output_tokens": 220,
+          "total_tokens": 1547
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_universal_regions_rs_repair",
+          "latency_sec": 5.057,
+          "input_tokens": 255,
+          "output_tokens": 204,
+          "total_tokens": 459
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_used_muts_rs",
+          "latency_sec": 4.161,
+          "input_tokens": 1247,
+          "output_tokens": 220,
+          "total_tokens": 1467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_borrow_check_used_muts_rs_repair",
+          "latency_sec": 3.868,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_const_eval_error_rs",
+          "latency_sec": 4.419,
+          "input_tokens": 1379,
+          "output_tokens": 220,
+          "total_tokens": 1599
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_const_eval_error_rs_repair",
+          "latency_sec": 3.658,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_const_eval_eval_queries_rs",
+          "latency_sec": 4.928,
+          "input_tokens": 1368,
+          "output_tokens": 220,
+          "total_tokens": 1588
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_const_eval_eval_queries_rs_repair",
+          "latency_sec": 2.649,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_const_eval_fn_queries_rs",
+          "latency_sec": 4.496,
+          "input_tokens": 1198,
+          "output_tokens": 220,
+          "total_tokens": 1418
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_const_eval_fn_queries_rs_repair",
+          "latency_sec": 2.853,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_const_eval_machine_rs",
+          "latency_sec": 4.364,
+          "input_tokens": 1412,
+          "output_tokens": 220,
+          "total_tokens": 1632
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_const_eval_machine_rs_repair",
+          "latency_sec": 3.395,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_const_eval_mod_rs",
+          "latency_sec": 5.418,
+          "input_tokens": 1391,
+          "output_tokens": 220,
+          "total_tokens": 1611
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_const_eval_mod_rs_repair",
+          "latency_sec": 4.122,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_drop_flag_effects_rs",
+          "latency_sec": 4.049,
+          "input_tokens": 1415,
+          "output_tokens": 220,
+          "total_tokens": 1635
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_drop_flag_effects_rs_repair",
+          "latency_sec": 3.064,
+          "input_tokens": 255,
+          "output_tokens": 155,
+          "total_tokens": 410
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_cursor_rs",
+          "latency_sec": 4.489,
+          "input_tokens": 1293,
+          "output_tokens": 220,
+          "total_tokens": 1513
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_cursor_rs_repair",
+          "latency_sec": 3.046,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_direction_rs",
+          "latency_sec": 4.79,
+          "input_tokens": 1353,
+          "output_tokens": 220,
+          "total_tokens": 1573
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_direction_rs_repair",
+          "latency_sec": 2.82,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_engine_rs",
+          "latency_sec": 4.701,
+          "input_tokens": 1425,
+          "output_tokens": 220,
+          "total_tokens": 1645
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_engine_rs_repair",
+          "latency_sec": 3.065,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_fmt_rs",
+          "latency_sec": 4.074,
+          "input_tokens": 1488,
+          "output_tokens": 220,
+          "total_tokens": 1708
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_fmt_rs_repair",
+          "latency_sec": 3.139,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_graphviz_rs",
+          "latency_sec": 4.307,
+          "input_tokens": 1529,
+          "output_tokens": 220,
+          "total_tokens": 1749
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_graphviz_rs_repair",
+          "latency_sec": 4.756,
+          "input_tokens": 255,
+          "output_tokens": 208,
+          "total_tokens": 463
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_lattice_rs",
+          "latency_sec": 4.745,
+          "input_tokens": 1328,
+          "output_tokens": 220,
+          "total_tokens": 1548
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_lattice_rs_repair",
+          "latency_sec": 2.978,
+          "input_tokens": 255,
+          "output_tokens": 197,
+          "total_tokens": 452
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_mod_rs",
+          "latency_sec": 4.174,
+          "input_tokens": 1260,
+          "output_tokens": 220,
+          "total_tokens": 1480
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_mod_rs_repair",
+          "latency_sec": 3.348,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_tests_rs",
+          "latency_sec": 4.908,
+          "input_tokens": 1353,
+          "output_tokens": 220,
+          "total_tokens": 1573
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_tests_rs_repair",
+          "latency_sec": 2.697,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_visitor_rs",
+          "latency_sec": 4.607,
+          "input_tokens": 1357,
+          "output_tokens": 220,
+          "total_tokens": 1577
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_framework_visitor_rs_repair",
+          "latency_sec": 3.214,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_borrowed_locals_rs",
+          "latency_sec": 4.185,
+          "input_tokens": 1359,
+          "output_tokens": 220,
+          "total_tokens": 1579
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_borrowed_locals_rs_repair",
+          "latency_sec": 5.097,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_borrows_rs",
+          "latency_sec": 3.848,
+          "input_tokens": 1299,
+          "output_tokens": 220,
+          "total_tokens": 1519
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_borrows_rs_repair",
+          "latency_sec": 3.166,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_init_locals_rs",
+          "latency_sec": 4.993,
+          "input_tokens": 1244,
+          "output_tokens": 220,
+          "total_tokens": 1464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_init_locals_rs_repair",
+          "latency_sec": 3.959,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_liveness_rs",
+          "latency_sec": 4.564,
+          "input_tokens": 1377,
+          "output_tokens": 220,
+          "total_tokens": 1597
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_liveness_rs_repair",
+          "latency_sec": 2.957,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_mod_rs",
+          "latency_sec": 5.416,
+          "input_tokens": 1354,
+          "output_tokens": 220,
+          "total_tokens": 1574
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_mod_rs_repair",
+          "latency_sec": 3.167,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_storage_liveness_rs",
+          "latency_sec": 4.377,
+          "input_tokens": 1417,
+          "output_tokens": 220,
+          "total_tokens": 1637
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_impls_storage_liveness_rs_repair",
+          "latency_sec": 3.028,
+          "input_tokens": 255,
+          "output_tokens": 201,
+          "total_tokens": 456
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_mod_rs",
+          "latency_sec": 3.793,
+          "input_tokens": 617,
+          "output_tokens": 220,
+          "total_tokens": 837
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_mod_rs_repair",
+          "latency_sec": 3.356,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_move_paths_abs_domain_rs",
+          "latency_sec": 4.315,
+          "input_tokens": 845,
+          "output_tokens": 220,
+          "total_tokens": 1065
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_move_paths_abs_domain_rs_repair",
+          "latency_sec": 3.807,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_move_paths_builder_rs",
+          "latency_sec": 4.869,
+          "input_tokens": 1324,
+          "output_tokens": 220,
+          "total_tokens": 1544
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_move_paths_builder_rs_repair",
+          "latency_sec": 2.971,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_move_paths_mod_rs",
+          "latency_sec": 5.379,
+          "input_tokens": 1433,
+          "output_tokens": 220,
+          "total_tokens": 1653
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_dataflow_move_paths_mod_rs_repair",
+          "latency_sec": 3.432,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_cast_rs",
+          "latency_sec": 6.107,
+          "input_tokens": 1180,
+          "output_tokens": 220,
+          "total_tokens": 1400
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_cast_rs_repair",
+          "latency_sec": 3.133,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_eval_context_rs",
+          "latency_sec": 4.586,
+          "input_tokens": 1309,
+          "output_tokens": 220,
+          "total_tokens": 1529
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_eval_context_rs_repair",
+          "latency_sec": 5.991,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_intern_rs",
+          "latency_sec": 5.546,
+          "input_tokens": 1289,
+          "output_tokens": 220,
+          "total_tokens": 1509
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_intern_rs_repair",
+          "latency_sec": 2.737,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_intrinsics_rs",
+          "latency_sec": 4.483,
+          "input_tokens": 1425,
+          "output_tokens": 220,
+          "total_tokens": 1645
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_intrinsics_rs_repair",
+          "latency_sec": 3.297,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_intrinsics_caller_location_rs",
+          "latency_sec": 4.182,
+          "input_tokens": 1227,
+          "output_tokens": 220,
+          "total_tokens": 1447
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_intrinsics_caller_location_rs_repair",
+          "latency_sec": 3.116,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_intrinsics_type_name_rs",
+          "latency_sec": 4.877,
+          "input_tokens": 1425,
+          "output_tokens": 220,
+          "total_tokens": 1645
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_intrinsics_type_name_rs_repair",
+          "latency_sec": 3.215,
+          "input_tokens": 249,
+          "output_tokens": 209,
+          "total_tokens": 458
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_machine_rs",
+          "latency_sec": 4.95,
+          "input_tokens": 1341,
+          "output_tokens": 220,
+          "total_tokens": 1561
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_machine_rs_repair",
+          "latency_sec": 3.722,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_memory_rs",
+          "latency_sec": 4.924,
+          "input_tokens": 1332,
+          "output_tokens": 220,
+          "total_tokens": 1552
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_memory_rs_repair",
+          "latency_sec": 3.159,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_mod_rs",
+          "latency_sec": 5.069,
+          "input_tokens": 507,
+          "output_tokens": 220,
+          "total_tokens": 727
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_mod_rs_repair",
+          "latency_sec": 3.125,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_operand_rs",
+          "latency_sec": 4.334,
+          "input_tokens": 1368,
+          "output_tokens": 220,
+          "total_tokens": 1588
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_operand_rs_repair",
+          "latency_sec": 3.292,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_operator_rs",
+          "latency_sec": 4.695,
+          "input_tokens": 1490,
+          "output_tokens": 220,
+          "total_tokens": 1710
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_operator_rs_repair",
+          "latency_sec": 3.063,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_place_rs",
+          "latency_sec": 5.311,
+          "input_tokens": 1379,
+          "output_tokens": 220,
+          "total_tokens": 1599
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_place_rs_repair",
+          "latency_sec": 3.383,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_step_rs",
+          "latency_sec": 4.776,
+          "input_tokens": 1326,
+          "output_tokens": 220,
+          "total_tokens": 1546
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_step_rs_repair",
+          "latency_sec": 3.683,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_terminator_rs",
+          "latency_sec": 4.749,
+          "input_tokens": 1152,
+          "output_tokens": 220,
+          "total_tokens": 1372
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_terminator_rs_repair",
+          "latency_sec": 3.321,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_traits_rs",
+          "latency_sec": 4.064,
+          "input_tokens": 1282,
+          "output_tokens": 220,
+          "total_tokens": 1502
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_traits_rs_repair",
+          "latency_sec": 3.278,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_util_rs",
+          "latency_sec": 5.081,
+          "input_tokens": 1062,
+          "output_tokens": 220,
+          "total_tokens": 1282
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_util_rs_repair",
+          "latency_sec": 2.982,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_validity_rs",
+          "latency_sec": 4.679,
+          "input_tokens": 1341,
+          "output_tokens": 220,
+          "total_tokens": 1561
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_validity_rs_repair",
+          "latency_sec": 2.839,
+          "input_tokens": 255,
+          "output_tokens": 204,
+          "total_tokens": 459
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_visitor_rs",
+          "latency_sec": 4.533,
+          "input_tokens": 1547,
+          "output_tokens": 220,
+          "total_tokens": 1767
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_interpret_visitor_rs_repair",
+          "latency_sec": 3.507,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_lib_rs",
+          "latency_sec": 4.907,
+          "input_tokens": 906,
+          "output_tokens": 220,
+          "total_tokens": 1126
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_lib_rs_repair",
+          "latency_sec": 3.073,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_collector_rs",
+          "latency_sec": 4.805,
+          "input_tokens": 1169,
+          "output_tokens": 220,
+          "total_tokens": 1389
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_collector_rs_repair",
+          "latency_sec": 5.006,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_mod_rs",
+          "latency_sec": 4.83,
+          "input_tokens": 532,
+          "output_tokens": 220,
+          "total_tokens": 752
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_mod_rs_repair",
+          "latency_sec": 4.441,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_partitioning_default_rs",
+          "latency_sec": 5.424,
+          "input_tokens": 1240,
+          "output_tokens": 220,
+          "total_tokens": 1460
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_partitioning_default_rs_repair",
+          "latency_sec": 3.159,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_partitioning_merging_rs",
+          "latency_sec": 4.889,
+          "input_tokens": 1278,
+          "output_tokens": 220,
+          "total_tokens": 1498
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_partitioning_merging_rs_repair",
+          "latency_sec": 3.04,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_partitioning_mod_rs",
+          "latency_sec": 4.712,
+          "input_tokens": 1133,
+          "output_tokens": 220,
+          "total_tokens": 1353
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_partitioning_mod_rs_repair",
+          "latency_sec": 3.679,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_polymorphize_rs",
+          "latency_sec": 4.655,
+          "input_tokens": 1296,
+          "output_tokens": 220,
+          "total_tokens": 1516
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_monomorphize_polymorphize_rs_repair",
+          "latency_sec": 3.764,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_shim_rs",
+          "latency_sec": 4.508,
+          "input_tokens": 1407,
+          "output_tokens": 220,
+          "total_tokens": 1627
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_shim_rs_repair",
+          "latency_sec": 3.379,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_add_call_guards_rs",
+          "latency_sec": 6.431,
+          "input_tokens": 940,
+          "output_tokens": 220,
+          "total_tokens": 1160
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_add_call_guards_rs_repair",
+          "latency_sec": 2.849,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_add_moves_for_packed_drops_rs",
+          "latency_sec": 4.874,
+          "input_tokens": 1290,
+          "output_tokens": 220,
+          "total_tokens": 1510
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_add_moves_for_packed_drops_rs_repair",
+          "latency_sec": 3.635,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_add_retag_rs",
+          "latency_sec": 5.293,
+          "input_tokens": 1266,
+          "output_tokens": 220,
+          "total_tokens": 1486
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_add_retag_rs_repair",
+          "latency_sec": 2.547,
+          "input_tokens": 255,
+          "output_tokens": 206,
+          "total_tokens": 461
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_const_item_mutation_rs",
+          "latency_sec": 4.137,
+          "input_tokens": 1333,
+          "output_tokens": 220,
+          "total_tokens": 1553
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_const_item_mutation_rs_repair",
+          "latency_sec": 3.2,
+          "input_tokens": 249,
+          "output_tokens": 205,
+          "total_tokens": 454
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_mod_rs",
+          "latency_sec": 3.738,
+          "input_tokens": 1433,
+          "output_tokens": 220,
+          "total_tokens": 1653
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_mod_rs_repair",
+          "latency_sec": 2.902,
+          "input_tokens": 255,
+          "output_tokens": 203,
+          "total_tokens": 458
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_ops_rs",
+          "latency_sec": 4.702,
+          "input_tokens": 1363,
+          "output_tokens": 220,
+          "total_tokens": 1583
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_ops_rs_repair",
+          "latency_sec": 3.68,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_post_drop_elaboration_rs",
+          "latency_sec": 4.68,
+          "input_tokens": 1327,
+          "output_tokens": 220,
+          "total_tokens": 1547
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_post_drop_elaboration_rs_repair",
+          "latency_sec": 2.861,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_qualifs_rs",
+          "latency_sec": 4.8,
+          "input_tokens": 1348,
+          "output_tokens": 220,
+          "total_tokens": 1568
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_qualifs_rs_repair",
+          "latency_sec": 3.51,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_resolver_rs",
+          "latency_sec": 4.118,
+          "input_tokens": 1359,
+          "output_tokens": 220,
+          "total_tokens": 1579
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_resolver_rs_repair",
+          "latency_sec": 3.315,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_validation_rs",
+          "latency_sec": 4.548,
+          "input_tokens": 1380,
+          "output_tokens": 220,
+          "total_tokens": 1600
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_consts_validation_rs_repair",
+          "latency_sec": 3.449,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_packed_ref_rs",
+          "latency_sec": 4.574,
+          "input_tokens": 1350,
+          "output_tokens": 220,
+          "total_tokens": 1570
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_packed_ref_rs_repair",
+          "latency_sec": 2.958,
+          "input_tokens": 255,
+          "output_tokens": 226,
+          "total_tokens": 481
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_unsafety_rs",
+          "latency_sec": 4.462,
+          "input_tokens": 1322,
+          "output_tokens": 220,
+          "total_tokens": 1542
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_check_unsafety_rs_repair",
+          "latency_sec": 3.274,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_cleanup_post_borrowck_rs",
+          "latency_sec": 4.767,
+          "input_tokens": 850,
+          "output_tokens": 220,
+          "total_tokens": 1070
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_cleanup_post_borrowck_rs_repair",
+          "latency_sec": 2.938,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_const_debuginfo_rs",
+          "latency_sec": 4.653,
+          "input_tokens": 1150,
+          "output_tokens": 220,
+          "total_tokens": 1370
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_const_debuginfo_rs_repair",
+          "latency_sec": 2.798,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_const_goto_rs",
+          "latency_sec": 4.883,
+          "input_tokens": 1227,
+          "output_tokens": 220,
+          "total_tokens": 1447
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_const_goto_rs_repair",
+          "latency_sec": 3.149,
+          "input_tokens": 255,
+          "output_tokens": 200,
+          "total_tokens": 455
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_const_prop_rs",
+          "latency_sec": 5.553,
+          "input_tokens": 1335,
+          "output_tokens": 220,
+          "total_tokens": 1555
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_const_prop_rs_repair",
+          "latency_sec": 3.896,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_counters_rs",
+          "latency_sec": 5.856,
+          "input_tokens": 1239,
+          "output_tokens": 220,
+          "total_tokens": 1459
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_counters_rs_repair",
+          "latency_sec": 3.645,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_debug_rs",
+          "latency_sec": 4.601,
+          "input_tokens": 1195,
+          "output_tokens": 220,
+          "total_tokens": 1415
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_debug_rs_repair",
+          "latency_sec": 3.133,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_graph_rs",
+          "latency_sec": 4.864,
+          "input_tokens": 1257,
+          "output_tokens": 220,
+          "total_tokens": 1477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_graph_rs_repair",
+          "latency_sec": 3.106,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_mod_rs",
+          "latency_sec": 4.572,
+          "input_tokens": 1325,
+          "output_tokens": 220,
+          "total_tokens": 1545
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_mod_rs_repair",
+          "latency_sec": 4.027,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_query_rs",
+          "latency_sec": 4.359,
+          "input_tokens": 1204,
+          "output_tokens": 220,
+          "total_tokens": 1424
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_query_rs_repair",
+          "latency_sec": 3.236,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_spans_rs",
+          "latency_sec": 4.398,
+          "input_tokens": 1301,
+          "output_tokens": 220,
+          "total_tokens": 1521
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_spans_rs_repair",
+          "latency_sec": 3.344,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_test_macros_src_lib_rs",
+          "latency_sec": 3.762,
+          "input_tokens": 284,
+          "output_tokens": 193,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_tests_rs",
+          "latency_sec": 4.275,
+          "input_tokens": 1289,
+          "output_tokens": 220,
+          "total_tokens": 1509
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_coverage_tests_rs_repair",
+          "latency_sec": 2.698,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_deaggregator_rs",
+          "latency_sec": 4.084,
+          "input_tokens": 636,
+          "output_tokens": 220,
+          "total_tokens": 856
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_deaggregator_rs_repair",
+          "latency_sec": 3.644,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_deduplicate_blocks_rs",
+          "latency_sec": 4.485,
+          "input_tokens": 1345,
+          "output_tokens": 220,
+          "total_tokens": 1565
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_deduplicate_blocks_rs_repair",
+          "latency_sec": 3.535,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_dest_prop_rs",
+          "latency_sec": 5.823,
+          "input_tokens": 1181,
+          "output_tokens": 220,
+          "total_tokens": 1401
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_dest_prop_rs_repair",
+          "latency_sec": 3.203,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_dump_mir_rs",
+          "latency_sec": 4.294,
+          "input_tokens": 722,
+          "output_tokens": 220,
+          "total_tokens": 942
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_dump_mir_rs_repair",
+          "latency_sec": 2.977,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_early_otherwise_branch_rs",
+          "latency_sec": 4.384,
+          "input_tokens": 1234,
+          "output_tokens": 220,
+          "total_tokens": 1454
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_early_otherwise_branch_rs_repair",
+          "latency_sec": 2.901,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_elaborate_drops_rs",
+          "latency_sec": 4.844,
+          "input_tokens": 1326,
+          "output_tokens": 220,
+          "total_tokens": 1546
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_elaborate_drops_rs_repair",
+          "latency_sec": 3.218,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_function_item_references_rs",
+          "latency_sec": 3.659,
+          "input_tokens": 1206,
+          "output_tokens": 220,
+          "total_tokens": 1426
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_function_item_references_rs_repair",
+          "latency_sec": 3.551,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_generator_rs",
+          "latency_sec": 4.931,
+          "input_tokens": 1251,
+          "output_tokens": 220,
+          "total_tokens": 1471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_generator_rs_repair",
+          "latency_sec": 2.778,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_inline_rs",
+          "latency_sec": 3.976,
+          "input_tokens": 1416,
+          "output_tokens": 220,
+          "total_tokens": 1636
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_inline_rs_repair",
+          "latency_sec": 2.942,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_inline_cycle_rs",
+          "latency_sec": 4.192,
+          "input_tokens": 1247,
+          "output_tokens": 220,
+          "total_tokens": 1467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_inline_cycle_rs_repair",
+          "latency_sec": 2.75,
+          "input_tokens": 249,
+          "output_tokens": 195,
+          "total_tokens": 444
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_instcombine_rs",
+          "latency_sec": 4.139,
+          "input_tokens": 1296,
+          "output_tokens": 220,
+          "total_tokens": 1516
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_instcombine_rs_repair",
+          "latency_sec": 3.221,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_lower_intrinsics_rs",
+          "latency_sec": 4.009,
+          "input_tokens": 986,
+          "output_tokens": 220,
+          "total_tokens": 1206
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_lower_intrinsics_rs_repair",
+          "latency_sec": 2.657,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_match_branches_rs",
+          "latency_sec": 4.151,
+          "input_tokens": 1250,
+          "output_tokens": 220,
+          "total_tokens": 1470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_match_branches_rs_repair",
+          "latency_sec": 6.079,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_mod_rs",
+          "latency_sec": 4.183,
+          "input_tokens": 1436,
+          "output_tokens": 220,
+          "total_tokens": 1656
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_mod_rs_repair",
+          "latency_sec": 2.747,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_multiple_return_terminators_rs",
+          "latency_sec": 4.811,
+          "input_tokens": 603,
+          "output_tokens": 220,
+          "total_tokens": 823
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_multiple_return_terminators_rs_repair",
+          "latency_sec": 3.897,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_no_landing_pads_rs",
+          "latency_sec": 4.217,
+          "input_tokens": 472,
+          "output_tokens": 220,
+          "total_tokens": 692
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_no_landing_pads_rs_repair",
+          "latency_sec": 4.609,
+          "input_tokens": 255,
+          "output_tokens": 207,
+          "total_tokens": 462
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_nrvo_rs",
+          "latency_sec": 4.442,
+          "input_tokens": 1316,
+          "output_tokens": 220,
+          "total_tokens": 1536
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_nrvo_rs_repair",
+          "latency_sec": 2.686,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_promote_consts_rs",
+          "latency_sec": 4.798,
+          "input_tokens": 1306,
+          "output_tokens": 220,
+          "total_tokens": 1526
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_promote_consts_rs_repair",
+          "latency_sec": 3.4,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_remove_noop_landing_pads_rs",
+          "latency_sec": 4.505,
+          "input_tokens": 1284,
+          "output_tokens": 220,
+          "total_tokens": 1504
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_remove_noop_landing_pads_rs_repair",
+          "latency_sec": 3.2,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_remove_storage_markers_rs",
+          "latency_sec": 3.996,
+          "input_tokens": 429,
+          "output_tokens": 220,
+          "total_tokens": 649
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_remove_storage_markers_rs_repair",
+          "latency_sec": 3.217,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_remove_unneeded_drops_rs",
+          "latency_sec": 4.049,
+          "input_tokens": 622,
+          "output_tokens": 220,
+          "total_tokens": 842
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_remove_unneeded_drops_rs_repair",
+          "latency_sec": 2.944,
+          "input_tokens": 255,
+          "output_tokens": 207,
+          "total_tokens": 462
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_remove_zsts_rs",
+          "latency_sec": 4.793,
+          "input_tokens": 998,
+          "output_tokens": 220,
+          "total_tokens": 1218
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_remove_zsts_rs_repair",
+          "latency_sec": 3.221,
+          "input_tokens": 255,
+          "output_tokens": 204,
+          "total_tokens": 459
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_required_consts_rs",
+          "latency_sec": 4.525,
+          "input_tokens": 438,
+          "output_tokens": 220,
+          "total_tokens": 658
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_required_consts_rs_repair",
+          "latency_sec": 3.292,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_rustc_peek_rs",
+          "latency_sec": 4.643,
+          "input_tokens": 1415,
+          "output_tokens": 220,
+          "total_tokens": 1635
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_rustc_peek_rs_repair",
+          "latency_sec": 3.807,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_simplify_rs",
+          "latency_sec": 4.925,
+          "input_tokens": 1325,
+          "output_tokens": 220,
+          "total_tokens": 1545
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_simplify_rs_repair",
+          "latency_sec": 2.698,
+          "input_tokens": 255,
+          "output_tokens": 205,
+          "total_tokens": 460
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_simplify_branches_rs",
+          "latency_sec": 4.007,
+          "input_tokens": 770,
+          "output_tokens": 220,
+          "total_tokens": 990
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_simplify_branches_rs_repair",
+          "latency_sec": 3.513,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_simplify_comparison_integral_rs",
+          "latency_sec": 4.798,
+          "input_tokens": 1215,
+          "output_tokens": 220,
+          "total_tokens": 1435
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_simplify_comparison_integral_rs_repair",
+          "latency_sec": 2.829,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_simplify_try_rs",
+          "latency_sec": 4.297,
+          "input_tokens": 1416,
+          "output_tokens": 220,
+          "total_tokens": 1636
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_simplify_try_rs_repair",
+          "latency_sec": 3.017,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_uninhabited_enum_branching_rs",
+          "latency_sec": 4.734,
+          "input_tokens": 1284,
+          "output_tokens": 220,
+          "total_tokens": 1504
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_uninhabited_enum_branching_rs_repair",
+          "latency_sec": 6.712,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_unreachable_prop_rs",
+          "latency_sec": 4.573,
+          "input_tokens": 1180,
+          "output_tokens": 220,
+          "total_tokens": 1400
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_unreachable_prop_rs_repair",
+          "latency_sec": 3.127,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_validate_rs",
+          "latency_sec": 3.826,
+          "input_tokens": 1334,
+          "output_tokens": 220,
+          "total_tokens": 1554
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_transform_validate_rs_repair",
+          "latency_sec": 2.878,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_aggregate_rs",
+          "latency_sec": 3.817,
+          "input_tokens": 899,
+          "output_tokens": 220,
+          "total_tokens": 1119
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_aggregate_rs_repair",
+          "latency_sec": 3.019,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_alignment_rs",
+          "latency_sec": 4.098,
+          "input_tokens": 788,
+          "output_tokens": 220,
+          "total_tokens": 1008
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_alignment_rs_repair",
+          "latency_sec": 2.755,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_borrowck_errors_rs",
+          "latency_sec": 3.968,
+          "input_tokens": 1276,
+          "output_tokens": 220,
+          "total_tokens": 1496
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_borrowck_errors_rs_repair",
+          "latency_sec": 3.639,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_collect_writes_rs",
+          "latency_sec": 5.914,
+          "input_tokens": 510,
+          "output_tokens": 220,
+          "total_tokens": 730
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_collect_writes_rs_repair",
+          "latency_sec": 3.08,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_elaborate_drops_rs",
+          "latency_sec": 4.619,
+          "input_tokens": 1375,
+          "output_tokens": 220,
+          "total_tokens": 1595
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_elaborate_drops_rs_repair",
+          "latency_sec": 2.749,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_find_self_call_rs",
+          "latency_sec": 4.017,
+          "input_tokens": 625,
+          "output_tokens": 220,
+          "total_tokens": 845
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_find_self_call_rs_repair",
+          "latency_sec": 3.389,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_generic_graph_rs",
+          "latency_sec": 4.471,
+          "input_tokens": 1004,
+          "output_tokens": 220,
+          "total_tokens": 1224
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_generic_graph_rs_repair",
+          "latency_sec": 6.724,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_generic_graphviz_rs",
+          "latency_sec": 4.173,
+          "input_tokens": 1398,
+          "output_tokens": 220,
+          "total_tokens": 1618
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_generic_graphviz_rs_repair",
+          "latency_sec": 3.3,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_graphviz_rs",
+          "latency_sec": 4.949,
+          "input_tokens": 1498,
+          "output_tokens": 220,
+          "total_tokens": 1718
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_graphviz_rs_repair",
+          "latency_sec": 2.86,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_mod_rs",
+          "latency_sec": 4.663,
+          "input_tokens": 378,
+          "output_tokens": 220,
+          "total_tokens": 598
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_mod_rs_repair",
+          "latency_sec": 3.436,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_patch_rs",
+          "latency_sec": 4.341,
+          "input_tokens": 1293,
+          "output_tokens": 220,
+          "total_tokens": 1513
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_patch_rs_repair",
+          "latency_sec": 2.9,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_pretty_rs",
+          "latency_sec": 4.177,
+          "input_tokens": 1453,
+          "output_tokens": 220,
+          "total_tokens": 1673
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_pretty_rs_repair",
+          "latency_sec": 3.303,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_spanview_rs",
+          "latency_sec": 4.471,
+          "input_tokens": 1419,
+          "output_tokens": 220,
+          "total_tokens": 1639
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_spanview_rs_repair",
+          "latency_sec": 3.588,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_storage_rs",
+          "latency_sec": 5.245,
+          "input_tokens": 558,
+          "output_tokens": 220,
+          "total_tokens": 778
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_src_util_storage_rs_repair",
+          "latency_sec": 3.941,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_build_src_thir_arena_rs",
+          "latency_sec": 3.745,
+          "input_tokens": 1295,
+          "output_tokens": 220,
+          "total_tokens": 1515
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_build_src_thir_arena_rs_repair",
+          "latency_sec": 4.211,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_plugin_impl_src_build_rs",
+          "latency_sec": 5.672,
+          "input_tokens": 871,
+          "output_tokens": 220,
+          "total_tokens": 1091
+        },
+        {
+          "stage": "file_summary:compiler_rustc_plugin_impl_src_build_rs_repair",
+          "latency_sec": 2.849,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_query_system_src_dep_graph_prev_rs",
+          "latency_sec": 3.877,
+          "input_tokens": 723,
+          "output_tokens": 220,
+          "total_tokens": 943
+        },
+        {
+          "stage": "file_summary:compiler_rustc_query_system_src_dep_graph_prev_rs_repair",
+          "latency_sec": 3.279,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_span_src_crate_disambiguator_rs",
+          "latency_sec": 3.929,
+          "input_tokens": 574,
+          "output_tokens": 220,
+          "total_tokens": 794
+        },
+        {
+          "stage": "file_summary:compiler_rustc_span_src_crate_disambiguator_rs_repair",
+          "latency_sec": 2.764,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm_base_rs",
+          "latency_sec": 4.141,
+          "input_tokens": 341,
+          "output_tokens": 169,
+          "total_tokens": 510
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv_base_rs",
+          "latency_sec": 3.632,
+          "input_tokens": 395,
+          "output_tokens": 198,
+          "total_tokens": 593
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_traits_query_outlives_bounds_rs",
+          "latency_sec": 4.294,
+          "input_tokens": 1225,
+          "output_tokens": 220,
+          "total_tokens": 1445
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_traits_query_outlives_bounds_rs_repair",
+          "latency_sec": 5.692,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.109,
+          "input_tokens": 27898,
+          "output_tokens": 336,
+          "total_tokens": 28234
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.847,
+          "input_tokens": 27611,
+          "output_tokens": 339,
+          "total_tokens": 27950
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.09,
+          "input_tokens": 27687,
+          "output_tokens": 387,
+          "total_tokens": 28074
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.028,
+          "input_tokens": 27636,
+          "output_tokens": 330,
+          "total_tokens": 27966
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.338,
+          "input_tokens": 27593,
+          "output_tokens": 343,
+          "total_tokens": 27936
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.631,
+          "input_tokens": 27697,
+          "output_tokens": 332,
+          "total_tokens": 28029
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.124,
+          "input_tokens": 27435,
+          "output_tokens": 342,
+          "total_tokens": 27777
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.502,
+          "input_tokens": 26915,
+          "output_tokens": 313,
+          "total_tokens": 27228
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.07,
+          "input_tokens": 27746,
+          "output_tokens": 372,
+          "total_tokens": 28118
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.535,
+          "input_tokens": 27392,
+          "output_tokens": 385,
+          "total_tokens": 27777
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.584,
+          "input_tokens": 15013,
+          "output_tokens": 344,
+          "total_tokens": 15357
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.817,
+          "input_tokens": 9963,
+          "output_tokens": 728,
+          "total_tokens": 10691
+        }
+      ]
+    }
+  }
+}

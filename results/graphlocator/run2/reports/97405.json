@@ -1,0 +1,276 @@
+{
+  "bug_id": "97405",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-05-24",
+    "resolved": "ee160f2f5e73b6f5954bc33f059c316d9e8582c4"
+  },
+  "final_top10": [
+    "compiler/rustc_infer/src/infer/outlives/verify.rs",
+    "compiler/rustc_infer/src/infer/outlives/components.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_infer/src/infer/outlives/verify.rs",
+      "compiler/rustc_infer/src/infer/outlives/components.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/components.rs",
+        "rank": 2
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/97405.json",
+    "graph_cache_hit": false,
+    "graph_cache_build_mode": "skeleton",
+    "graph_cache_bug_id": "97405",
+    "graph_cache_checkout_commit": "ee160f2f5e73b6f5954bc33f059c316d9e8582c4",
+    "initial_graph_node_count": 46133,
+    "initial_graph_edge_count": 46132,
+    "graph_node_count": 46133,
+    "graph_edge_count": 54586,
+    "lazy_loaded_edge_count": 8454,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"compute_components\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_infer/src/infer/outlives/components.rs\", \"content\": \"fn compute_components<'tcx>(\\n    tcx: TyCtxt<'tcx>,\\n    ty: Ty<'tcx>,\\n    out: &mut SmallVec<[Component<'tcx>; 4]>,\\n    visited: &mut SsoHashSet<GenericArg<'tcx>>,\\n) {\\n    // Descend through the types, looking for the various \\\"base\\\"\\n    // components and collecting them into `out`. This is not written\\n    // with `collect()` because of the need to sometimes skip subtrees\\n    // in the `subtys` iterator (e.g., when encountering a\\n    // projection).\\n    match *ty.kind() {\\n            ty::FnDef(_, substs) => {\\n                // HACK(eddyb) ignore lifetimes found shallowly in `substs`.\\n                // This is inconsistent with `ty::Adt` (including all substs)\\n                // and with `ty::Closure` (ignoring all substs other than\\n                // upvars, of which a `ty::FnDef` doesn't have any), but\\n                // consistent with previous (accidental) behavior.\\n                // See https://github.com/rust-lang/rust/issues/70917\\n                // for further background and discussion.\\n                for child in substs {\\n                    match child.unpack() {\\n                        GenericArgKind::Type(ty) => {\\n                            compute_components(tcx, ty, out, visited);\\n                        }\\n                        GenericArgKind::Lifetime(_) => {}\\n                        GenericArgKind::Const(_) => {\\n                            compute_components_recursive(tcx, child, out, visited);\\n                        }\\n                    }\\n                }\\n            }\\n\\n            ty::Array(element, _) => {\\n                // Don't look into the len const as it doesn't affect regions\\n                compute_components(tcx, element, out, visited);\\n            }\\n\\n            ty::Closure(_, ref substs) => {\\n                let tupled_ty = substs.as_closure().tupled_upvars_ty();\\n                compute_components(tcx, tupled_ty, out, visited);\\n            }\\n\\n            ty::Generator(_, ref substs, _) => {\\n                // Same as the closure case\\n                let tupled_ty = substs.as_generator().tupled_upvars_ty();\\n                compute_components(tcx, tupled_ty, out, visited);\\n\\n                // We ignore regions in the generator interior as we don't\\n                // want these to affect region inference\\n            }\\n\\n            // All regions are bound inside a witness\\n            ty::GeneratorWitness(..) => (),\\n\\n            // OutlivesTypeParameterEnv -- the actual checking that `X:'a`\\n            // is implied by the environment is done in regionck.\\n            ty::Param(p) => {\\n                out.push(Component::Param(p));\\n            }\\n\\n            // For projections, we prefer to generate an obligation like\\n            // `<P0 as Trait<P1...Pn>>::Foo: 'a`, because this gives the\\n            // regionck more ways to prove that it holds. However,\\n            // regionck is not (at least currently) prepared to deal with\\n            // higher-ranked regions that may appear in the\\n            // trait-ref. Therefore, if we see any higher-ranked regions,\\n            // we simply fallback to the most restrictive rule, which\\n            // requires that `Pi: 'a` for all `i`.\\n            ty::Projection(ref data) => {\\n                if !data.has_escaping_bound_vars() {\\n                    // best case: no escaping regions, so push the\\n                    // projection and skip the subtree (thus generating no\\n                    // constraints for Pi). This defers the choice between\\n                    // the rules OutlivesProjectionEnv,\\n                    // OutlivesProjectionTraitDef, and\\n                    // OutlivesProjectionComponents to regionck.\\n                    out.push(Component::Projection(*data));\\n                } else {\\n                    // fallback case: hard code\\n                    // OutlivesProjectionComponents.  Continue walking\\n                    // through and constrain Pi.\\n                    let mut subcomponents = smallvec![];\\n                    let mut subvisited = SsoHashSet::new();\\n                    compute_components_recursive(tcx, ty.into(), &mut subcomponents, &mut subvisited);\\n                    out.push(Component::EscapingProjection(subcomponents.into_iter().collect()));\\n                }\\n            }\\n\\n            // We assume that inference variables are fully resolved.\\n            // So, if we encounter an inference variable, just record\\n            // the unresolved variable as a component.\\n            ty::Infer(infer_ty) => {\\n                out.push(Component::UnresolvedInferenceVariable(infer_ty));\\n            }\\n\\n            // Most types do not introduce any region binders, nor\\n            // involve any other subtle cases, and so the WF relation\\n            // simply constraints any regions referenced directly by\\n            // the type and then visits the types that are lexically\\n            // contained within. (The comments refer to relevant rules\\n            // from RFC1214.)\\n            ty::Bool |            // OutlivesScalar\\n            ty::Char |            // OutlivesScalar\\n            ty::Int(..) |         // OutlivesScalar\\n            ty::Uint(..) |        // OutlivesScalar\\n            ty::Float(..) |       // OutlivesScalar\\n            ty::Never |           // ...\\n            ty::Adt(..) |         // OutlivesNominalType\\n            ty::Opaque(..) |      // OutlivesNominalType (ish)\\n            ty::Foreign(..) |     // OutlivesNominalType\\n            ty::Str |             // OutlivesScalar (ish)\\n            ty::Slice(..) |       // ...\\n            ty::RawPtr(..) |      // ...\\n            ty::Ref(..) |         // OutlivesReference\\n            ty::Tuple(..) |       // ...\\n            ty::FnPtr(_) |        // OutlivesFunction (*)\\n            ty::Dynamic(..) |     // OutlivesObject, OutlivesFragment (*)\\n            ty::Placeholder(..) |\\n            ty::Bound(..) |\\n            ty::Error(_) => {\\n                // (*) Function pointers and trait objects are both binders.\\n                // In the RFC, this means we would add the bound regions to\\n                // the \\\"bound regions list\\\".  In our representation, no such\\n                // list is maintained explicitly, because bound regions\\n                // themselves can be readily identified.\\n                compute_components_recursive(tcx, ty.into(), out, visited);\\n            }\\n        }\\n}\"}",
+      "{\"type\": \"FILE\", \"name\": \"verify.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_infer/src/infer/outlives/verify.rs\", \"content\": \"verify.rs\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"verify\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/on_unimplemented.rs\", \"content\": \"fn verify(\\n        &self,\\n        tcx: TyCtxt<'tcx>,\\n        item_def_id: DefId,\\n        span: Span,\\n    ) -> Result<(), ErrorGuaranteed> {\\n        let trait_def_id = if tcx.is_trait(item_def_id) {\\n            item_def_id\\n        } else {\\n            tcx.trait_id_of_impl(item_def_id)\\n                .expect(\\\"expected `on_unimplemented` to correspond to a trait\\\")\\n        };\\n        let trait_name = tcx.item_name(trait_def_id);\\n        let generics = tcx.generics_of(item_def_id);\\n        let s = self.0.as_str();\\n        let parser = Parser::new(s, None, None, false, ParseMode::Format);\\n        let mut result = Ok(());\\n        for token in parser {\\n            match token {\\n                Piece::String(_) => (), // Normal string, no need to check it\\n                Piece::NextArgument(a) => match a.position {\\n                    Position::ArgumentNamed(s, _) => {\\n                        match Symbol::intern(s) {\\n                            // `{Self}` is allowed\\n                            kw::SelfUpper => (),\\n                            // `{ThisTraitsName}` is allowed\\n                            s if s == trait_name => (),\\n                            // `{from_method}` is allowed\\n                            sym::from_method => (),\\n                            // `{from_desugaring}` is allowed\\n                            sym::from_desugaring => (),\\n                            // `{ItemContext}` is allowed\\n                            sym::ItemContext => (),\\n                            // `{integral}` and `{integer}` and `{float}` are allowed\\n                            sym::integral | sym::integer_ | sym::float => (),\\n                            // So is `{A}` if A is a type parameter\\n                            s => match generics.params.iter().find(|param| param.name == s) {\\n                                Some(_) => (),\\n                                None => {\\n                                    let reported = struct_span_err!(\\n                                        tcx.sess,\\n                                        span,\\n                                        E0230,\\n                                        \\\"there is no parameter `{}` on {}\\\",\\n                                        s,\\n                                        if trait_def_id == item_def_id {\\n                                            format!(\\\"trait `{}`\\\", trait_name)\\n                                        } else {\\n                                            \\\"impl\\\".to_string()\\n                                        }\\n                                    )\\n                                    .emit();\\n                                    result = Err(reported);\\n                                }\\n                            },\\n                        }\\n                    }\\n                    // `{:1}` and `{}` are not to be used\\n                    Position::ArgumentIs(_) | Position::ArgumentImplicitlyIs(_) => {\\n                        let reported = struct_span_err!(\\n                            tcx.sess,\\n                            span,\\n                            E0231,\\n                            \\\"only named substitution parameters are allowed\\\"\\n                        )\\n                        .emit();\\n                        result = Err(reported);\\n                    }\\n                },\\n            }\\n        }\\n\\n        result\\n    }\"}",
+      "{\"type\": \"FILE\", \"name\": \"components.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_infer/src/infer/outlives/components.rs\", \"content\": \"components.rs\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"verify\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_passes/src/weak_lang_items.rs\", \"content\": \"fn verify<'tcx>(tcx: TyCtxt<'tcx>, items: &lang_items::LanguageItems) {\\n    // We only need to check for the presence of weak lang items if we're\\n    // emitting something that's not an rlib.\\n    let needs_check = tcx.sess.crate_types().iter().any(|kind| match *kind {\\n        CrateType::Dylib\\n        | CrateType::ProcMacro\\n        | CrateType::Cdylib\\n        | CrateType::Executable\\n        | CrateType::Staticlib => true,\\n        CrateType::Rlib => false,\\n    });\\n    if !needs_check {\\n        return;\\n    }\\n\\n    let mut missing = FxHashSet::default();\\n    for &cnum in tcx.crates(()).iter() {\\n        for &item in tcx.missing_lang_items(cnum).iter() {\\n            missing.insert(item);\\n        }\\n    }\\n\\n    for (name, item) in WEAK_ITEMS_REFS.clone().into_sorted_vector().into_iter() {\\n        if missing.contains(&item) && required(tcx, item) && items.require(item).is_err() {\\n            if item == LangItem::PanicImpl {\\n                tcx.sess.err(\\\"`#[panic_handler]` function required, but not found\\\");\\n            } else if item == LangItem::Oom {\\n                if !tcx.features().default_alloc_error_handler {\\n                    tcx.sess.err(\\\"`#[alloc_error_handler]` function required, but not found\\\");\\n                    tcx.sess.note_without_error(\\\"use `#![feature(default_alloc_error_handler)]` for a default error handler\\\");\\n                }\\n            } else {\\n                tcx\\n                    .sess\\n                    .diagnostic()\\n                    .struct_err(&format!(\\\"language item required, but not found: `{}`\\\", name))\\n                    .note(&format!(\\\"this can occur when a binary crate with `#![no_std]` is compiled for a target where `{}` is defined in the standard library\\\", name))\\n                    .help(&format!(\\\"you may be able to compile for a target that doesn't need `{}`, specify a target with `--target` or in `.cargo/config`\\\", name))\\n                    .emit();\\n            }\\n        }\\n    }\\n}\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_infer/src/infer/outlives/verify.rs",
+      "compiler/rustc_infer/src/infer/outlives/components.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "verify.rs requires all closure/generator Substs to outlive 'static",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "verify.rs",
+              "file": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+              "content": "verify.rs"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Inconsistency with compute_components logic for closures/generators, which only considers relevant captured/upvar components",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "compute_components",
+              "file": "compiler/rustc_infer/src/infer/outlives/components.rs",
+              "content": "fn compute_components<'tcx>(\n    tcx: TyCtxt<'tcx>,\n    ty: Ty<'tcx>,\n    out: &mut SmallVec<[Component<'tcx>; 4]>,\n    visited: &mut SsoHashSet<GenericArg<'tcx>>,\n) {\n    // Descend through the types, looking for the various \"base\"\n    // components and collecting them into `out`. This is not written\n    // with `collect()` because of the need to sometimes skip subtrees\n    // in the `subtys` iterator (e.g., when encountering a\n    // projection).\n    match *ty.kind() {\n            ty::FnDef(_, substs) => {\n                // HACK(eddyb) ignore lifetimes found shallowly in `substs`.\n                // This is inconsistent with `ty::Adt` (including all substs)\n                // and with `ty::Closure` (ignoring all substs other than\n                // upvars, of which a `ty::FnDef` doesn't have any), but\n                // consistent with previous (accidental) behavior.\n                // See https://github.com/rust-lang/rust/issues/70917\n                // for further background and discussion.\n                for child in substs {\n                    match child.unpack() {\n                        GenericArgKind::Type(ty) => {\n                            compute_components(tcx, ty, out, visited);\n                        }\n                        GenericArgKind::Lifetime(_) => {}\n                        GenericArgKind::Const(_) => {\n                            compute_components_recursive(tcx, child, out, visited);\n                        }\n                    }\n                }\n            }\n\n            ty::Array(element, _) => {\n                // Don't look into the len const as it doesn't affect regions\n                compute_components(tcx, element, out, visited);\n            }\n\n            ty::Closure(_, ref substs) => {\n                let tupled_ty = substs.as_closure().tupled_upvars_ty();\n                compute_components(tcx, tupled_ty, out, visited);\n            }\n\n            ty::Generator(_, ref substs, _) => {\n                // Same as the closure case\n                let tupled_ty = substs.as_generator().tupled_upvars_ty();\n                compute_components(tcx, tupled_ty, out, visited);\n\n                // We ignore regions in the generator interior as we don't\n                // want these to affect region inference\n            }\n\n            // All regions are bound inside a witness\n            ty::GeneratorWitness(..) => (),\n\n            // OutlivesTypeParameterEnv -- the actual checking that `X:'a`\n            // is implied by the environment is done in regionck.\n            ty::Param(p) => {\n                out.push(Component::Param(p));\n            }\n\n            // For projections, we prefer to generate an obligation like\n            // `<P0 as Trait<P1...Pn>>::Foo: 'a`, because this gives the\n            // regionck more ways to prove that it holds. However,\n            // regionck is not (at least currently) prepared to deal with\n            // higher-ranked regions that may appear in the\n            // trait-ref. Therefore, if we see any higher-ranked regions,\n            // we simply fallback to the most restrictive rule, which\n            // requires that `Pi: 'a` for all `i`.\n            ty::Projection(ref data) => {\n                if !data.has_escaping_bound_vars() {\n                    // best case: no escaping regions, so push the\n                    // projection and skip the subtree (thus generating no\n                    // constraints for Pi). This defers the choice between\n                    // the rules OutlivesProjectionEnv,\n                    // OutlivesProjectionTraitDef, and\n                    // OutlivesProjectionComponents to regionck.\n                    out.push(Component::Projection(*data));\n                } else {\n                    // fallback case: hard code\n                    // OutlivesProjectionComponents.  Continue walking\n                    // through and constrain Pi.\n                    let mut subcomponents = smallvec![];\n                    let mut subvisited = SsoHashSet::new();\n                    compute_components_recursive(tcx, ty.into(), &mut subcomponents, &mut subvisited);\n                    out.push(Component::EscapingProjection(subcomponents.into_iter().collect()));\n                }\n            }\n\n            // We assume that inference variables are fully resolved.\n            // So, if we encounter an inference variable, just record\n            // the unresolved variable as a component.\n            ty::Infer(infer_ty) => {\n                out.push(Component::UnresolvedInferenceVariable(infer_ty));\n            }\n\n            // Most types do not introduce any region binders, nor\n            // involve any other subtle cases, and so the WF relation\n            // simply constraints any regions referenced directly by\n            // the type and then visits the types that are lexically\n            // contained within. (The comments refer to relevant rules\n            // from RFC1214.)\n            ty::Bool |            // OutlivesScalar\n            ty::Char |            // OutlivesScalar\n            ty::Int(..) |         // OutlivesScalar\n            ty::Uint(..) |        // OutlivesScalar\n            ty::Float(..) |       // OutlivesScalar\n            ty::Never |           // ...\n            ty::Adt(..) |         // OutlivesNominalType\n            ty::Opaque(..) |      // OutlivesNominalType (ish)\n            ty::Foreign(..) |     // OutlivesNominalType\n            ty::Str |             // OutlivesScalar (ish)\n            ty::Slice(..) |       // ...\n            ty::RawPtr(..) |      // ...\n            ty::Ref(..) |         // OutlivesReference\n            ty::Tuple(..) |       // ...\n            ty::FnPtr(_) |        // OutlivesFunction (*)\n            ty::Dynamic(..) |     // OutlivesObject, OutlivesFragment (*)\n            ty::Placeholder(..) |\n            ty::Bound(..) |\n            ty::Error(_) => {\n                // (*) Function pointers and trait objects are both binders.\n                // In the RFC, this means we would add the bound regions to\n                // the \"bound regions list\".  In our representation, no such\n                // list is maintained explicitly, because bound regions\n                // themselves can be readily identified.\n                compute_components_recursive(tcx, ty.into(), out, visited);\n            }\n        }\n}"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Projection outlives verification uses overly conservative handling for closure/generator generic arguments",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "verify.rs",
+              "file": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+              "content": "verify.rs"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Closure handling in component computation only uses tupled_upvars_ty, revealing mismatch with verification behavior",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "compute_components",
+              "file": "compiler/rustc_infer/src/infer/outlives/components.rs",
+              "content": "fn compute_components<'tcx>(\n    tcx: TyCtxt<'tcx>,\n    ty: Ty<'tcx>,\n    out: &mut SmallVec<[Component<'tcx>; 4]>,\n    visited: &mut SsoHashSet<GenericArg<'tcx>>,\n) {\n    // Descend through the types, looking for the various \"base\"\n    // components and collecting them into `out`. This is not written\n    // with `collect()` because of the need to sometimes skip subtrees\n    // in the `subtys` iterator (e.g., when encountering a\n    // projection).\n    match *ty.kind() {\n            ty::FnDef(_, substs) => {\n                // HACK(eddyb) ignore lifetimes found shallowly in `substs`.\n                // This is inconsistent with `ty::Adt` (including all substs)\n                // and with `ty::Closure` (ignoring all substs other than\n                // upvars, of which a `ty::FnDef` doesn't have any), but\n                // consistent with previous (accidental) behavior.\n                // See https://github.com/rust-lang/rust/issues/70917\n                // for further background and discussion.\n                for child in substs {\n                    match child.unpack() {\n                        GenericArgKind::Type(ty) => {\n                            compute_components(tcx, ty, out, visited);\n                        }\n                        GenericArgKind::Lifetime(_) => {}\n                        GenericArgKind::Const(_) => {\n                            compute_components_recursive(tcx, child, out, visited);\n                        }\n                    }\n                }\n            }\n\n            ty::Array(element, _) => {\n                // Don't look into the len const as it doesn't affect regions\n                compute_components(tcx, element, out, visited);\n            }\n\n            ty::Closure(_, ref substs) => {\n                let tupled_ty = substs.as_closure().tupled_upvars_ty();\n                compute_components(tcx, tupled_ty, out, visited);\n            }\n\n            ty::Generator(_, ref substs, _) => {\n                // Same as the closure case\n                let tupled_ty = substs.as_generator().tupled_upvars_ty();\n                compute_components(tcx, tupled_ty, out, visited);\n\n                // We ignore regions in the generator interior as we don't\n                // want these to affect region inference\n            }\n\n            // All regions are bound inside a witness\n            ty::GeneratorWitness(..) => (),\n\n            // OutlivesTypeParameterEnv -- the actual checking that `X:'a`\n            // is implied by the environment is done in regionck.\n            ty::Param(p) => {\n                out.push(Component::Param(p));\n            }\n\n            // For projections, we prefer to generate an obligation like\n            // `<P0 as Trait<P1...Pn>>::Foo: 'a`, because this gives the\n            // regionck more ways to prove that it holds. However,\n            // regionck is not (at least currently) prepared to deal with\n            // higher-ranked regions that may appear in the\n            // trait-ref. Therefore, if we see any higher-ranked regions,\n            // we simply fallback to the most restrictive rule, which\n            // requires that `Pi: 'a` for all `i`.\n            ty::Projection(ref data) => {\n                if !data.has_escaping_bound_vars() {\n                    // best case: no escaping regions, so push the\n                    // projection and skip the subtree (thus generating no\n                    // constraints for Pi). This defers the choice between\n                    // the rules OutlivesProjectionEnv,\n                    // OutlivesProjectionTraitDef, and\n                    // OutlivesProjectionComponents to regionck.\n                    out.push(Component::Projection(*data));\n                } else {\n                    // fallback case: hard code\n                    // OutlivesProjectionComponents.  Continue walking\n                    // through and constrain Pi.\n                    let mut subcomponents = smallvec![];\n                    let mut subvisited = SsoHashSet::new();\n                    compute_components_recursive(tcx, ty.into(), &mut subcomponents, &mut subvisited);\n                    out.push(Component::EscapingProjection(subcomponents.into_iter().collect()));\n                }\n            }\n\n            // We assume that inference variables are fully resolved.\n            // So, if we encounter an inference variable, just record\n            // the unresolved variable as a component.\n            ty::Infer(infer_ty) => {\n                out.push(Component::UnresolvedInferenceVariable(infer_ty));\n            }\n\n            // Most types do not introduce any region binders, nor\n            // involve any other subtle cases, and so the WF relation\n            // simply constraints any regions referenced directly by\n            // the type and then visits the types that are lexically\n            // contained within. (The comments refer to relevant rules\n            // from RFC1214.)\n            ty::Bool |            // OutlivesScalar\n            ty::Char |            // OutlivesScalar\n            ty::Int(..) |         // OutlivesScalar\n            ty::Uint(..) |        // OutlivesScalar\n            ty::Float(..) |       // OutlivesScalar\n            ty::Never |           // ...\n            ty::Adt(..) |         // OutlivesNominalType\n            ty::Opaque(..) |      // OutlivesNominalType (ish)\n            ty::Foreign(..) |     // OutlivesNominalType\n            ty::Str |             // OutlivesScalar (ish)\n            ty::Slice(..) |       // ...\n            ty::RawPtr(..) |      // ...\n            ty::Ref(..) |         // OutlivesReference\n            ty::Tuple(..) |       // ...\n            ty::FnPtr(_) |        // OutlivesFunction (*)\n            ty::Dynamic(..) |     // OutlivesObject, OutlivesFragment (*)\n            ty::Placeholder(..) |\n            ty::Bound(..) |\n            ty::Error(_) => {\n                // (*) Function pointers and trait objects are both binders.\n                // In the RFC, this means we would add the bound regions to\n                // the \"bound regions list\".  In our representation, no such\n                // list is maintained explicitly, because bound regions\n                // themselves can be readily identified.\n                compute_components_recursive(tcx, ty.into(), out, visited);\n            }\n        }\n}"
+            }
+          ]
+        },
+        {
+          "id": "E",
+          "name": "Generator handling in outlives component analysis differs from blanket Substs outlives requirement, causing incorrect extra T: 'static demand",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "components.rs",
+              "file": "compiler/rustc_infer/src/infer/outlives/components.rs",
+              "content": "components.rs"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.98
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.96
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.93
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.86
+        },
+        {
+          "source": "E",
+          "target": "I",
+          "weight": 0.82
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 135.667,
+    "stage_times_sec": {
+      "load_bug_context": 0.009,
+      "checkout": 0.854,
+      "load_or_build_graph": 27.923,
+      "symptom_vertices_locating": 84.922,
+      "dynamic_cig_discovering": 20.245,
+      "convert_results": 0.037
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 13,
+      "input_tokens": 37923,
+      "output_tokens": 1444,
+      "total_tokens": 39367,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 2.121,
+          "input_tokens": 1776,
+          "output_tokens": 72,
+          "total_tokens": 1848
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.683,
+          "input_tokens": 1123,
+          "output_tokens": 17,
+          "total_tokens": 1140
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.119,
+          "input_tokens": 1925,
+          "output_tokens": 25,
+          "total_tokens": 1950
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.66,
+          "input_tokens": 1125,
+          "output_tokens": 18,
+          "total_tokens": 1143
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 1.72,
+          "input_tokens": 2026,
+          "output_tokens": 25,
+          "total_tokens": 2051
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 1.852,
+          "input_tokens": 3077,
+          "output_tokens": 47,
+          "total_tokens": 3124
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 1.495,
+          "input_tokens": 3138,
+          "output_tokens": 24,
+          "total_tokens": 3162
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 4.469,
+          "input_tokens": 3514,
+          "output_tokens": 213,
+          "total_tokens": 3727
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 2.742,
+          "input_tokens": 3621,
+          "output_tokens": 200,
+          "total_tokens": 3821
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 3.119,
+          "input_tokens": 4990,
+          "output_tokens": 200,
+          "total_tokens": 5190
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.483,
+          "input_tokens": 3622,
+          "output_tokens": 200,
+          "total_tokens": 3822
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 3.361,
+          "input_tokens": 4987,
+          "output_tokens": 201,
+          "total_tokens": 5188
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 3.017,
+          "input_tokens": 2999,
+          "output_tokens": 202,
+          "total_tokens": 3201
+        }
+      ]
+    }
+  }
+}

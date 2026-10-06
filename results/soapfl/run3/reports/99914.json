@@ -1,0 +1,235 @@
+{
+  "bug_id": "99914",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-07-27",
+    "resolved": "4d6d601c8a83284d6b23c253a3e2a060fd197316"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/expr.rs",
+    "compiler/rustc_typeck/src/check/fn_ctxt/_impl.rs",
+    "compiler/rustc_typeck/src/check/method/probe.rs",
+    "compiler/rustc_typeck/src/check/demand.rs",
+    "compiler/rustc_infer/src/infer/error_reporting/mod.rs",
+    "compiler/rustc_data_structures/src/stack.rs",
+    "compiler/rustc_data_structures/src/captures.rs",
+    "compiler/rustc_data_structures/src/obligation_forest/mod.rs",
+    "compiler/rustc_data_structures/src/transitive_relation.rs",
+    "compiler/rustc_hir/src/hir.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a synchronous `fn foo()` but calls `.await` inside it, violating Rust’s rule that `await` is only allowed within `async` contexts.",
+        "Creates `initial_exchange` as `Result<usize, Error>` using `todo!()`, so type checking proceeds without needing a concrete implementation.",
+        "Invokes `Result::and_then` with a closure `|_| serve_udp_tunnel()`, returning an `async fn` future rather than another `Result`.",
+        "Exercises method resolution and closure return-type inference for `and_then`, which expects `FnOnce(T) -> Result<U, E>` on `Result`.",
+        "Uses an `async fn serve_udp_tunnel() {}` whose call expression has an opaque future type implementing `Future<Output = ()>`.",
+        "Combines `Result` combinators with async syntax, stressing diagnostics around mismatched synchronous and asynchronous control-flow abstractions.",
+        "Forces the compiler to report both an invalid `.await` placement and the incompatible closure return type supplied to `and_then`.",
+        "Targets nightly rustc behavior, likely probing a diagnostic or type-checking bug triggered by async-in-closure misuse with `Result`."
+      ]
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer combines two independent user-facing type errors in the same expression: (1) `.await` is used inside a non-`async` function (`foo`), and (2) `Result::and_then` is given a closure returning `serve_udp_tunnel()`, i.e. an `async fn` future, even though `and_then` requires the closure to return another `Result`. The crash happens during `typeck` of `foo`, not later codegen, which strongly suggests the bug is in expression type checking / error reporting for invalid async usage. The common pattern is a malformed method-call chain where the receiver of `.await` is itself the result of a failed combinator type inference involving an opaque future type. That means rustc likely tried to continue type-checking after detecting the `and_then` mismatch and then mishandled the erroneous type when validating or lowering the `.await` expression outside async context. The mention of `E0728` indicates the compiler was already diagnosing illegal await placement, so the ICE likely comes from diagnostic recovery interacting badly with the `Result::and_then` closure return-type mismatch. In short, this looks like a defect in rustc's type-checking/recovery path for `.await` on an expression whose type is already errorful due to a combinator/closure mismatch involving an async fn future.",
+      "possible_causes": [
+        "A bug in `rustc_typeck` expression checking for `.await` outside of an async context, where the compiler assumes a well-formed awaited operand type even after prior type errors in the method-call chain.",
+        "Incorrect error-recovery in method-call/type inference for `Result::and_then` when the closure returns an opaque future (`impl Future`) instead of `Result<_, _>`, leading to an invalid internal state later consumed by await checking.",
+        "A defect in diagnostics emission order or delayed bug handling: rustc reports E0728 for illegal `.await`, but while also handling the `and_then` closure mismatch it panics instead of cleanly producing both errors.",
+        "Possible mishandling of closure return-type coercion/normalization involving async function calls inside combinator closures, especially when the surrounding expression is subsequently awaited.",
+        "A compiler assumption violation in the async desugaring or await validation path when the base expression is not a future but an already-error type produced by failed method resolution/type inference."
+      ],
+      "evidence": [
+        "The query stack shows the panic occurs during `typeck` of `foo`, pointing to front-end expression/type analysis rather than MIR/codegen.",
+        "The reproducer intentionally uses `.await` in a synchronous `fn foo()`, which should normally produce E0728, not an ICE.",
+        "`Result::and_then` expects a closure returning `Result<U, E>`, but the closure returns `serve_udp_tunnel()`, whose type is an opaque future from an `async fn`; this creates a second type error in the same expression.",
+        "The expression shape `initial_exchange.and_then(|_| serve_udp_tunnel()).await` combines method resolution, closure inference, opaque future typing, and await checking in one chain, a common trigger for recovery bugs.",
+        "Compiler output explicitly references `rustc --explain E0728`, confirming the illegal-await diagnostic path was involved before the internal compiler panic.",
+        "The backtrace and message `internal compiler error: unexpected panic` indicate rustc failed while recovering from invalid user code rather than rejecting it normally."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1459,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/expr.rs",
+        "reason": "Most suspicious because the ICE occurs during `typeck` of `foo`, and the reproducer centers on checking the expression chain `initial_exchange.and_then(|_| serve_udp_tunnel()).await`. This file handles expression typing, including await expressions, method-call result typing, and recovery from invalid expression forms. A bug here could easily arise when `.await` is validated in a non-async function after the receiver expression already has an error type from the bad `and_then` closure return."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/fn_ctxt/_impl.rs",
+        "reason": "Highly suspicious because `FnCtxt` contains core logic used while resolving method calls, obligations, and expression-local inference state. The failure likely involves recovery after combining a bad `Result::and_then` closure return type with illegal `.await`, and this file is a common place where erroneous intermediate types are resolved or assumptions are made before diagnostics are emitted."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/method/probe.rs",
+        "reason": "Method probing is directly exercised by the `initial_exchange.and_then(...)` call. If rustc mishandles method selection or candidate confirmation when the closure returns an opaque future instead of the required `Result`, it could leave an inconsistent state later consumed by await checking. The reproducer specifically stresses method resolution on `Result` combined with closure return-type inference."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/demand.rs",
+        "reason": "The bug may be in mismatch enforcement and diagnostic recovery for the closure passed to `and_then`, where the expected return type is `Result<_, _>` but the actual type is an async future. This file coordinates type mismatch diagnostics and coercion/error recovery, making it a plausible source of an ICE triggered while trying to report both the combinator mismatch and E0728."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/error_reporting/mod.rs",
+        "reason": "Less direct than `rustc_typeck`, but still plausible because the crash appears tied to error recovery and diagnostic emission after multiple type errors in one expression. If inference error reporting assumes a valid awaited operand or well-formed trace while processing the closure return mismatch, it could panic during type checking."
+      },
+      {
+        "path": "compiler/rustc_data_structures/src/stack.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_data_structures/src/captures.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_data_structures/src/obligation_forest/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_data_structures/src/transitive_relation.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_hir/src/hir.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 125.054,
+    "stage_times_sec": {
+      "checkout": 1.607,
+      "load_bug_context": 0.049,
+      "test_behavior_analysis": 4.388,
+      "test_failure_analysis": 11.225,
+      "load_file_candidates": 0.09,
+      "search_suspicious_files": 107.696
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 348543,
+      "output_tokens": 5620,
+      "total_tokens": 354163,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 4.388,
+          "input_tokens": 379,
+          "output_tokens": 245,
+          "total_tokens": 624
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.225,
+          "input_tokens": 2106,
+          "output_tokens": 704,
+          "total_tokens": 2810
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.361,
+          "input_tokens": 27814,
+          "output_tokens": 314,
+          "total_tokens": 28128
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.912,
+          "input_tokens": 27384,
+          "output_tokens": 316,
+          "total_tokens": 27700
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.741,
+          "input_tokens": 27413,
+          "output_tokens": 309,
+          "total_tokens": 27722
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.708,
+          "input_tokens": 27654,
+          "output_tokens": 324,
+          "total_tokens": 27978
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.535,
+          "input_tokens": 27558,
+          "output_tokens": 359,
+          "total_tokens": 27917
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.011,
+          "input_tokens": 27639,
+          "output_tokens": 323,
+          "total_tokens": 27962
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.029,
+          "input_tokens": 27654,
+          "output_tokens": 340,
+          "total_tokens": 27994
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.605,
+          "input_tokens": 27494,
+          "output_tokens": 362,
+          "total_tokens": 27856
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.044,
+          "input_tokens": 26396,
+          "output_tokens": 351,
+          "total_tokens": 26747
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 10.48,
+          "input_tokens": 27399,
+          "output_tokens": 350,
+          "total_tokens": 27749
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.452,
+          "input_tokens": 27693,
+          "output_tokens": 319,
+          "total_tokens": 28012
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.802,
+          "input_tokens": 27377,
+          "output_tokens": 337,
+          "total_tokens": 27714
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 4.839,
+          "input_tokens": 6828,
+          "output_tokens": 189,
+          "total_tokens": 7017
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 8.151,
+          "input_tokens": 9755,
+          "output_tokens": 478,
+          "total_tokens": 10233
+        }
+      ]
+    }
+  }
+}

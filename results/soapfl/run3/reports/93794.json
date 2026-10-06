@@ -1,0 +1,230 @@
+{
+  "bug_id": "93794",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-02-09",
+    "resolved": "0c292c9667f1b202a9150d58bdd2e89e3e803996"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/expr.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/at.rs",
+    "compiler/rustc_infer/src/infer/combine.rs",
+    "compiler/rustc_infer/src/infer/equate.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_typeck/src/check/fn_ctxt/_impl.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `foo` returning `impl IntoIterator<Item = ()>`, exercising opaque return types (`impl Trait`) in function return position.",
+        "Uses two different concrete return expressions: `vec![()]` and `[()].into_iter().collect()`, forcing the compiler to infer one hidden concrete type.",
+        "The `if b { return ...; }` early return makes branch typing explicit, so both control-flow paths must resolve to the same opaque return type.",
+        "`vec![()]` constructs a `Vec<()>`, which implements `IntoIterator<Item = ()>` via owned iteration.",
+        "`[()].into_iter()` on edition 2021 uses array-by-value iteration, producing an iterator over `()` from a fixed-size array.",
+        "Calling `.collect()` without a type annotation relies on type inference from the function’s opaque return type and trait obligations.",
+        "This stresses interaction between `collect()`, `FromIterator`, and opaque type inference to choose a concrete collection type.",
+        "The reproducer targets compiler behavior around normalizing and unifying hidden types for `impl Trait` across multiple return sites."
+      ],
+      "summary": "The reproducer checks whether rustc can correctly infer and unify the hidden concrete type behind `impl IntoIterator<Item = ()>` when different return expressions appear in separate control-flow paths. It combines early returns, edition-2021 array iteration, and annotation-free `collect()` to stress opaque type inference and trait resolution."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on return-position `impl Trait` (an opaque type) being used as the only source of type information for `.collect()`. One branch explicitly returns `vec![()]`, which fixes the hidden concrete type to `Vec<()>`. The other branch returns `[()].into_iter().collect()` with no explicit target type, so type inference must use the already-constrained opaque return type and conclude that `collect()` should produce the same hidden type, i.e. `Vec<()>`. Instead, the compiler reports that `impl IntoIterator<Item = ()>` does not implement `FromIterator<()>`, which shows it is trying to satisfy `collect` directly against the opaque type itself rather than revealing or equating its hidden concrete type. This strongly suggests a defect in opaque type normalization / inference across return sites, especially in trait obligation solving for method calls like `Iterator::collect`. The common pattern is that the compiler handles `impl Trait` correctly enough to accept `vec![()]` as a return value, but fails when that same opaque type must be used as an inferred collection target in another branch. That points to missing propagation of the hidden type or incorrect treatment of the opaque as a rigid abstract type during `collect`'s `FromIterator` obligation generation.",
+      "possible_causes": [
+        "Bug in return-position `impl Trait` hidden-type inference: the first return site constrains the opaque to `Vec<()>`, but that hidden type is not made available when type-checking the later `.collect()` expression in another control-flow branch.",
+        "Defect in trait obligation generation/selection for `Iterator::collect`, where the compiler incorrectly asks for `FromIterator<()>` on the opaque type `impl IntoIterator<Item = ()>` itself instead of normalizing/resolving it to the inferred hidden concrete type.",
+        "Missing or incorrect opaque type normalization during branch unification / control-flow join, causing separate return expressions of the same function to be checked against the abstract opaque alias rather than a unified concrete hidden type.",
+        "Inference ordering bug: early return establishes the hidden type, but method-call inference for `.collect()` happens before or without incorporating that constraint, leaving the target as an unconstrained opaque and producing a spurious E0277.",
+        "Possible issue in RPIT (return-position impl Trait) handling with fallback/type variable resolution, especially when the opaque type is only constrained indirectly through `collect()` and `IntoIterator`/`FromIterator` interaction."
+      ],
+      "evidence": [
+        "The function return type is `impl IntoIterator<Item = ()>`, so the compiler must infer one hidden concrete type shared by all return sites.",
+        "`return vec![()];` provides a concrete candidate `Vec<()>`, which should be sufficient to constrain the opaque hidden type.",
+        "The failing expression is `[()].into_iter().collect()` without annotation, meaning its result type must be inferred from context; the only contextual type is the function's opaque return type.",
+        "The emitted error says `the trait FromIterator<()> is not implemented for impl IntoIterator<Item = ()>`, indicating rustc is treating the opaque return type itself as the `collect` target.",
+        "If the hidden type had been normalized from the other branch, the relevant obligation would be `Vec<()>: FromIterator<()>`, which is satisfied.",
+        "Behavior explicitly stresses unification of multiple return expressions across control flow and interaction between `collect()`, `FromIterator`, and opaque type inference.",
+        "The edition-2021 `[()].into_iter()` produces an iterator of `()`, so the element side is well-formed; the failure is specifically on choosing/building the collection/result type."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1393,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/expr.rs",
+        "reason": "The failure occurs while type-checking the return expression `[()].into_iter().collect()` with only the RPIT return type `impl IntoIterator<Item = ()>` as context. This file contains expression checking and expected-type propagation, so it is highly suspicious for not feeding the hidden concrete type information from the function return into method-call inference for `collect()`."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "The bug strongly suggests that the opaque return type is being treated as an abstract type during inference instead of being tied to its inferred hidden type `Vec<()>` across return sites. This file is the core inference-side machinery for tracking and replacing opaque types and is a prime candidate for missing propagation of RPIT hidden-type constraints."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "The reproducer points to a failure to recover or normalize the hidden type of the opaque return when checking another branch. This file specifically maps instantiated opaque types back to their defining hidden types and validates them, matching the observed problem of not revealing `impl IntoIterator<Item=()>` as `Vec<()>` where needed."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/at.rs",
+        "reason": "This file controls relation operations with the `DefineOpaqueTypes` policy. A bug here could cause the compiler to compare against the opaque alias itself rather than define or reveal it while relating the branch expression result to the function return type."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "reason": "Branch unification and equality/subtyping relations flow through the shared combine infrastructure. If opaque types are mishandled during type relation, the `collect()` target may remain the opaque type itself, producing the exact erroneous `FromIterator<()> for impl IntoIterator<Item=()>` obligation."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/equate.rs",
+        "reason": "The two return sites must effectively equate to the same hidden concrete type. This file implements equality unification and is suspicious if RPIT equality is incorrectly enforced against the opaque alias rather than the inferred hidden type."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "The emitted error is a trait-selection failure for `FromIterator<()>`. This suggests selection may be receiving an unnormalized opaque target type. While likely downstream of the real bug, this file is still a plausible source if trait selection fails to normalize or project through RPIT information in this scenario."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "`collect()` generates a `FromIterator` obligation whose fulfillment fails spuriously. If fulfillment is processing obligations before opaque-type constraints are incorporated, or not revisiting them properly after RPIT inference, this file could be involved."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The failure pattern closely resembles missing normalization of an opaque type before trait obligation solving. This file provides the normalization path used during type checking and trait solving, so it is a plausible place where the opaque return type is not being normalized to its hidden concrete type."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/fn_ctxt/_impl.rs",
+        "reason": "Function-body type checking, obligation resolution, and inference finalization are orchestrated here. Since the first return fixes the hidden type and the second return should reuse that information, a bug in the surrounding `FnCtxt` inference/obligation plumbing could explain the incorrect direct obligation on the opaque type."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 140.114,
+    "stage_times_sec": {
+      "checkout": 0.297,
+      "load_bug_context": 0.083,
+      "test_behavior_analysis": 6.054,
+      "test_failure_analysis": 14.491,
+      "load_file_candidates": 0.084,
+      "search_suspicious_files": 119.104
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 319910,
+      "output_tokens": 5511,
+      "total_tokens": 325421,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.054,
+          "input_tokens": 362,
+          "output_tokens": 290,
+          "total_tokens": 652
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.491,
+          "input_tokens": 1023,
+          "output_tokens": 729,
+          "total_tokens": 1752
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.273,
+          "input_tokens": 26764,
+          "output_tokens": 347,
+          "total_tokens": 27111
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 5.842,
+          "input_tokens": 26363,
+          "output_tokens": 159,
+          "total_tokens": 26522
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.453,
+          "input_tokens": 26552,
+          "output_tokens": 360,
+          "total_tokens": 26912
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.942,
+          "input_tokens": 26546,
+          "output_tokens": 350,
+          "total_tokens": 26896
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.194,
+          "input_tokens": 26455,
+          "output_tokens": 361,
+          "total_tokens": 26816
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.239,
+          "input_tokens": 26625,
+          "output_tokens": 341,
+          "total_tokens": 26966
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.503,
+          "input_tokens": 26592,
+          "output_tokens": 315,
+          "total_tokens": 26907
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 11.03,
+          "input_tokens": 25656,
+          "output_tokens": 310,
+          "total_tokens": 25966
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 10.201,
+          "input_tokens": 26385,
+          "output_tokens": 309,
+          "total_tokens": 26694
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 5.527,
+          "input_tokens": 26590,
+          "output_tokens": 157,
+          "total_tokens": 26747
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.705,
+          "input_tokens": 26143,
+          "output_tokens": 358,
+          "total_tokens": 26501
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.626,
+          "input_tokens": 16977,
+          "output_tokens": 372,
+          "total_tokens": 17349
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.543,
+          "input_tokens": 10877,
+          "output_tokens": 753,
+          "total_tokens": 11630
+        }
+      ]
+    }
+  }
+}

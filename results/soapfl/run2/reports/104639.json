@@ -1,0 +1,236 @@
+{
+  "bug_id": "104639",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-11-19",
+    "resolved": "b833ad56f46a0bbe0e8729512812a161e7dae28a"
+  },
+  "final_top10": [
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+    "compiler/rustc_middle/src/ty/generics.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/universal_regions.rs",
+    "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+    "compiler/rustc_middle/src/ty/visit.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines two free async functions with identical parameter and where-clause constraints but different lifetime generic ordering.",
+        "Uses three named lifetimes and outlives bounds (`'a: 'c`, `'b: 'c`) to exercise lifetime parameter handling in async function signatures.",
+        "The argument type is `&'static str`, so the reproducer isolates generic lifetime processing rather than runtime borrowing behavior.",
+        "`async fn` lowers to an opaque future type, exercising compiler lowering from async syntax plus generic lifetime capture rules.",
+        "The body is empty, minimizing codegen and focusing the test on HIR/type-checking/lowering of the function signature.",
+        "The only semantic difference is generic parameter order: `fail<'a,'b,'c>` versus `pass<'a,'c,'b>`, probing order-sensitive compiler behavior.",
+        "No function is called in `main`, so compilation success depends solely on analyzing and monomorphizing the item definitions.",
+        "Pinned nightly toolchain indicates a regression or ICE tied to a specific compiler version's async/lifetime handling."
+      ],
+      "summary": "This reproducer compares two nearly identical `async fn` items that differ only in lifetime generic ordering. It stresses rustc’s handling of named lifetime parameters, outlives predicates, and async lowering to opaque future types. Because the functions are never called and have empty bodies, any failure points to signature analysis or async/lifetime compilation behavior, especially an order-sensitive bug in the specified nightly compiler."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is strongly order-sensitive and isolated to compiler handling of async function signatures with lifetime generics. Both functions are semantically equivalent: they have the same argument type (`&'static str`), same empty body, and same outlives constraints (`'a: 'c`, `'b: 'c`). The only difference is the declaration order of lifetime parameters. Since `async fn` is lowered to a function returning an opaque `impl Future`, the E0700 error indicates rustc incorrectly concluded that the hidden future type captures a lifetime not present in the opaque type's bounds. Because the body is empty and no function is called, the bug must arise during item signature analysis / async lowering / opaque type lifetime capture computation, not borrow checking of function bodies or monomorphization. The fact that reordering lifetimes from `<'a,'b,'c>` to `<'a,'c,'b>` changes acceptance strongly suggests a defect in compiler logic that maps or enumerates early-bound lifetimes and where-clause predicates for async opaque return types, likely using declaration order incorrectly when deriving which lifetimes are allowed to be captured by the desugared future.",
+      "possible_causes": [
+        "A bug in async fn lowering to the opaque `impl Future` type where captured lifetime parameters are computed incorrectly based on generic parameter order rather than semantic identity.",
+        "Incorrect indexing/remapping of early-bound lifetime parameters during opaque type creation for async functions, causing the hidden future to appear to capture an unexpected region when lifetimes are declared in a particular order.",
+        "Defect in handling where-clause outlives predicates during conversion of `async fn` signatures, so the compiler fails to propagate the proper lifetime bounds from the function generics to the generated opaque future type.",
+        "Order-dependent region/lifetime substitution bug in HIR-to-ty lowering or type checking for async opaque return types, likely involving association between named lifetimes and their internal region variables.",
+        "Fault in the compiler's E0700 hidden-type lifetime capture check for async desugaring, where the set of lifetimes considered in bounds is built incorrectly when generic lifetimes are interleaved differently."
+      ],
+      "evidence": [
+        "The two functions are identical except for lifetime parameter order, yet one errors and one passes, indicating non-semantic order sensitivity in compiler processing.",
+        "The emitted error is E0700 about the hidden type for `impl Future` capturing a lifetime not in bounds, directly implicating async lowering / opaque type lifetime capture logic.",
+        "The parameter type is `&'static str`, so no input lifetime from the function argument should influence the future; this isolates the issue to generic lifetime bookkeeping rather than actual borrowed data flow.",
+        "Both function bodies are empty, ruling out body-dependent borrow checking and showing the bug occurs from signature analysis alone.",
+        "No function is called from `main`, so compilation fails solely while analyzing item definitions, consistent with a defect in type lowering/checking of async function items.",
+        "The reproducer explicitly uses named lifetimes plus outlives constraints (`'a: 'c`, `'b: 'c`), which are exactly the kind of inputs that exercise region parameter ordering and bound propagation logic in rustc."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1536,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Most suspicious because the failure is specifically an E0700 hidden-type lifetime-capture error for an async fn, and this file implements the remapping of enclosing-item generics into opaque type generics. An order-sensitive change in lifetime parameter declaration strongly suggests a bug in generic-argument/lifetime remapping for the desugared opaque future type."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "The reproducer differs only by lifetime generic parameter order. This file computes ty::Generics, parameter indices, and early/late-bound status from HIR, so an indexing/order bug here could make async opaque type machinery see the wrong lifetime ordering or identity."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The only semantic constraints in the reproducer are where-clause outlives predicates ('a: 'c, 'b: 'c). If those predicates are collected or attached incorrectly for async fn/opaque return handling, rustc could wrongly conclude the generated future captures a lifetime not present in bounds."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+        "reason": "This file classifies lifetime parameters and uses as early-bound, late-bound, or free. Since the bug is triggered solely by reordering named lifetimes, a misclassification or incorrect De Bruijn/index assignment for function-item lifetimes could feed bad data into async lowering and opaque type checks."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/generics.rs",
+        "reason": "Core generic-parameter representation lives here, including lifetime parameter indices and conversion to early-bound regions. An internal assumption tied to declaration order could manifest exactly as the observed order-sensitive hidden-type capture failure."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Async fn lowers to an opaque future type, and this file manages inference-time tracking/resolution of opaque types. If the opaque type key or substitutions are formed with incorrect lifetime indexing, E0700 could be emitted even for an empty async body."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "This file resolves opaque hidden types after region inference and rewrites regions into named universal regions. Because E0700 is about hidden-type lifetime capture, a bad region-to-universal remap that depends on lifetime ordering is a plausible downstream cause."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/universal_regions.rs",
+        "reason": "The bug revolves around universally quantified function lifetimes and their ordering. This file enumerates universal regions for a body and assigns internal RegionVids, so an ordering-sensitive mismatch here could corrupt later opaque-type lifetime capture analysis."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+        "reason": "The reproducer uses only outlives relations among named lifetimes. This file builds the outlives graph among universal/free regions, making it relevant if the async future's allowed lifetime relations are computed incorrectly from reordered parameters."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/visit.rs",
+        "reason": "E0700 checks typically rely on discovering which free regions appear in the hidden type. If free-region visitation over the opaque future or its substitutions mishandles region identity/order, rustc could incorrectly report capture of an unbounded lifetime."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 143.224,
+    "stage_times_sec": {
+      "checkout": 6.946,
+      "load_bug_context": 0.102,
+      "test_behavior_analysis": 7.219,
+      "test_failure_analysis": 10.766,
+      "load_file_candidates": 0.094,
+      "search_suspicious_files": 118.099
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 351189,
+      "output_tokens": 6050,
+      "total_tokens": 357239,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.218,
+          "input_tokens": 383,
+          "output_tokens": 298,
+          "total_tokens": 681
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.765,
+          "input_tokens": 1027,
+          "output_tokens": 645,
+          "total_tokens": 1672
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.059,
+          "input_tokens": 26702,
+          "output_tokens": 345,
+          "total_tokens": 27047
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.935,
+          "input_tokens": 26319,
+          "output_tokens": 375,
+          "total_tokens": 26694
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 5.546,
+          "input_tokens": 26274,
+          "output_tokens": 259,
+          "total_tokens": 26533
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.14,
+          "input_tokens": 26418,
+          "output_tokens": 338,
+          "total_tokens": 26756
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.699,
+          "input_tokens": 26550,
+          "output_tokens": 373,
+          "total_tokens": 26923
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.326,
+          "input_tokens": 26635,
+          "output_tokens": 330,
+          "total_tokens": 26965
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.911,
+          "input_tokens": 26604,
+          "output_tokens": 295,
+          "total_tokens": 26899
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.7,
+          "input_tokens": 26523,
+          "output_tokens": 321,
+          "total_tokens": 26844
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.039,
+          "input_tokens": 26436,
+          "output_tokens": 295,
+          "total_tokens": 26731
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.48,
+          "input_tokens": 25206,
+          "output_tokens": 352,
+          "total_tokens": 25558
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 10.027,
+          "input_tokens": 26582,
+          "output_tokens": 314,
+          "total_tokens": 26896
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.872,
+          "input_tokens": 26734,
+          "output_tokens": 362,
+          "total_tokens": 27096
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.519,
+          "input_tokens": 21301,
+          "output_tokens": 430,
+          "total_tokens": 21731
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.821,
+          "input_tokens": 11495,
+          "output_tokens": 718,
+          "total_tokens": 12213
+        }
+      ]
+    }
+  }
+}

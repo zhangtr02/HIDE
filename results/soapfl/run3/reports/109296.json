@@ -1,0 +1,245 @@
+{
+  "bug_id": "109296",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-03-17",
+    "resolved": "511364e7874dba9649a264100407e4bffe7b5425"
+  },
+  "final_top10": [
+    "compiler/rustc_infer/src/infer/combine.rs",
+    "compiler/rustc_hir_analysis/src/check/check.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_hir_analysis/src/impl_wf_check.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_ty_utils/src/assoc.rs",
+    "compiler/rustc_middle/src/ty/assoc.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with an associated constant `ASSOC: usize`, exercising trait-associated constants and path syntax like `<Type as Trait>::CONST`.",
+        "Implements the trait for array types using const generics: `impl<const N: u64> Q for [u8; N] {}`.",
+        "Uses an array length parameterized by a const generic `N`, testing compiler support for const-generic array impls.",
+        "The impl omits the required associated constant definition, so trait item completeness checking should reject the impl.",
+        "References the missing associated constant in a function return type: `[u8; <[u8; 13] as Q>::ASSOC]`.",
+        "Exercises type-level constant evaluation in array lengths, requiring trait resolution and normalization of an associated const.",
+        "Also stresses integer-type consistency across const contexts: impl uses `u64` for `N`, while array lengths and `ASSOC` are `usize`-typed.",
+        "`q_user` has no body, so parsing and type checking reach an invalid signature before normal function code generation matters."
+      ],
+      "summary": "The reproducer combines const generics, array types, and trait-associated constants. It provides an invalid impl of `Q` for `[u8; N]` that omits the required `ASSOC`, then uses `<[u8; 13] as Q>::ASSOC` in an array return type. This exercises trait item validation, associated-const projection, const evaluation in types, and compiler error handling around malformed const-generic trait impls."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on an invalid trait impl involving associated consts plus const generics on arrays, followed by use of the associated const in a type-level array length. The impl `impl<const N: u64> Q for [u8; N] {}` is malformed because trait `Q` requires `const ASSOC: usize;`, so normal compiler behavior should emit a trait item completeness/type-checking error. Instead, compilation reaches `rustc_hir_analysis::check_crate` and aborts with an ICE, indicating the compiler likely continues analysis of the impl or projected associated const after detecting an incomplete impl. The common theme is incomplete trait impl validation interacting with associated-const projection normalization in const/type contexts. The use of `<[u8; 13] as Q>::ASSOC` inside an array length forces trait resolution and constant evaluation for an associated item that was never actually provided, which suggests a missing error-path guard, an assumption that the associated const exists, or faulty handling of erroneous impl items during HIR/type checking. The array impl also uses a const generic parameter of type `u64` for `[u8; N]`, while array lengths are fundamentally `usize`-based, which may further stress normalization or diagnostics around malformed const-generic array impls, but the primary issue is that an invalid impl should be rejected gracefully rather than causing a panic during analysis.",
+      "possible_causes": [
+        "Bug in trait impl completeness checking in `rustc_hir_analysis`: missing required associated consts are not fully rejected before later analysis queries attempt to resolve or normalize them.",
+        "Defect in associated-const projection/type normalization for `<Type as Trait>::ASSOC` used in array lengths, where the compiler assumes a matching impl item exists and panics when the impl omitted it.",
+        "Error recovery bug in HIR/type checking: after recording the impl as erroneous, later passes still process the missing associated const as if it had a body or value, leading to an ICE during `check_crate`.",
+        "Faulty interaction between const generics on array impls and associated item validation, especially for `[u8; N]` impl headers, causing malformed impls to bypass or confuse normal trait-item checks.",
+        "Possible missing guard around const-evaluation of trait-associated consts in type-level contexts when trait resolution succeeded enough to find an impl but the selected impl is incomplete/invalid.",
+        "Secondary possibility: incorrect handling of integer-typed const parameters for array impls (`u64` const param for `[u8; N]`) in the presence of associated-const projection triggers an internal assumption violation instead of a user-facing type error."
+      ],
+      "evidence": [
+        "The trait `Q` declares a required associated constant `const ASSOC: usize;`, but the impl `impl<const N: u64> Q for [u8; N] {}` provides no `ASSOC` definition.",
+        "The reproducer explicitly references `<[u8; 13] as Q>::ASSOC` in an array length, forcing associated-const resolution and normalization in a type-level const context.",
+        "The expected behavior is a normal semantic error about an incomplete trait impl, yet rustc aborts with an ICE (`thread panicked while panicking. aborting.`), showing defective compiler error handling rather than reproducer misuse.",
+        "The stack trace shows the crash during `rustc_hir_analysis::check_crate`, consistent with trait item validation/type checking rather than later codegen.",
+        "`q_user` has no body, so the crash is triggered by signature/type analysis alone, narrowing the fault to compiler semantic analysis of the invalid associated const usage.",
+        "The reproducer combines three stressed areas called out by the behavior summary: trait-associated constants, const generics on arrays, and const evaluation in array lengths; the crash occurs exactly where these features intersect.",
+        "The query stack is empty at abort, suggesting a panic in an error path or a secondary panic during diagnostic/reporting after an earlier internal inconsistency was hit."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1594,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "reason": "Inside `InferCtxt::super_combine_consts`, rustc tried and failed to relate a `usize` array length `13` against an inferred `u64` const parameter from the impl, producing the `cannot relate consts of different types` ICE. That relation/unification logic lives here, making this file the most directly implicated location; a guard is evidently missing so that consts of differing types get compared and asserted on instead of being cleanly rejected."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/check.rs",
+        "reason": "Most suspicious because the ICE occurs during `rustc_hir_analysis::check_crate`, and this file is the central semantic checker for trait/impl conformance. The reproducer’s invalid impl omits a required associated const, so a bug here could let an incomplete impl proceed far enough that later analysis panics instead of emitting a normal error."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The reproducer stresses well-formedness of an impl header and a type-level associated-const projection in an array length. This file performs WF checking and normalization of item signatures, so it is a likely place for missing error-path guards when an impl is malformed but its associated const is still referenced in a type."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "`<[u8; 13] as Q>::ASSOC` forces associated-item projection/normalization. If trait resolution finds the impl but assumes the associated const exists, projection code here could hit an internal assumption and ICE when the impl omitted the required const."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "The failing signature contains a qualified associated-const path inside an array length. AST-to-type conversion for such paths happens here, and malformed recovery around associated-item lookup plus const/type lowering could allow invalid data into later checking phases."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/impl_wf_check.rs",
+        "reason": "This file specifically validates impls early in HIR analysis. Although it focuses on impl well-formedness and constrained params, the bug may stem from an incomplete trait impl not being rejected robustly enough before associated-const use triggers later crashes."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "The associated const is used in an array length, so the compiler must decide whether the const expression is evaluatable. If the const-evaluatable path does not gracefully handle a missing impl-provided associated const, it could contribute to the ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Array lengths and anonymous const/type contexts rely on declared-type computation from HIR. This file may be involved in assigning types to the associated-const projection within the function signature before completeness errors are fully handled."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/assoc.rs",
+        "reason": "The failure may involve mapping trait items to impl items for associated consts. If assoc-item query logic does not correctly cope with an impl missing a required trait item, later consumers could observe inconsistent associated-item metadata and panic."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/assoc.rs",
+        "reason": "This file defines the core representation of associated items, including links between trait items and impl items. A bad assumption here about every required trait const having an implementor could surface when projecting `<[u8; 13] as Q>::ASSOC`."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 138.284,
+    "stage_times_sec": {
+      "checkout": 2.608,
+      "load_bug_context": 0.141,
+      "test_behavior_analysis": 5.902,
+      "test_failure_analysis": 14.855,
+      "load_file_candidates": 0.403,
+      "search_suspicious_files": 114.374
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 379243,
+      "output_tokens": 6442,
+      "total_tokens": 385685,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.902,
+          "input_tokens": 378,
+          "output_tokens": 320,
+          "total_tokens": 698
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.855,
+          "input_tokens": 1948,
+          "output_tokens": 813,
+          "total_tokens": 2761
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.188,
+          "input_tokens": 27513,
+          "output_tokens": 323,
+          "total_tokens": 27836
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.547,
+          "input_tokens": 27618,
+          "output_tokens": 310,
+          "total_tokens": 27928
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.295,
+          "input_tokens": 27100,
+          "output_tokens": 271,
+          "total_tokens": 27371
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.386,
+          "input_tokens": 27544,
+          "output_tokens": 317,
+          "total_tokens": 27861
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.738,
+          "input_tokens": 27486,
+          "output_tokens": 332,
+          "total_tokens": 27818
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.014,
+          "input_tokens": 27814,
+          "output_tokens": 391,
+          "total_tokens": 28205
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.585,
+          "input_tokens": 27642,
+          "output_tokens": 316,
+          "total_tokens": 27958
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.766,
+          "input_tokens": 27545,
+          "output_tokens": 329,
+          "total_tokens": 27874
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.246,
+          "input_tokens": 27698,
+          "output_tokens": 318,
+          "total_tokens": 28016
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.122,
+          "input_tokens": 27470,
+          "output_tokens": 367,
+          "total_tokens": 27837
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.635,
+          "input_tokens": 27780,
+          "output_tokens": 328,
+          "total_tokens": 28108
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.61,
+          "input_tokens": 27789,
+          "output_tokens": 354,
+          "total_tokens": 28143
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.736,
+          "input_tokens": 27679,
+          "output_tokens": 318,
+          "total_tokens": 27997
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 5.843,
+          "input_tokens": 9853,
+          "output_tokens": 332,
+          "total_tokens": 10185
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.631,
+          "input_tokens": 8386,
+          "output_tokens": 703,
+          "total_tokens": 9089
+        }
+      ]
+    }
+  }
+}

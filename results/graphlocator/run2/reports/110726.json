@@ -1,0 +1,248 @@
+{
+  "bug_id": "110726",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-04-22",
+    "resolved": "fec9adcdbc21469ef105162cc8cabf81c72d06be"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/region_infer/mod.rs",
+    "compiler/rustc_middle/src/ty/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+      "compiler/rustc_borrowck/src/region_infer/mod.rs",
+      "compiler/rustc_middle/src/ty/mod.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/mod.rs",
+        "rank": 2
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/mod.rs",
+        "rank": 3
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/110726.json",
+    "graph_cache_hit": false,
+    "graph_cache_build_mode": "skeleton",
+    "graph_cache_bug_id": "110726",
+    "graph_cache_checkout_commit": "fec9adcdbc21469ef105162cc8cabf81c72d06be",
+    "initial_graph_node_count": 50964,
+    "initial_graph_edge_count": 50963,
+    "graph_node_count": 50964,
+    "graph_edge_count": 145732,
+    "lazy_loaded_edge_count": 94769,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"infer_opaque_types\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/region_infer/opaque_types.rs\", \"content\": \"pub(crate) fn infer_opaque_types(\\n        &self,\\n        infcx: &InferCtxt<'tcx>,\\n        opaque_ty_decls: FxIndexMap<OpaqueTypeKey<'tcx>, (OpaqueHiddenType<'tcx>, OpaqueTyOrigin)>,\\n    ) -> FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>> {\\n        let mut result: FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>> = FxIndexMap::default();\\n\\n        let member_constraints: FxIndexMap<_, _> = self\\n            .member_constraints\\n            .all_indices()\\n            .map(|ci| (self.member_constraints[ci].key, ci))\\n            .collect();\\n        debug!(?member_constraints);\\n\\n        for (opaque_type_key, (concrete_type, origin)) in opaque_ty_decls {\\n            let substs = opaque_type_key.substs;\\n            debug!(?concrete_type, ?substs);\\n\\n            let mut subst_regions = vec![self.universal_regions.fr_static];\\n\\n            let to_universal_region = |vid, subst_regions: &mut Vec<_>| {\\n                trace!(?vid);\\n                let scc = self.constraint_sccs.scc(vid);\\n                trace!(?scc);\\n                match self.scc_values.universal_regions_outlived_by(scc).find_map(|lb| {\\n                    self.eval_equal(vid, lb).then_some(self.definitions[lb].external_name?)\\n                }) {\\n                    Some(region) => {\\n                        let vid = self.universal_regions.to_region_vid(region);\\n                        subst_regions.push(vid);\\n                        region\\n                    }\\n                    None => {\\n                        subst_regions.push(vid);\\n                        infcx.tcx.mk_re_error_with_message(\\n                            concrete_type.span,\\n                            \\\"opaque type with non-universal region substs\\\",\\n                        )\\n                    }\\n                }\\n            };\\n\\n            // Start by inserting universal regions from the member_constraint choice regions.\\n            // This will ensure they get precedence when folding the regions in the concrete type.\\n            if let Some(&ci) = member_constraints.get(&opaque_type_key) {\\n                for &vid in self.member_constraints.choice_regions(ci) {\\n                    to_universal_region(vid, &mut subst_regions);\\n                }\\n            }\\n            debug!(?subst_regions);\\n\\n            // Next, insert universal regions from substs, so we can translate regions that appear\\n            // in them but are not subject to member constraints, for instance closure substs.\\n            let universal_substs = infcx.tcx.fold_regions(substs, |region, _| {\\n                if let ty::RePlaceholder(..) = region.kind() {\\n                    // Higher kinded regions don't need remapping, they don't refer to anything outside of this the substs.\\n                    return region;\\n                }\\n                let vid = self.to_region_vid(region);\\n                to_universal_region(vid, &mut subst_regions)\\n            });\\n            debug!(?universal_substs);\\n            debug!(?subst_regions);\\n\\n            // Deduplicate the set of regions while keeping the chosen order.\\n            let subst_regions = subst_regions.into_iter().collect::<FxIndexSet<_>>();\\n            debug!(?subst_regions);\\n\\n            let universal_concrete_type =\\n                infcx.tcx.fold_regions(concrete_type, |region, _| match *region {\\n                    ty::ReVar(vid) => subst_regions\\n                        .iter()\\n                        .find(|ur_vid| self.eval_equal(vid, **ur_vid))\\n                        .and_then(|ur_vid| self.definitions[*ur_vid].external_name)\\n                        .unwrap_or(infcx.tcx.lifetimes.re_erased),\\n                    _ => region,\\n                });\\n            debug!(?universal_concrete_type);\\n\\n            let opaque_type_key =\\n                OpaqueTypeKey { def_id: opaque_type_key.def_id, substs: universal_substs };\\n            let ty = infcx.infer_opaque_definition_from_instantiation(\\n                opaque_type_key,\\n                universal_concrete_type,\\n                origin,\\n            );\\n            // Sometimes two opaque types are the same only after we remap the generic parameters\\n            // back to the opaque type definition. E.g. we may have `OpaqueType<X, Y>` mapped to `(X, Y)`\\n            // and `OpaqueType<Y, X>` mapped to `(Y, X)`, and those are the same, but we only know that\\n            // once we convert the generic parameters to those of the opaque type.\\n            if let Some(prev) = result.get_mut(&opaque_type_key.def_id) {\\n                if prev.ty != ty {\\n                    let guar = ty.error_reported().err().unwrap_or_else(|| {\\n                        prev.report_mismatch(\\n                            &OpaqueHiddenType { ty, span: concrete_type.span },\\n                            infcx.tcx,\\n                        )\\n                    });\\n                    prev.ty = infcx.tcx.ty_error(guar);\\n                }\\n                // Pick a better span if there is one.\\n                // FIXME(oli-obk): collect multiple spans for better diagnostics down the road.\\n                prev.span = prev.span.substitute_dummy(concrete_type.span);\\n            } else {\\n                result.insert(\\n                    opaque_type_key.def_id,\\n                    OpaqueHiddenType { ty, span: concrete_type.span },\\n                );\\n            }\\n        }\\n        result\\n    }\"}",
+      "{\"type\": \"STRUCTURE\", \"name\": \"OpaqueHiddenType\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/ty/mod.rs\", \"content\": \"pub struct OpaqueHiddenType<'tcx> {\\n    /// The span of this particular definition of the opaque type. So\\n    /// for example:\\n    ///\\n    /// ```ignore (incomplete snippet)\\n    /// type Foo = impl Baz;\\n    /// fn bar() -> Foo {\\n    /// //          ^^^ This is the span we are looking for!\\n    /// }\\n    /// ```\\n    ///\\n    /// In cases where the fn returns `(impl Trait, impl Trait)` or\\n    /// other such combinations, the result is currently\\n    /// over-approximated, but better than nothing.\\n    pub span: Span,\\n\\n    /// The type variable that represents the value of the opaque type\\n    /// that we require. In other words, after we compile this function,\\n    /// we will be created a constraint like:\\n    /// ```ignore (pseudo-rust)\\n    /// Foo<'a, T> = ?C\\n    /// ```\\n    /// where `?C` is the value of this type variable. =) It may\\n    /// naturally refer to the type and lifetime parameters in scope\\n    /// in this function, though ultimately it should only reference\\n    /// those that are arguments to `Foo` in the constraint above. (In\\n    /// other words, `?C` should not include `'b`, even though it's a\\n    /// lifetime parameter on `foo`.)\\n    pub ty: Ty<'tcx>,\\n}\"}",
+      "{\"type\": \"STRUCTURE\", \"name\": \"OpaqueTypeKey\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/ty/mod.rs\", \"content\": \"pub struct OpaqueTypeKey<'tcx> {\\n    pub def_id: LocalDefId,\\n    pub substs: SubstsRef<'tcx>,\\n}\"}",
+      "{\"type\": \"STRUCTURE\", \"name\": \"RegionInferenceContext\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/region_infer/mod.rs\", \"content\": \"pub struct RegionInferenceContext<'tcx> {\\n    pub var_infos: VarInfos,\\n\\n    /// Contains the definition for every region variable. Region\\n    /// variables are identified by their index (`RegionVid`). The\\n    /// definition contains information about where the region came\\n    /// from as well as its final inferred value.\\n    definitions: IndexVec<RegionVid, RegionDefinition<'tcx>>,\\n\\n    /// The liveness constraints added to each region. For most\\n    /// regions, these start out empty and steadily grow, though for\\n    /// each universally quantified region R they start out containing\\n    /// the entire CFG and `end(R)`.\\n    liveness_constraints: LivenessValues<RegionVid>,\\n\\n    /// The outlives constraints computed by the type-check.\\n    constraints: Frozen<OutlivesConstraintSet<'tcx>>,\\n\\n    /// The constraint-set, but in graph form, making it easy to traverse\\n    /// the constraints adjacent to a particular region. Used to construct\\n    /// the SCC (see `constraint_sccs`) and for error reporting.\\n    constraint_graph: Frozen<NormalConstraintGraph>,\\n\\n    /// The SCC computed from `constraints` and the constraint\\n    /// graph. We have an edge from SCC A to SCC B if `A: B`. Used to\\n    /// compute the values of each region.\\n    constraint_sccs: Rc<Sccs<RegionVid, ConstraintSccIndex>>,\\n\\n    /// Reverse of the SCC constraint graph --  i.e., an edge `A -> B` exists if\\n    /// `B: A`. This is used to compute the universal regions that are required\\n    /// to outlive a given SCC. Computed lazily.\\n    rev_scc_graph: Option<Rc<ReverseSccGraph>>,\\n\\n    /// The \\\"R0 member of [R1..Rn]\\\" constraints, indexed by SCC.\\n    member_constraints: Rc<MemberConstraintSet<'tcx, ConstraintSccIndex>>,\\n\\n    /// Records the member constraints that we applied to each scc.\\n    /// This is useful for error reporting. Once constraint\\n    /// propagation is done, this vector is sorted according to\\n    /// `member_region_scc`.\\n    member_constraints_applied: Vec<AppliedMemberConstraint>,\\n\\n    /// Map universe indexes to information on why we created it.\\n    universe_causes: FxIndexMap<ty::UniverseIndex, UniverseInfo<'tcx>>,\\n\\n    /// Contains the minimum universe of any variable within the same\\n    /// SCC. We will ensure that no SCC contains values that are not\\n    /// visible from this index.\\n    scc_universes: IndexVec<ConstraintSccIndex, ty::UniverseIndex>,\\n\\n    /// Contains a \\\"representative\\\" from each SCC. This will be the\\n    /// minimal RegionVid belonging to that universe. It is used as a\\n    /// kind of hacky way to manage checking outlives relationships,\\n    /// since we can 'canonicalize' each region to the representative\\n    /// of its SCC and be sure that -- if they have the same repr --\\n    /// they *must* be equal (though not having the same repr does not\\n    /// mean they are unequal).\\n    scc_representatives: IndexVec<ConstraintSccIndex, ty::RegionVid>,\\n\\n    /// The final inferred values of the region variables; we compute\\n    /// one value per SCC. To get the value for any given *region*,\\n    /// you first find which scc it is a part of.\\n    scc_values: RegionValues<ConstraintSccIndex>,\\n\\n    /// Type constraints that we check after solving.\\n    type_tests: Vec<TypeTest<'tcx>>,\\n\\n    /// Information about the universally quantified regions in scope\\n    /// on this function.\\n    universal_regions: Rc<UniversalRegions<'tcx>>,\\n\\n    /// Information about how the universally quantified regions in\\n    /// scope on this function relate to one another.\\n    universal_region_relations: Frozen<UniversalRegionRelations<'tcx>>,\\n}\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+      "compiler/rustc_borrowck/src/region_infer/mod.rs",
+      "compiler/rustc_middle/src/ty/mod.rs"
+    ],
+    "found_modules": [
+      "compiler/rustc_borrowck/src/region_infer/mod.rs::RegionInferenceContext",
+      "compiler/rustc_middle/src/ty/mod.rs::OpaqueTypeKey",
+      "compiler/rustc_middle/src/ty/mod.rs::OpaqueHiddenType"
+    ],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Opaque type inference rejects non-universal region substitutions produced during recursive RPIT handling with an unused lifetime",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "infer_opaque_types",
+              "file": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+              "content": "pub(crate) fn infer_opaque_types(\n        &self,\n        infcx: &InferCtxt<'tcx>,\n        opaque_ty_decls: FxIndexMap<OpaqueTypeKey<'tcx>, (OpaqueHiddenType<'tcx>, OpaqueTyOrigin)>,\n    ) -> FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>> {\n        let mut result: FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>> = FxIndexMap::default();\n\n        let member_constraints: FxIndexMap<_, _> = self\n            .member_constraints\n            .all_indices()\n            .map(|ci| (self.member_constraints[ci].key, ci))\n            .collect();\n        debug!(?member_constraints);\n\n        for (opaque_type_key, (concrete_type, origin)) in opaque_ty_decls {\n            let substs = opaque_type_key.substs;\n            debug!(?concrete_type, ?substs);\n\n            let mut subst_regions = vec![self.universal_regions.fr_static];\n\n            let to_universal_region = |vid, subst_regions: &mut Vec<_>| {\n                trace!(?vid);\n                let scc = self.constraint_sccs.scc(vid);\n                trace!(?scc);\n                match self.scc_values.universal_regions_outlived_by(scc).find_map(|lb| {\n                    self.eval_equal(vid, lb).then_some(self.definitions[lb].external_name?)\n                }) {\n                    Some(region) => {\n                        let vid = self.universal_regions.to_region_vid(region);\n                        subst_regions.push(vid);\n                        region\n                    }\n                    None => {\n                        subst_regions.push(vid);\n                        infcx.tcx.mk_re_error_with_message(\n                            concrete_type.span,\n                            \"opaque type with non-universal region substs\",\n                        )\n                    }\n                }\n            };\n\n            // Start by inserting universal regions from the member_constraint choice regions.\n            // This will ensure they get precedence when folding the regions in the concrete type.\n            if let Some(&ci) = member_constraints.get(&opaque_type_key) {\n                for &vid in self.member_constraints.choice_regions(ci) {\n                    to_universal_region(vid, &mut subst_regions);\n                }\n            }\n            debug!(?subst_regions);\n\n            // Next, insert universal regions from substs, so we can translate regions that appear\n            // in them but are not subject to member constraints, for instance closure substs.\n            let universal_substs = infcx.tcx.fold_regions(substs, |region, _| {\n                if let ty::RePlaceholder(..) = region.kind() {\n                    // Higher kinded regions don't need remapping, they don't refer to anything outside of this the substs.\n                    return region;\n                }\n                let vid = self.to_region_vid(region);\n                to_universal_region(vid, &mut subst_regions)\n            });\n            debug!(?universal_substs);\n            debug!(?subst_regions);\n\n            // Deduplicate the set of regions while keeping the chosen order.\n            let subst_regions = subst_regions.into_iter().collect::<FxIndexSet<_>>();\n            debug!(?subst_regions);\n\n            let universal_concrete_type =\n                infcx.tcx.fold_regions(concrete_type, |region, _| match *region {\n                    ty::ReVar(vid) => subst_regions\n                        .iter()\n                        .find(|ur_vid| self.eval_equal(vid, **ur_vid))\n                        .and_then(|ur_vid| self.definitions[*ur_vid].external_name)\n                        .unwrap_or(infcx.tcx.lifetimes.re_erased),\n                    _ => region,\n                });\n            debug!(?universal_concrete_type);\n\n            let opaque_type_key =\n                OpaqueTypeKey { def_id: opaque_type_key.def_id, substs: universal_substs };\n            let ty = infcx.infer_opaque_definition_from_instantiation(\n                opaque_type_key,\n                universal_concrete_type,\n                origin,\n            );\n            // Sometimes two opaque types are the same only after we remap the generic parameters\n            // back to the opaque type definition. E.g. we may have `OpaqueType<X, Y>` mapped to `(X, Y)`\n            // and `OpaqueType<Y, X>` mapped to `(Y, X)`, and those are the same, but we only know that\n            // once we convert the generic parameters to those of the opaque type.\n            if let Some(prev) = result.get_mut(&opaque_type_key.def_id) {\n                if prev.ty != ty {\n                    let guar = ty.error_reported().err().unwrap_or_else(|| {\n                        prev.report_mismatch(\n                            &OpaqueHiddenType { ty, span: concrete_type.span },\n                            infcx.tcx,\n                        )\n                    });\n                    prev.ty = infcx.tcx.ty_error(guar);\n                }\n                // Pick a better span if there is one.\n                // FIXME(oli-obk): collect multiple spans for better diagnostics down the road.\n                prev.span = prev.span.substitute_dummy(concrete_type.span);\n            } else {\n                result.insert(\n                    opaque_type_key.def_id,\n                    OpaqueHiddenType { ty, span: concrete_type.span },\n                );\n            }\n        }\n        result\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Region inference context tracks universal/non-universal regions and SCC-based region relationships that can leave the RPIT lifetime subst non-universal in this recursive case",
+          "code_elements": [
+            {
+              "type": "STRUCTURE",
+              "name": "RegionInferenceContext",
+              "file": "compiler/rustc_borrowck/src/region_infer/mod.rs",
+              "content": "pub struct RegionInferenceContext<'tcx> {\n    pub var_infos: VarInfos,\n\n    /// Contains the definition for every region variable. Region\n    /// variables are identified by their index (`RegionVid`). The\n    /// definition contains information about where the region came\n    /// from as well as its final inferred value.\n    definitions: IndexVec<RegionVid, RegionDefinition<'tcx>>,\n\n    /// The liveness constraints added to each region. For most\n    /// regions, these start out empty and steadily grow, though for\n    /// each universally quantified region R they start out containing\n    /// the entire CFG and `end(R)`.\n    liveness_constraints: LivenessValues<RegionVid>,\n\n    /// The outlives constraints computed by the type-check.\n    constraints: Frozen<OutlivesConstraintSet<'tcx>>,\n\n    /// The constraint-set, but in graph form, making it easy to traverse\n    /// the constraints adjacent to a particular region. Used to construct\n    /// the SCC (see `constraint_sccs`) and for error reporting.\n    constraint_graph: Frozen<NormalConstraintGraph>,\n\n    /// The SCC computed from `constraints` and the constraint\n    /// graph. We have an edge from SCC A to SCC B if `A: B`. Used to\n    /// compute the values of each region.\n    constraint_sccs: Rc<Sccs<RegionVid, ConstraintSccIndex>>,\n\n    /// Reverse of the SCC constraint graph --  i.e., an edge `A -> B` exists if\n    /// `B: A`. This is used to compute the universal regions that are required\n    /// to outlive a given SCC. Computed lazily.\n    rev_scc_graph: Option<Rc<ReverseSccGraph>>,\n\n    /// The \"R0 member of [R1..Rn]\" constraints, indexed by SCC.\n    member_constraints: Rc<MemberConstraintSet<'tcx, ConstraintSccIndex>>,\n\n    /// Records the member constraints that we applied to each scc.\n    /// This is useful for error reporting. Once constraint\n    /// propagation is done, this vector is sorted according to\n    /// `member_region_scc`.\n    member_constraints_applied: Vec<AppliedMemberConstraint>,\n\n    /// Map universe indexes to information on why we created it.\n    universe_causes: FxIndexMap<ty::UniverseIndex, UniverseInfo<'tcx>>,\n\n    /// Contains the minimum universe of any variable within the same\n    /// SCC. We will ensure that no SCC contains values that are not\n    /// visible from this index.\n    scc_universes: IndexVec<ConstraintSccIndex, ty::UniverseIndex>,\n\n    /// Contains a \"representative\" from each SCC. This will be the\n    /// minimal RegionVid belonging to that universe. It is used as a\n    /// kind of hacky way to manage checking outlives relationships,\n    /// since we can 'canonicalize' each region to the representative\n    /// of its SCC and be sure that -- if they have the same repr --\n    /// they *must* be equal (though not having the same repr does not\n    /// mean they are unequal).\n    scc_representatives: IndexVec<ConstraintSccIndex, ty::RegionVid>,\n\n    /// The final inferred values of the region variables; we compute\n    /// one value per SCC. To get the value for any given *region*,\n    /// you first find which scc it is a part of.\n    scc_values: RegionValues<ConstraintSccIndex>,\n\n    /// Type constraints that we check after solving.\n    type_tests: Vec<TypeTest<'tcx>>,\n\n    /// Information about the universally quantified regions in scope\n    /// on this function.\n    universal_regions: Rc<UniversalRegions<'tcx>>,\n\n    /// Information about how the universally quantified regions in\n    /// scope on this function relate to one another.\n    universal_region_relations: Frozen<UniversalRegionRelations<'tcx>>,\n}"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Opaque type key stores RPIT substitutions directly, so a recursive call can carry the problematic lifetime subst into opaque type inference",
+          "code_elements": [
+            {
+              "type": "STRUCTURE",
+              "name": "OpaqueTypeKey",
+              "file": "compiler/rustc_middle/src/ty/mod.rs",
+              "content": "pub struct OpaqueTypeKey<'tcx> {\n    pub def_id: LocalDefId,\n    pub substs: SubstsRef<'tcx>,\n}"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Hidden opaque type may retain a concrete type whose inferred lifetime dependencies do not match the required universal opaque type parameters",
+          "code_elements": [
+            {
+              "type": "STRUCTURE",
+              "name": "OpaqueHiddenType",
+              "file": "compiler/rustc_middle/src/ty/mod.rs",
+              "content": "pub struct OpaqueHiddenType<'tcx> {\n    /// The span of this particular definition of the opaque type. So\n    /// for example:\n    ///\n    /// ```ignore (incomplete snippet)\n    /// type Foo = impl Baz;\n    /// fn bar() -> Foo {\n    /// //          ^^^ This is the span we are looking for!\n    /// }\n    /// ```\n    ///\n    /// In cases where the fn returns `(impl Trait, impl Trait)` or\n    /// other such combinations, the result is currently\n    /// over-approximated, but better than nothing.\n    pub span: Span,\n\n    /// The type variable that represents the value of the opaque type\n    /// that we require. In other words, after we compile this function,\n    /// we will be created a constraint like:\n    /// ```ignore (pseudo-rust)\n    /// Foo<'a, T> = ?C\n    /// ```\n    /// where `?C` is the value of this type variable. =) It may\n    /// naturally refer to the type and lifetime parameters in scope\n    /// in this function, though ultimately it should only reference\n    /// those that are arguments to `Foo` in the constraint above. (In\n    /// other words, `?C` should not include `'b`, even though it's a\n    /// lifetime parameter on `foo`.)\n    pub ty: Ty<'tcx>,\n}"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.99
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.9
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.86
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.78
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 566.543,
+    "stage_times_sec": {
+      "load_bug_context": 0.0,
+      "checkout": 1.643,
+      "load_or_build_graph": 32.24,
+      "symptom_vertices_locating": 510.332,
+      "dynamic_cig_discovering": 20.53,
+      "convert_results": 0.015
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 10,
+      "input_tokens": 63827,
+      "output_tokens": 1270,
+      "total_tokens": 65097,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.092,
+          "input_tokens": 3850,
+          "output_tokens": 107,
+          "total_tokens": 3957
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 3.38,
+          "input_tokens": 4959,
+          "output_tokens": 80,
+          "total_tokens": 5039
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.141,
+          "input_tokens": 6006,
+          "output_tokens": 52,
+          "total_tokens": 6058
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.997,
+          "input_tokens": 6072,
+          "output_tokens": 65,
+          "total_tokens": 6137
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 3.667,
+          "input_tokens": 6246,
+          "output_tokens": 26,
+          "total_tokens": 6272
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 5.423,
+          "input_tokens": 5558,
+          "output_tokens": 219,
+          "total_tokens": 5777
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 3.92,
+          "input_tokens": 8995,
+          "output_tokens": 180,
+          "total_tokens": 9175
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 2.944,
+          "input_tokens": 7112,
+          "output_tokens": 179,
+          "total_tokens": 7291
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.861,
+          "input_tokens": 7153,
+          "output_tokens": 181,
+          "total_tokens": 7334
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 4.328,
+          "input_tokens": 7876,
+          "output_tokens": 181,
+          "total_tokens": 8057
+        }
+      ]
+    }
+  }
+}

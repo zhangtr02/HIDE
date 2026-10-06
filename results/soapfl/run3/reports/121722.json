@@ -1,0 +1,251 @@
+{
+  "bug_id": "121722",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-27",
+    "resolved": "fc3800f65777a365b5125706d60f97e4d0675efe"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect.rs",
+    "compiler/rustc_ast_lowering/src/item.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_parse/src/parser/ty.rs",
+    "compiler/rustc_parse/src/parser/item.rs",
+    "compiler/rustc_hir_analysis/src/outlives/implicit_infer.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_parse/src/parser/attr.rs",
+    "compiler/rustc_attr/src/builtin.rs",
+    "compiler/rustc_hir_analysis/src/check/check.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `#[repr(C)]` structs/unions to force C-layout computation and ABI checks on malformed item definitions.",
+        "Uses anonymous underscore-named fields (`_`) in structs/unions, exercising parser handling of placeholder-like field identifiers.",
+        "Introduces inline `union` and `struct` types directly in field positions, stressing parsing and lowering of nested ad-hoc aggregate syntax.",
+        "Places multiple syntactically incomplete aggregate declarations inside other aggregates, targeting parser recovery on severely malformed type grammar.",
+        "Applies `#[repr(C)]` repeatedly around invalid items, forcing attribute attachment and layout-related validation despite broken syntax.",
+        "Uses an invalid `#[main(C)]` attribute, exercising attribute parsing, name resolution, and diagnostics for malformed built-in attributes.",
+        "Mixes valid helper types (`Foo`, `Bar`) with invalid nested aggregates, checking whether surrounding well-formed definitions affect error recovery.",
+        "Includes both structs and unions (`D`, `D2`, `E`, `E2`) with malformed fields, broadening coverage of aggregate-item parsing and compiler diagnostics."
+      ],
+      "summary": "The reproducer is mostly malformed Rust designed to stress rustc’s parser and error recovery. It combines `repr(C)`, invalid `main` attributes, anonymous `_` fields, and deeply nested inline `struct`/`union` declarations with missing pieces. A few valid types (`Foo`, `Bar`) anchor the input, while later items intentionally corrupt aggregate syntax to exercise parsing, attribute handling, item lowering, and layout-related validation without crashing."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is that the input is intentionally heavily malformed, but it repeatedly uses `#[repr(C)]` structs/unions and nested aggregate-like field syntax so that rustc continues far enough into item collection and ADT construction to compute layout-/type-related metadata. The ICE occurs during `adt_def` computation for `D`, not during early parsing only, which strongly suggests parser recovery produced a partially-invalid HIR/AST item that later compiler stages treated as a valid ADT field list. The query stack also shows inference of outlives predicates for unrelated valid type `Foo`, indicating the compiler kept analyzing surrounding recovered items instead of cleanly rejecting the malformed aggregate. The notable similarity across the failing items is malformed field declarations inside `struct`/`union` bodies, especially underscore-named fields and inline `union`/`struct` fragments in field position. This points to a defect in error recovery / AST lowering / item collection for malformed aggregate fields, where invalid recovered field syntax is not filtered out before ADT definition construction or trait/lifetime predicate collection. Because `repr(C)` forces extra ADT/layout processing, that likely exposes an invariant violation in the compiler when recovered fields have missing or nonsensical types.",
+      "possible_causes": [
+        "Bug in parser recovery for struct/union field grammar: malformed inline `struct`/`union` field syntax is recovered into field nodes that later stages incorrectly assume are well-formed.",
+        "Missing validation in AST lowering or HIR construction for recovered aggregate fields, allowing `struct D` to reach `adt_def` computation with invalid field definitions or placeholder types.",
+        "Invariant violation in `rustc_hir_analysis`/ADT definition building for `repr(C)` aggregates: code may assume every recovered field has a valid type and proper kind, but malformed anonymous `_` fields or inline aggregate fragments break that assumption.",
+        "Defect in item collection after syntax errors, where invalid fields from parser recovery are still registered for semantic analysis instead of being converted into error nodes that short-circuit later queries.",
+        "`repr(C)` layout/ABI validation path may be traversing partially-recovered aggregate fields without guarding against parse-error placeholders, causing panic during ADT construction for `D`.",
+        "Attribute recovery interaction bug: repeated `#[repr(C)]` and invalid `#[main(C)]` may leave malformed item/attribute state that confuses later aggregate analysis, but the core issue is likely insufficient robustness when semantic passes see recovered invalid items."
+      ],
+      "evidence": [
+        "The panic query stack starts at `adt_def` for `D`, showing the crash happens in semantic ADT construction rather than only in parsing.",
+        "The source is dominated by malformed struct/union field syntax, especially nested inline aggregates and incomplete declarations inside field positions.",
+        "The reproducer deliberately combines valid helper types (`Foo`, `Bar`) with invalid aggregates, and the compiler proceeds into `inferred_outlives_*` and `predicates_of`, meaning erroneous recovered items were analyzed too far.",
+        "`#[repr(C)]` is repeatedly applied to malformed aggregates, increasing the chance that layout/ABI-related ADT code is invoked on partially-invalid definitions.",
+        "The compiler reports many normal errors (`due to 29 previous errors`) yet still ICEs, which is characteristic of an error-recovery robustness bug rather than a simple front-end rejection failure.",
+        "The failing item named in the stack is `D`, one of the malformed aggregates with mixed valid and invalid fields, matching the hypothesis that field recovery/lowering left an inconsistent internal representation."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1744,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect.rs",
+        "reason": "The ICE occurs at query `adt_def` for `D`, and this file is the provider entry point wiring `adt_def` and related item-collection queries. Since malformed recovered aggregate fields appear to survive far enough to semantic ADT construction, the bug is very likely in or near the `adt_def` collection path exposed here."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "The reproducer relies on severe parser recovery for malformed struct/union field syntax, yet later phases see an ADT `D` as analyzable. That strongly suggests AST-to-HIR lowering may be preserving or mis-lowering invalid recovered fields instead of converting them into error nodes or dropping them."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "A likely root cause is missing AST validation for malformed aggregate items after recovery. This pass is meant to reject invalid AST shapes before HIR lowering, so if anonymous `_` fields plus inline malformed `struct`/`union` fragments are not screened out here, later `adt_def` code can hit invalid invariants."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/ty.rs",
+        "reason": "The malformed constructs are concentrated in type positions inside struct/union fields, especially inline `struct`/`union` fragments and incomplete aggregate syntax. That points to type parser recovery producing structurally invalid `Ty` nodes that later phases incorrectly treat as legitimate field types."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/item.rs",
+        "reason": "Some invalid nested `struct`/`union` declarations appear in item-like syntax inside field positions, so item parsing and its recovery rules are also suspicious. Incorrect recovery here could synthesize partial field/item AST nodes that propagate into ADT construction for `D`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/outlives/implicit_infer.rs",
+        "reason": "The query stack continues through `inferred_outlives_crate` and `inferred_outlives_of`, showing the malformed ADT participates in implicit well-formedness analysis. If recovered invalid field types are not guarded against, this file’s traversal over struct/union fields could be exposing the latent invariant violation."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The stack includes `predicates_of` and `predicates_defined_on` for nearby items, indicating predicate construction proceeds on partially-invalid definitions. This file appends inferred outlives predicates and may assume ADT metadata and field-derived obligations are well-formed when recovery has left them inconsistent."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/attr.rs",
+        "reason": "The reproducer also includes repeated `#[repr(C)]` and an invalid `#[main(C)]` attribute. While probably secondary, malformed attribute parsing/recovery could contribute to an inconsistent item state that allows invalid aggregates to reach semantic ADT analysis."
+      },
+      {
+        "path": "compiler/rustc_attr/src/builtin.rs",
+        "reason": "Because `repr(C)` is central to forcing the failing path and `#[main(C)]` is intentionally malformed, builtin attribute validation is a plausible contributing layer. A recovery bug here could leave invalid attribute semantics attached to malformed items instead of causing clean early rejection."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/check.rs",
+        "reason": "`repr(C)` aggregates trigger layout and ABI-oriented semantic checks, and this file contains many ADT validation routines for structs/unions. Even though the first visible query is `adt_def`, missing robustness in downstream ADT validation against recovered erroneous fields makes this file a reasonable suspect."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 152.293,
+    "stage_times_sec": {
+      "checkout": 4.967,
+      "load_bug_context": 0.065,
+      "test_behavior_analysis": 6.169,
+      "test_failure_analysis": 12.069,
+      "load_file_candidates": 0.315,
+      "search_suspicious_files": 128.708
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 426049,
+      "output_tokens": 6658,
+      "total_tokens": 432707,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.169,
+          "input_tokens": 706,
+          "output_tokens": 311,
+          "total_tokens": 1017
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.069,
+          "input_tokens": 2499,
+          "output_tokens": 711,
+          "total_tokens": 3210
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.809,
+          "input_tokens": 28157,
+          "output_tokens": 334,
+          "total_tokens": 28491
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.023,
+          "input_tokens": 28161,
+          "output_tokens": 329,
+          "total_tokens": 28490
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.553,
+          "input_tokens": 27680,
+          "output_tokens": 312,
+          "total_tokens": 27992
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.962,
+          "input_tokens": 27917,
+          "output_tokens": 278,
+          "total_tokens": 28195
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.146,
+          "input_tokens": 27901,
+          "output_tokens": 327,
+          "total_tokens": 28228
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.302,
+          "input_tokens": 28302,
+          "output_tokens": 350,
+          "total_tokens": 28652
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.171,
+          "input_tokens": 28051,
+          "output_tokens": 305,
+          "total_tokens": 28356
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.357,
+          "input_tokens": 28066,
+          "output_tokens": 323,
+          "total_tokens": 28389
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.403,
+          "input_tokens": 28124,
+          "output_tokens": 313,
+          "total_tokens": 28437
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.828,
+          "input_tokens": 27933,
+          "output_tokens": 302,
+          "total_tokens": 28235
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.451,
+          "input_tokens": 28272,
+          "output_tokens": 394,
+          "total_tokens": 28666
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.292,
+          "input_tokens": 28177,
+          "output_tokens": 289,
+          "total_tokens": 28466
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.282,
+          "input_tokens": 28311,
+          "output_tokens": 290,
+          "total_tokens": 28601
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.36,
+          "input_tokens": 28079,
+          "output_tokens": 381,
+          "total_tokens": 28460
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.773,
+          "input_tokens": 16591,
+          "output_tokens": 347,
+          "total_tokens": 16938
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.963,
+          "input_tokens": 13122,
+          "output_tokens": 762,
+          "total_tokens": 13884
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,229 @@
+{
+  "bug_id": "97378",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-05-23",
+    "resolved": "b2eed72a6fbf254e7d44942eaa121fcbed05d3fb"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/generator.rs",
+    "compiler/rustc_mir_build/src/build/matches/simplify.rs",
+    "compiler/rustc_mir_build/src/build/matches/test.rs",
+    "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_const_eval/src/transform/validate.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_ast_lowering/src/block.rs",
+    "compiler/rustc_ast_lowering/src/pat.rs",
+    "compiler/rustc_typeck/src/check/upvar.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines an enum with a single struct-like variant, exercising enum pattern destructuring of owned fields.",
+        "Declares an async function, so rustc lowers it into a state-machine future during compilation.",
+        "Creates an inner `async move` block that captures `event` by value, testing move capture into nested async futures.",
+        "Uses an irrefutable `let` pattern `let Request::Resolve { url } = event;` inside the async block, exercising destructuring without a `match`.",
+        "Moves the `String` field `url` out of `event`, testing ownership transfer during async lowering.",
+        "Immediately awaits the inner async block, exercising nested future creation and await desugaring within another async context.",
+        "Because the pattern is irrefutable for the current enum shape, the code checks compiler handling of destructuring that is logically exhaustive without explicit branching.",
+        "The reproducer targets compiler behavior around MIR/HIR lowering and borrow-checking for nested async move captures plus pattern binding."
+      ],
+      "summary": "The reproducer defines a one-variant enum and passes it into an async function. Inside, a nested `async move` block captures the enum by value, destructures it with an irrefutable `let` pattern, moves out the `String` field, and is immediately awaited. This stresses rustc’s async lowering, capture analysis, ownership handling, and destructuring logic in nested async contexts."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failing case combines several compiler-sensitive features in one minimal example: an async fn, a nested `async move` block, capture of a function parameter by value, immediate `.await`, and an irrefutable `let` destructuring that moves a field out of an enum. The common pattern is that rustc must lower nested async constructs into generator/state-machine MIR while also preserving correct ownership and binding semantics for a by-value enum destructure. Because the query stack is empty and the compiler ICEs instead of emitting a normal diagnostic, this strongly suggests an internal inconsistency during HIR/MIR lowering or a later MIR transformation/validation step, rather than a front-end type error. The most suspicious scenario is mishandling of irrefutable enum-pattern `let` inside an `async move` body: the compiler may incorrectly treat the pattern as requiring branching/reachability logic, or may build invalid bindings/places when moving `url` out of captured `event` in the generated future. Since the enum has only one variant, exhaustiveness/simplification logic may also be interacting badly with async lowering, producing malformed MIR for the generator body.",
+      "possible_causes": [
+        "Bug in async/generator lowering for nested `async move` blocks that capture an outer parameter by value and then destructure that captured value with an irrefutable `let` pattern.",
+        "Incorrect MIR construction for `let Request::Resolve { url } = event;` inside an async body, especially when moving a field out of a captured enum into a future state machine.",
+        "Fault in capture analysis or upvar handling where the nested future stores `event` by move, but subsequent pattern destructuring creates invalid move paths, bindings, or projections in MIR.",
+        "Compiler defect in enum-pattern lowering/simplification for single-variant enums inside async contexts, possibly assuming different control-flow/exhaustiveness behavior and generating malformed MIR.",
+        "Issue in MIR validation/borrow-check preparation after async desugaring, where ownership transfer of `url: String` out of `event` inside the generator is represented inconsistently and triggers an ICE instead of a user-facing error or successful compilation."
+      ],
+      "evidence": [
+        "The reproducer specifically stresses nested async lowering: an `async fn` contains an immediately awaited inner `async move` block.",
+        "The inner async block captures `event` by value, which requires generator capture analysis and storage in the synthesized future.",
+        "Inside that async block, `let Request::Resolve { url } = event;` destructures an enum and moves out an owned `String`, exercising move-path generation.",
+        "The enum has only one variant, making the pattern logically irrefutable and likely to hit special-case destructuring or exhaustiveness simplification paths.",
+        "The compiler panics with an ICE rather than reporting a normal semantic error, and the query stack is empty, which is consistent with an internal lowering/MIR construction/validation bug.",
+        "The behavior summary explicitly points to MIR/HIR lowering, borrow-checking, nested async move captures, and pattern binding as the stressed compiler areas."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1427,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_transform/src/generator.rs",
+        "reason": "Most suspicious because the reproducer specifically stresses async/generator lowering: an async fn contains an immediately awaited nested `async move` block that captures `event` by value and then moves `url` out via an irrefutable enum-pattern `let`. This file rewrites async/generator MIR into the state machine and handles captured upvars, saved locals, and drop behavior, which is exactly where malformed MIR or invalid move handling for this pattern could ICE."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/simplify.rs",
+        "reason": "Highly suspicious because the reproducer uses an irrefutable `let Request::Resolve { url } = event;` on a single-variant enum. This file explicitly handles `TestCase::Irrefutable` patterns and flattens them during MIR match-building. A bug here could mishandle enum destructuring in `let`-pattern lowering, especially when nested inside async-generated bodies."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/test.rs",
+        "reason": "Also suspicious due to enum-pattern lowering logic. Although irrefutable patterns should usually be simplified away before runtime testing, this file is responsible for selecting tests for remaining pattern forms and explicitly distinguishes illegal/irrefutable cases. If async/nested lowering leaves an unexpected pattern form here, it could produce invalid MIR or trigger an ICE."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/as_place.rs",
+        "reason": "The nested `async move` block captures `event` by value, so upvar/place construction is central. This file builds MIR places for locals, field accesses, and upvars, including closure/coroutine capture details. A bug in representing the captured `event` place before destructuring/moving out `url` could cascade into malformed MIR in async contexts."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "The failure description strongly suggests an internal inconsistency in MIR after lowering, especially around move paths and ownership transfer out of a captured enum in a generator body. This MIR type-checking stage is where broken MIR often becomes an ICE, so it is a plausible point of failure even if the root bug originates earlier."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/validate.rs",
+        "reason": "If async lowering or pattern lowering produces structurally invalid MIR, the late MIR validator is a likely component to detect and ICE on it. The reproducer’s combination of captured enum destructuring and ownership movement inside a generator makes MIR invariant violation plausible."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "Possible earlier root cause because async blocks and await are first desugared during AST-to-HIR lowering here. Incorrect lowering of the nested `async move` expression structure or capture boundaries could later surface as invalid MIR during generator transformation."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/block.rs",
+        "reason": "Relevant because the problematic construct is a local `let` statement inside the inner async block. This file lowers block bodies and local let statements; a bug in how that `let` is represented before later MIR construction could contribute to the issue."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/pat.rs",
+        "reason": "Relevant due to the enum destructuring pattern itself. The pattern is simple but special: an irrefutable struct-like enum variant pattern on a single-variant enum. If pattern lowering loses some property that later async/MIR lowering expects, it could trigger downstream ICEs."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/upvar.rs",
+        "reason": "Some suspicion because the reproducer depends on precise by-value capture of `event` into a nested `async move` block. This file performs closure upvar capture analysis, and a bad capture classification or place computation for the moved enum could interact badly with later generator lowering and destructuring."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 124.335,
+    "stage_times_sec": {
+      "checkout": 2.66,
+      "load_bug_context": 0.121,
+      "test_behavior_analysis": 5.675,
+      "test_failure_analysis": 12.909,
+      "load_file_candidates": 0.162,
+      "search_suspicious_files": 102.809
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 343353,
+      "output_tokens": 5660,
+      "total_tokens": 349013,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.675,
+          "input_tokens": 382,
+          "output_tokens": 296,
+          "total_tokens": 678
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.909,
+          "input_tokens": 2232,
+          "output_tokens": 618,
+          "total_tokens": 2850
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 5.861,
+          "input_tokens": 27853,
+          "output_tokens": 289,
+          "total_tokens": 28142
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.906,
+          "input_tokens": 27406,
+          "output_tokens": 372,
+          "total_tokens": 27778
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.942,
+          "input_tokens": 27637,
+          "output_tokens": 334,
+          "total_tokens": 27971
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.265,
+          "input_tokens": 27629,
+          "output_tokens": 284,
+          "total_tokens": 27913
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.963,
+          "input_tokens": 27648,
+          "output_tokens": 353,
+          "total_tokens": 28001
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 6.709,
+          "input_tokens": 27708,
+          "output_tokens": 300,
+          "total_tokens": 28008
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.923,
+          "input_tokens": 27675,
+          "output_tokens": 378,
+          "total_tokens": 28053
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.657,
+          "input_tokens": 27344,
+          "output_tokens": 351,
+          "total_tokens": 27695
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.181,
+          "input_tokens": 26978,
+          "output_tokens": 281,
+          "total_tokens": 27259
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.346,
+          "input_tokens": 27465,
+          "output_tokens": 312,
+          "total_tokens": 27777
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.7,
+          "input_tokens": 27295,
+          "output_tokens": 305,
+          "total_tokens": 27600
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.398,
+          "input_tokens": 25184,
+          "output_tokens": 371,
+          "total_tokens": 25555
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.933,
+          "input_tokens": 12917,
+          "output_tokens": 816,
+          "total_tokens": 13733
+        }
+      ]
+    }
+  }
+}

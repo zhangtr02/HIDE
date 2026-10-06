@@ -1,0 +1,235 @@
+{
+  "bug_id": "118990",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-08-26",
+    "resolved": "7480389611f9d04bd34adf41a2b3029be4eb815e"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/method/probe.rs",
+    "compiler/rustc_typeck/src/check/method/confirm.rs",
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+    "compiler/rustc_mir_build/src/build/expr/as_operand.rs",
+    "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+    "compiler/rustc_const_eval/src/transform/validate.rs",
+    "compiler/rustc_typeck/src/check/expr.rs",
+    "compiler/rustc_typeck/src/check/fn_ctxt/_impl.rs",
+    "compiler/rustc_mir_build/src/build/block.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a zero-sized struct and implements `Drop`, making values of that type non-trivially droppable.",
+        "Adds an inherent method `throw(&self)`, then uses method-call syntax on the type name: `CompileError.throw()`.",
+        "This syntax requires autoref/autoderef and method resolution to interpret the receiver from a path naming the type.",
+        "The call appears after `break 'code` inside a labeled block, so it is statically unreachable code.",
+        "The labeled block expression is terminated with `;`, exercising type-checking of block expressions used only for control flow.",
+        "The compiler still analyzes unreachable statements enough for name resolution, method lookup, and drop-related checks.",
+        "Because the receiver type implements `Drop`, the compiler must avoid incorrectly treating the type path as a movable value or temporary."
+      ],
+      "summary": "The reproducer creates a `Drop` type, defines a by-reference inherent method, and places an invalid-looking method call on the type name after an early `break` in a labeled block. It exercises unreachable-code checking, method resolution/autoref on a type path, and special compiler handling for `Drop` types during type checking and borrow/drop analysis."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern combines three compiler-sensitive features: (1) method-call resolution on a path that names a type rather than a value (`CompileError.throw()`), (2) the receiver method takes `&self`, so method probing/autoref may try to manufacture a receiver adjustment, and (3) the expression is inside statically unreachable code after `break`, yet rustc still type-checks enough of it under `-Z validate-mir`. The type also implements `Drop`, which makes any accidental treatment of the type path as a value/temporary more dangerous because drop elaboration and MIR validation impose extra invariants. The common theme is that unreachable HIR/MIR is not being rejected or lowered consistently before method resolution / THIR-MIR construction / drop elaboration, allowing an invalid receiver form to survive far enough to hit an internal invariant and ICE instead of producing a normal diagnostic.",
+      "possible_causes": [
+        "A bug in method-call receiver checking or probe logic that incorrectly accepts a type-relative path as an expression receiver in unreachable code, then creates invalid autoref/autoderef adjustments for `&self` methods.",
+        "A defect in THIR/MIR lowering for invalid or unreachable method-call expressions, where a path naming an ADT type is mis-lowered as a value/zero-sized temporary, violating invariants once the type is `Drop`.",
+        "A bug in drop elaboration / MIR validation triggered by unreachable code: the compiler may still build drop or storage-live/dead state for a non-existent temporary receiver, and `Drop` causes validation to panic.",
+        "Missing error recovery boundary between type checking and MIR construction: an earlier semantic error around `CompileError.throw()` may not be converted into an `ErrorGuaranteed`, so later passes assume well-typed MIR and ICE.",
+        "Special-case handling for unreachable expressions after `break` in labeled block expressions may skip normal rejection paths, letting malformed method-call receiver state propagate into later compiler phases."
+      ],
+      "evidence": [
+        "The reproducer uses `CompileError.throw()` where `CompileError` is a type name, not a value; this specifically stresses method resolution and receiver adjustment on an invalid receiver form.",
+        "`throw` has signature `fn throw(&self)`, so successful lookup would require autoref of some receiver; autoref on a type path is nonsensical and points to receiver-handling defects.",
+        "`CompileError` implements `Drop`, and the behavior summary explicitly notes the compiler must avoid treating the type path as a movable value or temporary; mishandling this would affect drop elaboration/validation.",
+        "The problematic statement is after `break 'code`, so the code is unreachable; the summary says the compiler still analyzes such code for name resolution, method lookup, and drop-related checks, matching a bug in unreachable-code handling rather than user logic.",
+        "The compiler was run with `-Z validate-mir`, and the output shows an ICE with no user-facing type error and an empty query stack, which is consistent with an internal invariant failure in MIR construction/elaboration/validation rather than a normal semantic rejection.",
+        "The labeled block terminated with `;` forces block-expression typing/control-flow handling, adding another path where unreachable expression lowering may diverge from ordinary expression checking."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1480,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/method/probe.rs",
+        "reason": "Most suspicious because the reproducer centers on invalid method-call syntax using a type path as the receiver (`CompileError.throw()`) for a `&self` method. That directly exercises method probing, autoderef/autoref candidate search, and special handling of near-miss static-vs-method cases. A bug here could incorrectly accept or partially accept the receiver, allowing malformed state to flow into later phases instead of producing a normal error."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/method/confirm.rs",
+        "reason": "If probe finds an invalid candidate, confirmation is the next place where receiver adjustments are materialized. This file applies autoref/autoderef and unifies the receiver with the method signature, so mishandling a type-path receiver in unreachable code could create bogus adjustments or an invalid callee setup that later ICEs during MIR construction/validation."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "Very plausible because the issue likely depends on lowering a malformed-yet-typechecked expression into THIR. This file consumes type-check adjustments and turns HIR expressions into THIR expressions used for MIR building. If `CompileError.throw()` is misrepresented as an expression receiver or bogus temporary, unreachable-code lowering plus `Drop` semantics could violate later MIR invariants."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/as_operand.rs",
+        "reason": "The reproducer suggests the compiler may accidentally treat the type path as a value/temporary receiver for the method call. This file is responsible for deciding when expressions become MIR operands and when temporaries are introduced, exactly the kind of logic that could go wrong for an invalid receiver in unreachable code, especially with a `Drop` type."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+        "reason": "The type implements `Drop`, and the ICE happens under `-Z validate-mir`, making drop elaboration highly relevant. If earlier phases manufactured an impossible temporary/value for the receiver, this pass could create invalid drop-flag or drop terminator structure for unreachable code, leading to a validation failure or panic."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/validate.rs",
+        "reason": "The compiler was invoked with `-Z validate-mir`, and the symptom is an ICE without a normal user-facing type error. This validation pass checks MIR structural/type invariants and is therefore a likely crash site when malformed MIR survives lowering, especially around unreachable blocks, temporaries, and drops."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/expr.rs",
+        "reason": "Expression type checking governs method-call expressions, unreachable-expression checking, and recovery paths. Since the bad call occurs after `break` in a labeled block, this file is a strong candidate for missing or incomplete rejection/recovery that allows invalid receiver information to persist into later stages."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/fn_ctxt/_impl.rs",
+        "reason": "This file contains core `FnCtxt` behavior including unreachable-code handling and method/path-related checking helpers. Because the statement is statically unreachable, a bug in divergence/recovery logic here could explain why invalid method-call state was not converted into an error and instead propagated into MIR."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/block.rs",
+        "reason": "The reproducer specifically uses a labeled block with an early `break` and a trailing semicolon, so MIR block construction for breakable scopes and unreachable trailing statements is directly involved. If unreachable statements after `break` are still lowered inconsistently, this file could be where malformed control-flow or statement lowering begins."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "Less likely as root cause, but still plausible as the pass that detects malformed MIR after lowering/transforms. Since this module reports MIR type inconsistencies as internal compiler bugs, it is a reasonable candidate if the ICE arises when borrowck MIR type checking encounters an impossible receiver/temp/drop pattern produced earlier."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 136.017,
+    "stage_times_sec": {
+      "checkout": 2.922,
+      "load_bug_context": 0.039,
+      "test_behavior_analysis": 4.794,
+      "test_failure_analysis": 11.336,
+      "load_file_candidates": 0.091,
+      "search_suspicious_files": 116.835
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 355560,
+      "output_tokens": 6256,
+      "total_tokens": 361816,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 4.794,
+          "input_tokens": 383,
+          "output_tokens": 251,
+          "total_tokens": 634
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.336,
+          "input_tokens": 2198,
+          "output_tokens": 654,
+          "total_tokens": 2852
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.536,
+          "input_tokens": 27866,
+          "output_tokens": 350,
+          "total_tokens": 28216
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.38,
+          "input_tokens": 27441,
+          "output_tokens": 376,
+          "total_tokens": 27817
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.272,
+          "input_tokens": 27442,
+          "output_tokens": 303,
+          "total_tokens": 27745
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.313,
+          "input_tokens": 27684,
+          "output_tokens": 338,
+          "total_tokens": 28022
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.87,
+          "input_tokens": 27600,
+          "output_tokens": 347,
+          "total_tokens": 27947
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.321,
+          "input_tokens": 27680,
+          "output_tokens": 364,
+          "total_tokens": 28044
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.013,
+          "input_tokens": 27652,
+          "output_tokens": 350,
+          "total_tokens": 28002
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.285,
+          "input_tokens": 27639,
+          "output_tokens": 325,
+          "total_tokens": 27964
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.56,
+          "input_tokens": 26233,
+          "output_tokens": 366,
+          "total_tokens": 26599
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.597,
+          "input_tokens": 27647,
+          "output_tokens": 340,
+          "total_tokens": 27987
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.294,
+          "input_tokens": 27606,
+          "output_tokens": 335,
+          "total_tokens": 27941
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.139,
+          "input_tokens": 27320,
+          "output_tokens": 335,
+          "total_tokens": 27655
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.048,
+          "input_tokens": 11219,
+          "output_tokens": 376,
+          "total_tokens": 11595
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.181,
+          "input_tokens": 11950,
+          "output_tokens": 846,
+          "total_tokens": 12796
+        }
+      ]
+    }
+  }
+}

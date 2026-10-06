@@ -1,0 +1,252 @@
+{
+  "bug_id": "122861",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-03-22",
+    "resolved": "0ad927c0c07b65fc0dae37105e09c877c87c296a"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_trait_selection/src/traits/coherence.rs",
+    "compiler/rustc_trait_selection/src/traits/normalize.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+    "compiler/rustc_trait_selection/src/solve/mod.rs",
+    "compiler/rustc_middle/src/traits/specialization_graph.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a custom `Cow<'a, B, O = <B as ToOwned>::Owned>` enum using a defaulted type parameter that depends on an associated type projection.",
+        "Uses `?Sized` and lifetime bounds on `B`, exercising generic parameter handling for potentially unsized borrowed types.",
+        "Instantiates the generic type as `Cow<'_, str>`, forcing normalization of the default `O` to `<str as ToOwned>::Owned`.",
+        "Provides an empty `impl ToString for Cow<'_, str>`, relying on trait impl coherence and method resolution for a concrete projected specialization.",
+        "Defines `impl<B: ?Sized> Display for Cow<'a, B> {}`, exercising blanket trait implementation over a generic unsized parameter.",
+        "The `Display` impl references lifetime `'a` without introducing it in the impl header, exercising compiler name resolution and lifetime binding diagnostics.",
+        "Combines a concrete `ToString` impl with a generic `Display` impl on the same type family, probing overlap checking and trait relationship handling.",
+        "The reproducer mainly stresses rustc’s handling of associated-type defaults, specialization-like concrete instantiations, and malformed impl generics during trait checking."
+      ],
+      "summary": "The reproducer builds a custom `Cow` with a default associated-type-based parameter, then adds trait impls for both a concrete `Cow<'_, str>` and a generic `Cow<'a, B>`. It exercises generic defaults, unsized types, trait coherence, associated type normalization, and compiler diagnostics around an invalid impl header using an undeclared lifetime."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during trait coherence/specialization graph construction for `ToString`, not during normal parsing of the malformed impl alone. The reproducer combines: (a) a type with a default generic parameter defined by an associated type projection (`O = <B as ToOwned>::Owned`), (b) a concrete impl `impl ToString for Cow<'_, str>`, which requires normalizing that defaulted parameter to `<str as ToOwned>::Owned`, and (c) another impl `impl<B: ?Sized> Display for Cow<'a, B> {}` that is itself ill-formed because `'a` is not bound in the impl header. The compiler already reports ordinary user errors (E0261/E0392), but still panics while building the specialization graph for `ToString`. This suggests rustc is continuing coherence/specialization processing on an impl/type that contains unresolved error types or improperly lowered generics. The common pattern is interaction between projection-based default type parameters, concrete trait impl coherence, and erroneous generic/lifetime binding, under `-Z next-solver=coherence`. A likely defect is missing error recovery or canonicalization in coherence/specialization code when impl self-types involve normalized defaults and the crate also contains malformed impl generics, causing the specialization graph builder to assume well-formed generics/self types when they are already tainted by prior errors.",
+      "possible_causes": [
+        "Coherence/specialization graph construction for `ToString` does not robustly handle impl self-types that include defaulted generic parameters requiring associated-type projection normalization (e.g. `Cow<'_, str, <str as ToOwned>::Owned>`).",
+        "Error recovery bug: after detecting the undeclared lifetime in `impl<B: ?Sized> Display for Cow<'a, B>`, rustc still feeds an erroneous or partially resolved impl/type environment into later coherence checks, leading to an ICE instead of graceful error propagation.",
+        "A defect in generic parameter/lifetime lowering for impl headers may leave an unbound region (`'a`) or error placeholder inside trait coherence data structures, which later specialization graph code incorrectly treats as fully valid.",
+        "`-Z next-solver=coherence` likely exposes a solver/coherence path that mishandles normalization and overlap setup for impls involving associated-type defaults plus unsized parameters, especially in the presence of prior type-checking errors.",
+        "The specialization graph builder for `ToString` may be assuming all impls are well-formed before insertion, but this reproducer shows it can be invoked on an impl set affected by malformed generics, indicating a missing `delay_span_bug`/error-taint guard or missing `ErrorGuaranteed` short-circuit.",
+        "There may be a bug in how rustc computes the concrete self type for `impl ToString for Cow<'_, str>` when elided lifetimes and projected default parameters are present, causing coherence to compare or register an incompletely normalized type and panic."
+      ],
+      "evidence": [
+        "The query stack ends at `specialization_graph_of` for trait `alloc::string::ToString`, then `coherent_trait`, showing the crash occurs in trait coherence/specialization logic rather than parsing alone.",
+        "The reproducer’s `Cow` definition uses a default type parameter `O = <B as ToOwned>::Owned`, which forces associated-type projection/normalization when `Cow<'_, str>` is named.",
+        "The concrete impl `impl ToString for Cow<'_, str> {}` is the impl being checked for well-formedness according to query `#2 [check_well_formed] checking that `<impl at src/main.rs:7:1: 7:31>` is well-formed`.",
+        "The code also contains `impl<B: ?Sized> Display for Cow<'a, B> {}`, where `'a` is undeclared; the compiler reports E0261/E0392, proving rustc already knows the crate contains invalid generic/lifetime information.",
+        "Despite existing front-end errors, rustc continues into coherence analysis and ICEs, indicating defective recovery/guarding in production compiler code.",
+        "The behavior summary explicitly stresses associated-type defaults, concrete instantiation `Cow<'_, str>`, unsized generics, overlap/coherence, and malformed impl generics; these all align with a bug in coherence handling of erroneous impl/type data.",
+        "The compiler was invoked with `-Z next-solver=coherence`, which narrows suspicion to the newer solver/coherence implementation path handling this impl combination incorrectly."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1764,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+        "reason": "The ICE occurs in `specialization_graph_of` while building the graph for `ToString`. This file contains the graph insertion and overlap/specialization logic most directly responsible for handling impl self-types during coherence, and is the likeliest place where an impl with projected default parameters and prior error-tainted generics is not being rejected or guarded properly."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The query stack shows rustc checking the well-formedness of `impl ToString for Cow<'_, str>` before coherence, while the crate also contains the malformed `Display` impl with undeclared `'a`. A missing recovery path or insufficient taint propagation during WF checking could allow erroneous impl/type information to leak into later coherence processing."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "The reproducer includes `impl<B: ?Sized> Display for Cow<'a, B> {}` where `'a` is not bound. This file resolves lifetimes and bound vars; if undeclared lifetime handling leaves behind an invalid or partially resolved region in compiler metadata, later coherence/specialization code could ICE instead of cleanly short-circuiting."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+        "reason": "The crash happens during coherence checking with `-Z next-solver=coherence`, and this file implements impl overlap/coherence reasoning, including candidate compatibility and ambiguity handling. It is a strong suspect for mishandling error-containing impl headers or normalized self-types involving associated-type defaults."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/normalize.rs",
+        "reason": "`Cow<'_, str>` relies on normalizing the default parameter `O = <B as ToOwned>::Owned` to a concrete projection. If normalization under the next-solver/coherence path produces an incomplete or error-contaminated self-type that specialization graph construction later assumes is valid, this file is a plausible source."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "The reproducer stresses associated-type projection normalization through `<B as ToOwned>::Owned`. Bugs in projection handling or caching can surface as malformed normalized self-types passed into coherence/specialization, especially when mixed with existing compilation errors."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+        "reason": "This is the HIR-analysis entry point for coherence and per-impl checks. Its documented behavior includes skipping impls whose trait ref already contains error types; if that filtering is incomplete for this case, it could wrongly continue into specialization graph construction and trigger the ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "The reproducer combines default type parameters, unsized bounds, and an impl header with a missing lifetime binder. If generic parameter collection for the impls or enum leaves inconsistent generic metadata, later WF/coherence stages may receive invalid generics and crash."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/solve/mod.rs",
+        "reason": "The issue reproduces specifically with `-Z next-solver=coherence`, making next-solver coherence mode infrastructure relevant. If the newer solver path canonicalizes or evaluates coherence goals incorrectly for projected defaults or error-tainted impls, the bug could originate here."
+      },
+      {
+        "path": "compiler/rustc_middle/src/traits/specialization_graph.rs",
+        "reason": "This file defines the specialization graph data model used by coherence. While less likely than the builder logic, incorrect assumptions in the graph metadata layer about impl validity or child classification could contribute to a panic when inserting an impl with incompletely normalized or erroneous self-type information."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 144.231,
+    "stage_times_sec": {
+      "checkout": 0.85,
+      "load_bug_context": 0.028,
+      "test_behavior_analysis": 5.977,
+      "test_failure_analysis": 13.595,
+      "load_file_candidates": 0.108,
+      "search_suspicious_files": 123.675
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 423320,
+      "output_tokens": 7447,
+      "total_tokens": 430767,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.976,
+          "input_tokens": 371,
+          "output_tokens": 321,
+          "total_tokens": 692
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.594,
+          "input_tokens": 2128,
+          "output_tokens": 923,
+          "total_tokens": 3051
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 6.329,
+          "input_tokens": 28064,
+          "output_tokens": 324,
+          "total_tokens": 28388
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.41,
+          "input_tokens": 27932,
+          "output_tokens": 400,
+          "total_tokens": 28332
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.052,
+          "input_tokens": 27551,
+          "output_tokens": 399,
+          "total_tokens": 27950
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.261,
+          "input_tokens": 27743,
+          "output_tokens": 378,
+          "total_tokens": 28121
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.564,
+          "input_tokens": 27748,
+          "output_tokens": 383,
+          "total_tokens": 28131
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.776,
+          "input_tokens": 28132,
+          "output_tokens": 400,
+          "total_tokens": 28532
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.106,
+          "input_tokens": 27900,
+          "output_tokens": 339,
+          "total_tokens": 28239
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.631,
+          "input_tokens": 27893,
+          "output_tokens": 353,
+          "total_tokens": 28246
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.099,
+          "input_tokens": 27979,
+          "output_tokens": 321,
+          "total_tokens": 28300
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.883,
+          "input_tokens": 27801,
+          "output_tokens": 305,
+          "total_tokens": 28106
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.865,
+          "input_tokens": 28109,
+          "output_tokens": 397,
+          "total_tokens": 28506
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.243,
+          "input_tokens": 27946,
+          "output_tokens": 366,
+          "total_tokens": 28312
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.58,
+          "input_tokens": 28191,
+          "output_tokens": 334,
+          "total_tokens": 28525
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.283,
+          "input_tokens": 27922,
+          "output_tokens": 346,
+          "total_tokens": 28268
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.26,
+          "input_tokens": 20611,
+          "output_tokens": 370,
+          "total_tokens": 20981
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.305,
+          "input_tokens": 9299,
+          "output_tokens": 788,
+          "total_tokens": 10087
+        }
+      ]
+    }
+  }
+}

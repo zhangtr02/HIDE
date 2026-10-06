@@ -1,0 +1,370 @@
+{
+  "bug_id": "121512",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-23",
+    "resolved": "397937d812852f9bbeb671005cb399dbcb357cde"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_hir_typeck/src/coercion.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_infer/src/infer/at.rs",
+    "compiler/rustc_infer/src/infer/relate/equate.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with two lifetime parameters and a blanket impl, so every type satisfies `Trait<'a, 'b>` regardless of its concrete form.",
+        "`foo` returns `impl Trait<'a, 'b>`, exercising opaque return types parameterized by higher-ranked lifetime generics.",
+        "The bounds `'a: 'a` and `'b: 'b` are tautological self-outlives constraints, probing lifetime handling in generic function signatures.",
+        "Inside `foo`, `let _: &'a () = foo::<'a, 'b>();` recursively calls the same function and forces its hidden return type to unify with `&'a ()`.",
+        "This checks whether rustc consistently infers the concrete hidden type of the opaque `impl Trait` across recursive/self-referential use sites.",
+        "`loop {}` makes the function body diverge, so the final expression has type `!`, which can coerce to any return type.",
+        "The reproducer combines divergence with prior type constraints, stressing type checking before unreachable-code style reasoning can dismiss the body.",
+        "It mainly exercises rustc’s opaque type inference, lifetime parameter propagation, coercion from `!`, and recursive obligation solving."
+      ],
+      "summary": "The reproducer creates an opaque return type `impl Trait<'a, 'b>` and then recursively uses `foo` inside itself as if that opaque type were `&'a ()`. Because the body ultimately diverges with `loop {}`, the code stresses rustc’s handling of never-type coercion, recursive type obligations, lifetime-parameterized opaque types, and hidden-type inference consistency."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during type well-formedness checking rather than a normal user-facing type error. The reproducer combines several stressors in one place: an RPIT/opaque return type (`impl Trait<'a, 'b>`), recursive use of the same function inside its own body, explicit lifetime-parameterized opaque identity, and divergence (`loop {}` / `!`) that allows the body to type-check via coercion. The key suspicious operation is `let _: &'a () = foo::<'a, 'b>();`, which forces the compiler to relate the hidden type of `foo`'s opaque return with a concrete reference type while that same opaque is still being defined. Because the trait is blanket-implemented for all `T`, trait satisfaction is trivial, so the bug is unlikely in trait selection itself; instead it is more likely in opaque type inference/normalization and WF checking for recursive constraints on the hidden type. The stack trace mentions `check_mod_type_wf`, consistent with the compiler crashing while validating well-formedness of inferred types or opaque definitions after analysis. The tautological outlives bounds and lifetime parameters suggest the defect may involve incorrect handling of captured lifetimes in the hidden type of an RPIT under recursive self-reference, possibly failing to reject or gracefully diagnose a cyclic hidden-type equation and instead reaching an inconsistent internal state or assertion.",
+      "possible_causes": [
+        "Bug in return-position `impl Trait` opaque type inference when the defining function recursively references its own opaque return and constrains it to a concrete type, creating a hidden-type cycle that is not properly detected or reported.",
+        "Defect in well-formedness checking (`check_mod_type_wf`) for opaque types with lifetime parameters, where recursive hidden-type obligations involving `&'a ()` and `impl Trait<'a, 'b>` trigger an ICE instead of a normal cycle/type error.",
+        "Incorrect normalization/equate logic for RPITs under self-recursive use: the compiler may prematurely try to reveal or unify the opaque with a concrete hidden type before the opaque definition is complete.",
+        "Improper interaction between never-type (`!`) coercion from the diverging `loop {}` and opaque hidden-type inference, allowing invalid or incomplete hidden-type information to flow into later WF checks.",
+        "Possible region/lifetime capture bug for opaque types parameterized by `'a` and `'b`, especially when self-outlives bounds and recursive calls cause the hidden type to be inferred from a reference carrying `'a`.",
+        "Cycle handling bug in query/type-op evaluation for opaque type constraints: the compiler may produce an invalid intermediate result during analysis, which later crashes in module WF checking rather than emitting a cycle diagnostic."
+      ],
+      "evidence": [
+        "The crash site is associated with `check_mod_type_wf`, indicating failure during compiler well-formedness validation rather than ordinary borrow/type diagnostics.",
+        "The highlighted source location is the recursive assignment `let _: &'a () = foo::<'a, 'b>();`, exactly where the opaque return type is forced to match a concrete reference type while still being defined.",
+        "`foo` returns `impl Trait<'a, 'b>` and the trait has a blanket impl for all types, so trait implementation is not the hard part; hidden-type inference for the opaque is the stressed mechanism.",
+        "The function body diverges with `loop {}`, meaning the apparent hidden type cannot come from the final expression; instead the compiler is driven by earlier recursive constraints, which is a classic setup for opaque-type inference/cycle bugs.",
+        "The reproducer explicitly uses lifetime-parameterized RPIT (`impl Trait<'a, 'b>`) and a concrete reference `&'a ()`, showing that lifetime propagation/capture is part of the failing scenario.",
+        "The query stack ends without a user-level type error, and rustc asks for an ICE report, which is consistent with an unhandled internal cycle or invalid state in compiler production code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1743,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "This file is where the ICE is delayed from (`opaque type with non-universal region args`, line 97). The reproducer focuses on inferring an RPIT hidden type that takes explicit lifetime arguments while referencing itself recursively - and borrowck's opaque-type hidden-type resolution plus region remapping are implemented right here, making this the likeliest origin of the bug."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The ICE surfaces during `check_mod_type_wf`, and this file implements HIR/type well-formedness checking. The reproducer forces a recursive RPIT hidden-type constraint (`impl Trait<'a,'b>` equated with `&'a ()`) and then diverges, which strongly suggests WF checking is tripping over an invalid or cyclic opaque hidden type state instead of emitting a normal error."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "This is the core inference-layer support for tracking and resolving opaque types. The reproducer’s central stressor is self-recursive use of a function’s own opaque return type while it is still being defined, so a bug in how local opaques are replaced with inference vars or how hidden-type obligations are accumulated is highly plausible."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "This file handles remapping generics and regions for opaque types. Because the opaque return is parameterized by `'a, 'b` and the recursive use constrains it to `&'a ()`, incorrect lifetime/generic remapping for the opaque key or hidden type could easily produce the inconsistent state later observed in WF checking."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "Function body type checking replaces opaque return types with inference variables and drives checking of the recursive statement inside `foo`. Since the problematic constraint originates exactly at `let _: &'a () = foo::<'a, 'b>();`, a bug here in how RPITs are introduced or tracked during body checking is a strong candidate."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/coercion.rs",
+        "reason": "The function body ends in `loop {}`, so `!`-to-any coercion participates in the scenario. If coercion logic allows the diverging tail to mask or improperly finalize hidden-type inference in the presence of recursive RPIT constraints, it could explain why the compiler reaches an ICE instead of a clean diagnostic."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "WF obligation generation for types is a likely secondary locus. The bug may be in generating or normalizing well-formedness obligations for an opaque type whose hidden type recursively references the same function result under lifetime parameters, leading to non-termination or malformed obligations consumed by `wfcheck`."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The reproducer likely needs normalization/equation of the opaque return while it is still under definition. If query normalization mishandles recursive opaque aliases or prematurely normalizes them in user-facing mode, that could feed bad results into later WF checking."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/at.rs",
+        "reason": "This file exposes the `DefineOpaqueTypes` policy and the relation entry points used when equating or subtyping types during type checking. Since the bug seems tied to whether the recursive call is allowed to define or match the opaque return type while checking `foo`, an error in this control path is plausible."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/equate.rs",
+        "reason": "The statement explicitly forces equality-like unification between the recursive call result and `&'a ()`. If equality relating does not correctly reject or defer equating an in-progress opaque with a concrete reference type, it could create the hidden-type cycle that later crashes WF checking."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 228.369,
+    "stage_times_sec": {
+      "checkout": 0.821,
+      "load_bug_context": 0.343,
+      "test_behavior_analysis": 6.425,
+      "test_failure_analysis": 12.769,
+      "load_file_candidates": 73.669,
+      "search_suspicious_files": 134.343
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 35,
+      "input_tokens": 429147,
+      "output_tokens": 10780,
+      "total_tokens": 439927,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.424,
+          "input_tokens": 376,
+          "output_tokens": 329,
+          "total_tokens": 705
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.768,
+          "input_tokens": 1971,
+          "output_tokens": 800,
+          "total_tokens": 2771
+        },
+        {
+          "stage": "file_summary:compiler_rustc_builtin_macros_src_type_ascribe_rs",
+          "latency_sec": 5.058,
+          "input_tokens": 531,
+          "output_tokens": 220,
+          "total_tokens": 751
+        },
+        {
+          "stage": "file_summary:compiler_rustc_builtin_macros_src_type_ascribe_rs_repair",
+          "latency_sec": 3.492,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_y_rs",
+          "latency_sec": 4.24,
+          "input_tokens": 270,
+          "output_tokens": 161,
+          "total_tokens": 431
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_fudge_rs",
+          "latency_sec": 7.211,
+          "input_tokens": 1349,
+          "output_tokens": 220,
+          "total_tokens": 1569
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_fudge_rs_repair",
+          "latency_sec": 3.751,
+          "input_tokens": 255,
+          "output_tokens": 201,
+          "total_tokens": 456
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_opaque_types_rs",
+          "latency_sec": 4.871,
+          "input_tokens": 1301,
+          "output_tokens": 220,
+          "total_tokens": 1521
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_opaque_types_rs_repair",
+          "latency_sec": 3.137,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_relate_equate_rs",
+          "latency_sec": 5.198,
+          "input_tokens": 1423,
+          "output_tokens": 220,
+          "total_tokens": 1643
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_relate_equate_rs_repair",
+          "latency_sec": 3.265,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_relate_sub_rs",
+          "latency_sec": 4.861,
+          "input_tokens": 1412,
+          "output_tokens": 220,
+          "total_tokens": 1632
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_relate_sub_rs_repair",
+          "latency_sec": 3.202,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_undo_log_rs",
+          "latency_sec": 4.938,
+          "input_tokens": 1383,
+          "output_tokens": 220,
+          "total_tokens": 1603
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_undo_log_rs_repair",
+          "latency_sec": 3.086,
+          "input_tokens": 255,
+          "output_tokens": 189,
+          "total_tokens": 444
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_targets_aarch64_unknown_nto_qnx_710_rs",
+          "latency_sec": 4.959,
+          "input_tokens": 658,
+          "output_tokens": 220,
+          "total_tokens": 878
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_targets_aarch64_unknown_nto_qnx_710_rs_repair",
+          "latency_sec": 3.628,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_targets_wasm32_wasi_preview1_threads_rs",
+          "latency_sec": 4.515,
+          "input_tokens": 1262,
+          "output_tokens": 220,
+          "total_tokens": 1482
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_targets_wasm32_wasi_preview1_threads_rs_repair",
+          "latency_sec": 4.134,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.752,
+          "input_tokens": 27719,
+          "output_tokens": 376,
+          "total_tokens": 28095
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.32,
+          "input_tokens": 27723,
+          "output_tokens": 373,
+          "total_tokens": 28096
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.993,
+          "input_tokens": 27242,
+          "output_tokens": 357,
+          "total_tokens": 27599
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.783,
+          "input_tokens": 27479,
+          "output_tokens": 403,
+          "total_tokens": 27882
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.932,
+          "input_tokens": 27463,
+          "output_tokens": 334,
+          "total_tokens": 27797
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.052,
+          "input_tokens": 27864,
+          "output_tokens": 392,
+          "total_tokens": 28256
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.488,
+          "input_tokens": 27594,
+          "output_tokens": 340,
+          "total_tokens": 27934
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.908,
+          "input_tokens": 27620,
+          "output_tokens": 360,
+          "total_tokens": 27980
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.671,
+          "input_tokens": 27705,
+          "output_tokens": 338,
+          "total_tokens": 28043
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.186,
+          "input_tokens": 27499,
+          "output_tokens": 350,
+          "total_tokens": 27849
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.167,
+          "input_tokens": 27828,
+          "output_tokens": 337,
+          "total_tokens": 28165
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.536,
+          "input_tokens": 27748,
+          "output_tokens": 174,
+          "total_tokens": 27922
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.303,
+          "input_tokens": 27874,
+          "output_tokens": 297,
+          "total_tokens": 28171
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.271,
+          "input_tokens": 27631,
+          "output_tokens": 378,
+          "total_tokens": 28009
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.353,
+          "input_tokens": 15952,
+          "output_tokens": 393,
+          "total_tokens": 16345
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.599,
+          "input_tokens": 12230,
+          "output_tokens": 820,
+          "total_tokens": 13050
+        }
+      ]
+    }
+  }
+}

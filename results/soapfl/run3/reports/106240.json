@@ -1,0 +1,243 @@
+{
+  "bug_id": "106240",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-12-28",
+    "resolved": "92c1937a90e5b6f20fa6e87016d6869da363972e"
+  },
+  "final_top10": [
+    "compiler/rustc_middle/src/ty/relate.rs",
+    "compiler/rustc_hir_typeck/src/method/confirm.rs",
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+    "compiler/rustc_hir_typeck/src/method/probe.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_infer/src/infer/resolve.rs",
+    "compiler/rustc_hir_analysis/src/check/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/error_reporting/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `Foo<T, const N: usize>` using const generics and an array field `[T; N]`, exercising generic type and const parameter handling.",
+        "Declares trait `Bar<const N: usize>`, testing trait bounds that themselves depend on a const generic parameter.",
+        "Implements inherent methods on `Foo<T, N>` with shared type and const parameters across the impl block and methods.",
+        "`trigger(self)` calls another inherent method `unsatisfied(self)` without providing any bound proving `T: Bar<N>`.",
+        "`unsatisfied(self)` introduces a method-level `where T: Bar<N>` obligation, which should be checked at the call site.",
+        "The reproducer expects a normal trait-bound type error on the method call, not successful compilation.",
+        "It exercises compiler obligation resolution and error reporting for unsatisfied trait bounds involving const generics.",
+        "The bug is that this nightly triggers an internal compiler error instead of emitting the expected diagnostic."
+      ],
+      "summary": "This reproducer builds a const-generic struct and a const-parameterized trait, then calls an inherent method whose `where` clause requires `T: Bar<N>` from another method lacking that bound. Rust should reject the call with an unsatisfied trait-bound error at `self.unsatisfied()`. Instead, the specified nightly crashes, exposing a compiler bug in trait obligation checking or diagnostics for const-generic method calls."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is an ICE during type checking of an inherent method call where the callee has an extra `where T: Bar<N>` bound involving a const generic parameter. The reproducer combines: (1) an impl over `T, const N`, (2) a method call `self.unsatisfied()` from another method in the same impl, and (3) a trait obligation parameterized by the same const generic `N`. The expected behavior is ordinary obligation failure (`T: Bar<N>` not satisfied) reported at the call site. Instead, rustc panics in `rustc_middle::ty::relate::super_relate_consts` with `Infer(Var(_#0c))` versus `Param(N/#1)`, which strongly indicates the compiler is attempting to relate an inferred const variable to the impl/method const parameter during method resolution, obligation checking, or diagnostic construction, but this const-generic case is not handled correctly. The common pattern is therefore incorrect comparison/unification of const generic arguments in trait obligation evaluation for method calls, leading to an ICE instead of emitting a trait-bound error.",
+      "possible_causes": [
+        "Bug in const-generic relation/unification logic in `rustc_middle::ty::relate` (especially `super_relate_consts`) when comparing an inferred const variable against a const parameter during trait obligation checking for method calls.",
+        "Method call type checking may instantiate the callee's `where T: Bar<N>` obligation with a fresh const inference variable, then incorrectly try to structurally relate it to the impl const param `N` in a code path that assumes no inference vars remain, causing the panic.",
+        "Trait selection / fulfillment for const-parameterized trait bounds (`Bar<N>`) is likely mishandling normalization or substitution of const generics across inherent impl methods, producing an ICE instead of a normal unsatisfied-obligation diagnostic.",
+        "A defect in the diagnostic/error-reporting path for failed trait bounds with const generics may be forcing relation of consts after type checking has already generated inference placeholders, exposing an internal invariant violation.",
+        "Possible missing fallback or `DelayBug`/graceful error path when const inference variables appear in trait obligation comparison; the compiler panics rather than treating the obligation as unsatisfied and reporting `T: Bar<N>` is not implemented."
+      ],
+      "evidence": [
+        "ICE occurs in `compiler/rustc_middle/src/ty/relate.rs:638:13` inside `super_relate_consts`, directly pointing to const relation logic rather than user code.",
+        "Panic message explicitly shows the problematic pair: `Const { ty: usize, kind: Infer(Var(_#0c)) }` versus `Const { ty: usize, kind: Param(N/#1) }`, i.e. inferred const variable being related to const param `N`.",
+        "Query stack shows crash during `typeck` of `<impl ...>::trigger`, the method containing `self.unsatisfied()`, so failure is triggered by method call checking rather than later compilation stages.",
+        "`unsatisfied(self)` has `where T: Bar<N>` while `trigger(self)` lacks that bound, so the compiler should simply emit an unsatisfied trait-bound error at the call site.",
+        "The reproducer uses const generics both in the struct (`Foo<T, const N: usize>`) and in the trait bound (`Bar<const N: usize>`), matching the const-comparison panic.",
+        "Behavior summary states the same code path should produce a normal type error; crashing instead indicates a compiler bug in obligation resolution or diagnostics for const-generic bounds."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1575,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_middle/src/ty/relate.rs",
+        "reason": "The ICE originates directly in this file at `super_relate_consts`, and the panic message shows it is incorrectly encountering an inferred const variable while relating it to the const parameter `N`. Since the reproducer specifically triggers const-generic obligation comparison during method-call type checking, this is the most likely buggy location."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+        "reason": "The crash happens while type-checking `trigger` at the `self.unsatisfied()` call. Method confirmation is where the callee signature and its `where T: Bar<N>` obligation are instantiated, often introducing fresh inference variables for generics/consts. A bad instantiation or substitution of the callee's const argument could produce the `Infer(Var)` vs `Param(N)` mismatch seen in the panic."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "After method-call confirmation, trait selection confirmation unifies the obligation `T: Bar<N>` against candidates and normalizes trait inputs. This is a prime place where const generic arguments may be related or equated, and a bug here could route invalid const relation work into `super_relate_consts` instead of producing a normal unsatisfied-obligation result."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "The expected outcome is an unsatisfied trait-bound error, so the fulfillment engine is on the critical path that should convert the pending obligation into a user error. If it mishandles stalled const inference variables or continues relating them too aggressively, it could expose the invariant violation that triggers the ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "`FnCtxt` drives expression and method-call type checking in bodies, including registration and checking of obligations arising from calls. Since the query stack points to type-checking the body of `trigger`, a bug in how this layer creates or resolves the obligation for `self.unsatisfied()` with const generics is plausible."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/probe.rs",
+        "reason": "Method probing assembles and instantiates candidate methods before confirmation. If inherent method lookup across the impl's `const N` incorrectly freshens or compares const arguments, it could hand later stages a malformed pick that eventually crashes in const relation."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "This is the core candidate selection engine for trait obligations. Because the reproducer is fundamentally about resolving `T: Bar<N>` with a const parameter and should yield a simple no-solution error, selection logic that mishandles const-generic trait refs is a strong suspect upstream of the panic."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/resolve.rs",
+        "reason": "The panic explicitly involves an unresolved/inferred const variable. Opportunistic or partial inference-variable resolution can affect whether const vars are still present when relation code runs. If this file leaves a const infer var unresolved in a path that assumes concrete consts or params, it could contribute to the ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/mod.rs",
+        "reason": "This is the top-level HIR type-checking coordination layer for item bodies. While less directly implicated than method/type-relation code, it orchestrates the `typeck` pass named in the query stack and could contain the surrounding logic that mishandles error propagation for failed const-generic obligations."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/error_reporting/mod.rs",
+        "reason": "One plausible failure mode is that the compiler reaches a diagnostic path for the unsatisfied bound and then incorrectly tries to relate consts for reporting, triggering the ICE instead of emitting the intended error. This makes the trait error-reporting layer a secondary but credible suspect."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 131.258,
+    "stage_times_sec": {
+      "checkout": 3.825,
+      "load_bug_context": 0.042,
+      "test_behavior_analysis": 5.315,
+      "test_failure_analysis": 12.454,
+      "load_file_candidates": 0.308,
+      "search_suspicious_files": 109.313
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 361191,
+      "output_tokens": 5611,
+      "total_tokens": 366802,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.315,
+          "input_tokens": 442,
+          "output_tokens": 286,
+          "total_tokens": 728
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.454,
+          "input_tokens": 1254,
+          "output_tokens": 730,
+          "total_tokens": 1984
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.209,
+          "input_tokens": 26723,
+          "output_tokens": 309,
+          "total_tokens": 27032
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.458,
+          "input_tokens": 26866,
+          "output_tokens": 362,
+          "total_tokens": 27228
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 4.305,
+          "input_tokens": 26254,
+          "output_tokens": 82,
+          "total_tokens": 26336
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 4.281,
+          "input_tokens": 26828,
+          "output_tokens": 86,
+          "total_tokens": 26914
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.701,
+          "input_tokens": 26816,
+          "output_tokens": 315,
+          "total_tokens": 27131
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.768,
+          "input_tokens": 26983,
+          "output_tokens": 365,
+          "total_tokens": 27348
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.565,
+          "input_tokens": 26892,
+          "output_tokens": 314,
+          "total_tokens": 27206
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.863,
+          "input_tokens": 26806,
+          "output_tokens": 333,
+          "total_tokens": 27139
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 6.198,
+          "input_tokens": 26879,
+          "output_tokens": 206,
+          "total_tokens": 27085
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.12,
+          "input_tokens": 25427,
+          "output_tokens": 330,
+          "total_tokens": 25757
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.963,
+          "input_tokens": 27020,
+          "output_tokens": 307,
+          "total_tokens": 27327
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 4.022,
+          "input_tokens": 26997,
+          "output_tokens": 96,
+          "total_tokens": 27093
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.314,
+          "input_tokens": 26646,
+          "output_tokens": 387,
+          "total_tokens": 27033
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 5.695,
+          "input_tokens": 5163,
+          "output_tokens": 287,
+          "total_tokens": 5450
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.829,
+          "input_tokens": 7195,
+          "output_tokens": 816,
+          "total_tokens": 8011
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "title": "Out of storage use of local for temporary caused by label break",
+  "labels": [
+    "E-hard",
+    "I-ICE",
+    "E-mentor",
+    "T-compiler",
+    "A-MIR",
+    "C-bug",
+    "glacier",
+    "-Zvalidate-mir"
+  ],
+  "body": "### Code\r\n\r\n[Playground](https://play.rust-lang.org/?version=nightly&mode=release&edition=2021). Needs release\r\n\r\n```Rust\r\nstruct A;\r\nstruct B;\r\n\r\nimpl Drop for A {\r\n    fn drop(&mut self) {}\r\n}\r\nimpl Drop for B {\r\n    fn drop(&mut self) {}\r\n}\r\n\r\n#[inline(always)]\r\nfn no_unwind() {}\r\n\r\nfn weird_temporary(a: A, b: B, nothing: ((), (), ()), x: bool) -> ((), (), ()) {\r\n    'scope: {\r\n        (\r\n            {\r\n                let _z = b;\r\n                if x {\r\n                    break 'scope nothing;\r\n                }\r\n            },\r\n            match { a } {\r\n                _ => (),\r\n            },\r\n            no_unwind(),\r\n        )\r\n    }\r\n}\r\n\r\n```\r\n\r\n\r\n### Meta\r\n<!--\r\nIf you're using the stable version of the compiler, you should also check if the\r\nbug also exists in the beta or nightly versions.\r\n-->\r\n\r\nVersion: 0d5573e6daf99a5b98ace3dfcc4be2eb64867169 and all other recent versions\r\n\r\n### Explanation\r\n\r\nThis causes an ICE in the MIR validator. The reason is an out of storage use of the local that is the temporary for `{ a }`. This local has a couple interesting properties. The most important of these is that MIR building thinks that it may need to be dropped while unwinding in two scenarios:\r\n\r\n 1. If the drop of `_z` unwinds.\r\n 2. If `no_unwind()` unwinds.\r\n\r\nNeither of these are actually possible.\r\n\r\nFirst, drop elaboration comes along, sees that only the second of these is possible. It reacts to this by inserting a drop flag for the local. Then, inlining comes along and inlines `no_unwind()`. The potential unwind edge is now gone.\r\n\r\nThe result is that the cleanup drop is actually completely unreachable, and this ends up causing an ICE.\r\n\r\nCuriously, this does not reproduce if one replaces `break 'scope nothing;` with `return nothing;`. In the case of the return, MIR building correctly realizes that the temporary has not been created yet and hence does not need to be dropped. The best solution to this is likely to make the `break` do the same thing - I'm not sure how difficult that is.\r\n\r\n\r\n\r\n<!-- TRIAGEBOT_START -->\r\n\r\n<!-- TRIAGEBOT_ASSIGN_START -->\r\n\r\n<!-- TRIAGEBOT_ASSIGN_DATA_START$${\"user\":\"b-naber\"}$$TRIAGEBOT_ASSIGN_DATA_END -->\r\n\r\n<!-- TRIAGEBOT_ASSIGN_END -->\r\n<!-- TRIAGEBOT_END -->"
+}

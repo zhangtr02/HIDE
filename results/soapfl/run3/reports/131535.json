@@ -1,0 +1,258 @@
+{
+  "bug_id": "131535",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-10-11",
+    "resolved": "52fd9983996d9fcfb719749838336be66dee68f9"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/hir_wf_check.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/dyn_compatibility.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+    "compiler/rustc_parse/src/parser/ty.rs",
+    "compiler/rustc_parse/src/parser/diagnostics.rs",
+    "compiler/rustc_parse/src/parser/generics.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_middle/src/middle/resolve_bound_vars.rs",
+    "compiler/rustc_infer/src/infer/relate/higher_ranked.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `non_lifetime_binders`, allowing `for<...>` binders over non-lifetime generic parameters in type syntax.",
+        "Declares trait `v0<>` using unusual empty generic parameter syntax, stressing parser and trait generic handling.",
+        "Defines function `kind` with malformed, highly nested type syntax instead of a normal parameter list or return type.",
+        "Uses placeholder lifetime `'_` inside trait arguments, exercising lifetime elision and anonymous lifetime parsing in type positions.",
+        "Uses `impl Trait` in argument/type position, forcing opaque type parsing and lowering within a complex trait bound.",
+        "Applies `for<v4>` higher-ranked binders together with `impl Trait`, testing HRTB handling for non-lifetime parameters.",
+        "Introduces an associated-type-style constraint `v2 = impl v0<v4> + '_` inside a trait bound, stressing bound parsing and opaque type/lifetime interactions.",
+        "Overall, the snippet is primarily a parser/AST-lowering stress test for invalid combinations of unstable generics, binders, lifetimes, and `impl Trait`."
+      ],
+      "summary": "The reproducer is a minimal nightly Rust parser stress case. It enables non-lifetime binders, declares an oddly formed trait, and then defines a function signature containing deeply invalid combinations of `'_`, `impl Trait`, `for<...>` binders, and an associated-type equality-like constraint. It mainly exercises compiler parsing, feature gating, AST/HIR lowering, and error recovery around unstable generic syntax."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during type/HIR well-formedness checking after the parser had already produced multiple user-facing diagnostics for clearly invalid syntax. The query stack shows the panic occurs in `diagnostic_hir_wf_check` while checking a synthesized predicate involving `TraitPredicate(<dyn v0 as core::marker::Sized>, ...)` for the first parameter of `kind`. This suggests the compiler recovered from malformed function/type syntax by constructing invalid or incomplete HIR/type data, then later WF-checking assumed those structures were valid. Common themes in the reproducer are malformed trait-object/type syntax, `impl Trait` nested inside trait bounds, non-lifetime binders (`for<v4>`), placeholder lifetime `'_`, and associated-type-like constraints inside an invalid type position. Since normal diagnostics like E0782 were emitted before the panic, the likely bug is not initial parsing itself but missing error-recovery guards or incorrect lowering/validation of recovered AST into HIR/types for WF checking. In particular, the presence of `<dyn v0 as Sized>` in the panic context strongly suggests trait-object recovery or trait-bound lowering produced a `dyn v0`-like type with inconsistent generic/binder state, which later code did not treat as tainted-by-error.",
+      "possible_causes": [
+        "A defect in AST-to-HIR lowering or error recovery for malformed function signatures/type syntax, where invalid recovered nodes are lowered into semantically inconsistent HIR instead of being replaced with an error node (`TyKind::Err`) or skipped.",
+        "A bug in well-formedness checking (`hir_wf_check` / diagnostic WF path) that assumes recovered trait-object predicates are valid and panics when encountering malformed `dyn Trait` types produced after earlier diagnostics.",
+        "Incorrect handling of trait-object recovery for bare traits with erroneous generic arguments, leading to construction of a predicate like `<dyn v0 as Sized>` even though the original syntax was invalid and should have been short-circuited.",
+        "A defect in handling unstable non-lifetime binders (`for<...>`) combined with `impl Trait` during lowering or validation, leaving bound-variable bookkeeping inconsistent for later WF checks.",
+        "Improper propagation of error types through associated-type binding / equality constraint lowering (`v2 = impl ... + '_`) in invalid trait-bound contexts, causing later trait predicate formation on partially erroneous types.",
+        "Missing validation/guard in compiler code that processes placeholder lifetime `'_` inside recovered opaque/trait-bound syntax, allowing invalid lifetime-bearing trait object/opaque constructs to reach WF checking."
+      ],
+      "evidence": [
+        "Query stack pinpoints the panic in `diagnostic_hir_wf_check`, not in parsing: `performing HIR wf-checking for predicate ...`.",
+        "The compiler already emitted regular diagnostics (including E0782 and others), so the input was recognized as invalid before the ICE; this indicates an error-recovery/later-phase robustness bug.",
+        "The panic predicate explicitly mentions `TraitPredicate(<dyn v0 as core::marker::Sized>, ...)`, showing the compiler formed a trait-object-based internal type from malformed source syntax.",
+        "The failure happens while checking item `kind` parameter 0, matching the malformed function signature/type syntax in the reproducer.",
+        "The reproducer combines several stressors in one recovered type context: bare trait syntax, `dyn` suggestion, `impl Trait`, `for<v4>` non-lifetime binder, `'_`, and associated-type-style constraint.",
+        "Behavior summary describes it as primarily a parser/AST-lowering stress test for invalid combinations, consistent with a bug in recovery/lowering feeding invalid HIR into WF analysis rather than a legitimate semantic rejection path."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1847,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_wf_check.rs",
+        "reason": "The query stack pinpoints the ICE directly in `diagnostic_hir_wf_check` while rechecking a recovered predicate for parameter 0 of `kind`. This file owns that diagnostic WF visitor and is the most likely place missing an `Err`/tainted-HIR guard when malformed recovered types like `<dyn v0 as Sized>` are revisited."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "Primary WF checking for item signatures happens here before the diagnostic refinement path. Since the compiler already emitted parse/type diagnostics and then still formed a WF obligation on an invalid recovered type, this file is highly suspicious for not short-circuiting malformed lowered types or for generating a problematic WF predicate that later crashes diagnostic WF checking."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/dyn_compatibility.rs",
+        "reason": "The panic mentions `TraitPredicate(<dyn v0 as core::marker::Sized>, ...)`, strongly implicating trait-object lowering/recovery. This file specifically lowers `dyn Trait` HIR, handles malformed generic arguments and associated-type-like bindings, and could incorrectly construct a `dyn v0` type from invalid bare-trait syntax instead of producing an error type."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+        "reason": "The reproducer is a type-syntax stress case mixing bare traits, `impl Trait`, `for<v4>` non-lifetime binders, `'_`, and associated-type-style constraints. Core HIR type lowering lives here, so inconsistent recovery into semantically invalid `ty::Ty`/predicates is very plausible, especially around binder bookkeeping and replacing bad syntax with `TyKind::Error`."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/ty.rs",
+        "reason": "The source is primarily malformed type syntax in a function signature, and this parser file owns exactly that grammar plus recovery for `dyn`, `impl Trait`, trait objects, and nested type forms. A bad recovery here could synthesize AST that later lowers into the crashing `dyn v0` WF predicate."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/diagnostics.rs",
+        "reason": "The compiler emitted multiple diagnostics before ICEing, so recovery machinery likely fabricated placeholder AST/HIR nodes to continue. This file contains parser recovery helpers and dummy node construction for malformed parameters/types, making it a plausible source of an invalid recovered structure that downstream WF code failed to tolerate."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/generics.rs",
+        "reason": "The repro enables `non_lifetime_binders` and uses `for<v4>` plus unusual generic syntax like `trait v0<>` and associated-type-like bindings. Generic/binder parsing and recovery are handled here, so a malformed generic binder AST could feed into later lowering/WF inconsistencies."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "If lowering produced a partially erroneous trait object type, WF obligation generation here may be failing to treat it as poisoned and instead generating obligations such as `dyn v0: Sized`. That would explain how invalid syntax survives into the diagnostic WF query."
+      },
+      {
+        "path": "compiler/rustc_middle/src/middle/resolve_bound_vars.rs",
+        "reason": "Non-lifetime binders are central to the reproducer, and this file records resolution of bound lifetimes/types/consts. An inconsistency in bound-variable resolution for `for<v4>` under recovery could leave later HIR/type lowering and WF checking with malformed binder state."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/higher_ranked.rs",
+        "reason": "The reproducer stresses higher-ranked binders over non-lifetime parameters. While the panic is later in WF diagnostics, binder/universe instantiation bugs can surface as malformed predicates during WF evaluation, so this higher-ranked relation code is a secondary but still plausible suspect."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 157.043,
+    "stage_times_sec": {
+      "checkout": 6.272,
+      "load_bug_context": 0.14,
+      "test_behavior_analysis": 5.192,
+      "test_failure_analysis": 11.955,
+      "load_file_candidates": 0.099,
+      "search_suspicious_files": 133.385
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 444162,
+      "output_tokens": 7646,
+      "total_tokens": 451808,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.192,
+          "input_tokens": 344,
+          "output_tokens": 311,
+          "total_tokens": 655
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.954,
+          "input_tokens": 2179,
+          "output_tokens": 740,
+          "total_tokens": 2919
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.931,
+          "input_tokens": 27899,
+          "output_tokens": 414,
+          "total_tokens": 28313
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.201,
+          "input_tokens": 27915,
+          "output_tokens": 342,
+          "total_tokens": 28257
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.927,
+          "input_tokens": 27276,
+          "output_tokens": 359,
+          "total_tokens": 27635
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.56,
+          "input_tokens": 27699,
+          "output_tokens": 338,
+          "total_tokens": 28037
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.968,
+          "input_tokens": 27623,
+          "output_tokens": 273,
+          "total_tokens": 27896
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.761,
+          "input_tokens": 27979,
+          "output_tokens": 416,
+          "total_tokens": 28395
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.134,
+          "input_tokens": 27829,
+          "output_tokens": 485,
+          "total_tokens": 28314
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.379,
+          "input_tokens": 27746,
+          "output_tokens": 410,
+          "total_tokens": 28156
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.341,
+          "input_tokens": 27839,
+          "output_tokens": 369,
+          "total_tokens": 28208
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.162,
+          "input_tokens": 27718,
+          "output_tokens": 341,
+          "total_tokens": 28059
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.414,
+          "input_tokens": 27751,
+          "output_tokens": 328,
+          "total_tokens": 28079
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.458,
+          "input_tokens": 27882,
+          "output_tokens": 366,
+          "total_tokens": 28248
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.833,
+          "input_tokens": 28023,
+          "output_tokens": 274,
+          "total_tokens": 28297
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.955,
+          "input_tokens": 28029,
+          "output_tokens": 325,
+          "total_tokens": 28354
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.706,
+          "input_tokens": 27794,
+          "output_tokens": 357,
+          "total_tokens": 28151
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 6.495,
+          "input_tokens": 12763,
+          "output_tokens": 371,
+          "total_tokens": 13134
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.132,
+          "input_tokens": 11874,
+          "output_tokens": 827,
+          "total_tokens": 12701
+        }
+      ]
+    }
+  }
+}

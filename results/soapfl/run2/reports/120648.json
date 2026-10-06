@@ -1,0 +1,391 @@
+{
+  "bug_id": "120648",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-01-19",
+    "resolved": "25f8d01fd8bda339612d0c0a8844173a09205f7c"
+  },
+  "final_top10": [
+    "compiler/rustc_middle/src/ty/context.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_ty_utils/src/assoc.rs",
+    "compiler/rustc_ty_utils/src/implied_bounds.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Uses a separate dependency crate (`jewel`) and implements its external trait `BleRadio` for a local type, exercising cross-crate trait resolution and metadata loading.",
+        "Compiles a binary crate with `#![no_std]` while still defining `fn main()`, stressing entry-point handling and `core`-only compilation in a nonstandard binary setup.",
+        "Enables `#![allow(async_fn_in_trait)]`, exercising the nightly async-functions-in-traits feature path and its diagnostics/lint handling.",
+        "Implements a trait method `async fn transmit(&mut self) {}` inside a trait impl, forcing rustc to lower async trait methods to hidden future types.",
+        "Implements a normal borrowed-slice method `fn set_buffer(&mut self, buffer: &[u8]) {}`, checking trait method signature matching with lifetimes elided.",
+        "Uses an empty local struct `Radio` as the implementor, minimizing runtime logic so the reproducer isolates type checking and trait/async lowering behavior.",
+        "Targets a pinned nightly toolchain (`nightly-2024-01-19`), indicating the bug depends on unstable compiler behavior rather than stable language semantics.",
+        "The code mainly exercises compilation, not execution: the empty method bodies and empty `main` make failures likely come from trait checking, async lowering, or no_std codegen."
+      ],
+      "summary": "This reproducer is a minimal compile-time test. A `no_std` binary crate implements an external `BleRadio` trait from another crate for a local `Radio` type, including an `async` trait method and a normal slice-parameter method. It stresses nightly handling of async functions in traits, cross-crate trait resolution, signature matching, and unusual `no_std` binary entry-point behavior."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a compiler ICE during type/well-formedness checking of the impl, not during code generation or runtime-related phases. The query stack shows the panic occurs in `check_well_formed` for the impl block itself, then propagates through module WF checking and analysis. The reproducer combines several traits of unstable/complex compiler paths: implementing an external trait from another crate, using `async fn` in a trait impl on nightly, and doing so in a `no_std` binary. The ordinary non-async method with an elided lifetime is simple and likely not the trigger by itself; the distinctive stressor is the async trait method, which must be lowered into an opaque future type with captured lifetimes and obligations. Because the trait comes from another crate, rustc must reconstruct and compare the trait method signature and hidden async return type across crate metadata, increasing the chance of a bug in obligation generation or WF checking for impl items. The mention of `E0726` also suggests lifetime elision/async interaction diagnostics are involved, reinforcing that the compiler is mishandling async trait method signature checking rather than reporting a normal user error.",
+      "possible_causes": [
+        "A defect in well-formedness checking for impls of `async fn` trait methods, where rustc incorrectly handles the hidden opaque future type generated for the impl method and panics instead of emitting a diagnostic.",
+        "A bug in cross-crate trait method signature matching/metadata decoding for external traits that contain or are implemented with `async fn`, leading to malformed predicates or missing binder/lifetime information during WF checking.",
+        "Incorrect handling of elided lifetimes in async trait method parameter environments during `check_well_formed`, possibly triggering an internal assumption failure related to E0726-style lifetime requirements.",
+        "A compiler bug in the interaction between `async_fn_in_trait` lowering and trait impl obligation generation, especially when the impl is for a local type but the trait definition lives in a dependency crate.",
+        "Potential missing defensive handling in rustc's WF/type-checking code for `no_std` binary crates using unstable async-in-trait features, exposing an unexpected code path that panics during analysis."
+      ],
+      "evidence": [
+        "The query stack explicitly says the panic occurs in `#0 [check_well_formed] checking that <impl at src/main.rs:9:1: 9:24> is well-formed`, so the defect is in compiler analysis/type checking of the impl.",
+        "The reproducer's most unusual construct is `async fn transmit(&mut self) {}` in a trait impl, which forces lowering to an opaque future type and lifetime capture logic.",
+        "The trait `BleRadio` is imported from a separate crate (`jewel`), so the compiler must perform cross-crate trait resolution and compare impl signatures against externally loaded metadata.",
+        "The compiler references `rustc --explain E0726`, which is associated with lifetime elision restrictions around async contexts, suggesting the ICE is near async/lifetime diagnostics or validation.",
+        "The non-async method `fn set_buffer(&mut self, buffer: &[u8]) {}` is straightforward, making it less likely to be the root cause than the async trait method path.",
+        "The failure happens during `analysis` and not in later phases, consistent with a bug in trait checking, WF validation, or async lowering rather than codegen or linking.",
+        "The test behavior explicitly stresses nightly `async_fn_in_trait`, cross-crate trait implementation, and no_std compilation, a combination known to exercise unstable compiler internals."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1734,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_middle/src/ty/context.rs",
+        "reason": "The ICE fires in this very file: `TyCtxt::is_suitable_region` calls `DefId::expect_local` while the lifetime error is being diagnosed. Per the panic message, the external async-trait opaque lifetime `jewel::BleRadio::transmit::{opaque#0}::'a` is being treated as local, which makes this the clearest locality-assumption bug site."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The query stack pinpoints the ICE in `check_well_formed` for the impl itself. This file is the primary implementation of impl/item well-formedness checking, so it is the most direct location for a panic caused by an async trait impl, especially with opaque future types and lifetime obligations."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+        "reason": "The reproducer implements an external trait method with `async fn`, so rustc must compare the impl method signature against the trait method signature across crates. This file specifically checks impl-vs-trait method compatibility and includes RPITIT/return-position-impl-trait refinement logic, making it highly suspicious for async-in-trait signature/lifetime mismatches that surface during WF checking."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "Async fn in traits/impls introduces synthesized opaque/future-related generics, and this file has explicit special handling for RPITITs by synthesizing combined generic lists. A bug here could produce malformed generics/binders for the impl method, later causing WF checking to panic."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "The error message references E0726, which strongly suggests a lifetime/bound-variable issue in an async context. This file resolves lifetimes into early/late-bound variables and tracks captured lifetimes for opaque types, so incorrect binder resolution here could poison later WF checks for the async trait method."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "WF checking in `rustc_hir_analysis` ultimately relies on trait-selection-side generation of well-formedness obligations. Since the bug appears tied to the hidden future/opaque type created by `async fn` in a trait impl, this obligation-generation logic is a strong suspect for producing invalid or unhandled predicates."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/assoc.rs",
+        "reason": "Async functions in traits are represented via synthesized associated items/types in the compiler. This file computes associated items and explicitly handles synthetic associated types created for impl-trait-in-associated functions, so cross-crate trait impls with async methods could fail here or from metadata it creates."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/implied_bounds.rs",
+        "reason": "WF checking often depends on `assumed_wf_types`, and this file contains special handling for impl headers and RPITIT-associated types. If the async trait method's implied bounds or assumed-WF inputs are computed incorrectly, the impl WF query could ICE downstream."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "`async fn` lowers to an opaque future type with remapped generics and captured lifetimes. This file is central to remapping generic arguments for opaque types, so a cross-crate async-trait impl could expose a bug in how lifetimes/args are rewritten for the hidden future type."
+      },
+      {
+        "path": "compiler/rustc_metadata/src/rmeta/decoder/cstore_impl.rs",
+        "reason": "Because the trait comes from an external dependency crate, rustc must decode metadata for the trait method and any synthesized async-related items. If cross-crate metadata decoding loses binder or associated-item structure for async trait methods, WF checking of the impl could panic later."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 234.219,
+    "stage_times_sec": {
+      "checkout": 2.078,
+      "load_bug_context": 0.501,
+      "test_behavior_analysis": 7.438,
+      "test_failure_analysis": 11.95,
+      "load_file_candidates": 83.918,
+      "search_suspicious_files": 128.335
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 38,
+      "input_tokens": 434675,
+      "output_tokens": 11371,
+      "total_tokens": 446046,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.437,
+          "input_tokens": 385,
+          "output_tokens": 362,
+          "total_tokens": 747
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.95,
+          "input_tokens": 2241,
+          "output_tokens": 723,
+          "total_tokens": 2964
+        },
+        {
+          "stage": "file_summary:compiler_rustc_error_codes_src_error_codes_rs",
+          "latency_sec": 4.439,
+          "input_tokens": 1782,
+          "output_tokens": 220,
+          "total_tokens": 2002
+        },
+        {
+          "stage": "file_summary:compiler_rustc_error_codes_src_error_codes_rs_repair",
+          "latency_sec": 2.876,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_errors_src_diagnostic_builder_rs",
+          "latency_sec": 4.788,
+          "input_tokens": 1338,
+          "output_tokens": 220,
+          "total_tokens": 1558
+        },
+        {
+          "stage": "file_summary:compiler_rustc_errors_src_diagnostic_builder_rs_repair",
+          "latency_sec": 3.629,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_canonical_substitute_rs",
+          "latency_sec": 4.54,
+          "input_tokens": 1253,
+          "output_tokens": 220,
+          "total_tokens": 1473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_canonical_substitute_rs_repair",
+          "latency_sec": 4.302,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_relate_nll_rs",
+          "latency_sec": 4.664,
+          "input_tokens": 1340,
+          "output_tokens": 220,
+          "total_tokens": 1560
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_relate_nll_rs_repair",
+          "latency_sec": 3.56,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_const_goto_rs",
+          "latency_sec": 4.006,
+          "input_tokens": 1257,
+          "output_tokens": 220,
+          "total_tokens": 1477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_const_goto_rs_repair",
+          "latency_sec": 4.597,
+          "input_tokens": 249,
+          "output_tokens": 212,
+          "total_tokens": 461
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_const_prop_rs",
+          "latency_sec": 4.639,
+          "input_tokens": 1452,
+          "output_tokens": 220,
+          "total_tokens": 1672
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_const_prop_rs_repair",
+          "latency_sec": 3.654,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_const_prop_lint_rs",
+          "latency_sec": 5.316,
+          "input_tokens": 1433,
+          "output_tokens": 220,
+          "total_tokens": 1653
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_const_prop_lint_rs_repair",
+          "latency_sec": 4.051,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_separate_const_switch_rs",
+          "latency_sec": 5.289,
+          "input_tokens": 1150,
+          "output_tokens": 220,
+          "total_tokens": 1370
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_separate_const_switch_rs_repair",
+          "latency_sec": 3.111,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_query_system_src_ich_impls_hir_rs",
+          "latency_sec": 4.06,
+          "input_tokens": 451,
+          "output_tokens": 220,
+          "total_tokens": 671
+        },
+        {
+          "stage": "file_summary:compiler_rustc_query_system_src_ich_impls_hir_rs_repair",
+          "latency_sec": 4.686,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_normalizes_to_opaques_rs",
+          "latency_sec": 4.021,
+          "input_tokens": 1069,
+          "output_tokens": 220,
+          "total_tokens": 1289
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_normalizes_to_opaques_rs_repair",
+          "latency_sec": 3.59,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.327,
+          "input_tokens": 27913,
+          "output_tokens": 309,
+          "total_tokens": 28222
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.09,
+          "input_tokens": 27917,
+          "output_tokens": 293,
+          "total_tokens": 28210
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.294,
+          "input_tokens": 27436,
+          "output_tokens": 299,
+          "total_tokens": 27735
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.789,
+          "input_tokens": 27673,
+          "output_tokens": 403,
+          "total_tokens": 28076
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.028,
+          "input_tokens": 27637,
+          "output_tokens": 336,
+          "total_tokens": 27973
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 6.572,
+          "input_tokens": 28058,
+          "output_tokens": 325,
+          "total_tokens": 28383
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.559,
+          "input_tokens": 27793,
+          "output_tokens": 358,
+          "total_tokens": 28151
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.701,
+          "input_tokens": 27829,
+          "output_tokens": 370,
+          "total_tokens": 28199
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.443,
+          "input_tokens": 27906,
+          "output_tokens": 324,
+          "total_tokens": 28230
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.583,
+          "input_tokens": 27721,
+          "output_tokens": 339,
+          "total_tokens": 28060
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.629,
+          "input_tokens": 28039,
+          "output_tokens": 366,
+          "total_tokens": 28405
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.694,
+          "input_tokens": 27944,
+          "output_tokens": 363,
+          "total_tokens": 28307
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.624,
+          "input_tokens": 28054,
+          "output_tokens": 375,
+          "total_tokens": 28429
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.863,
+          "input_tokens": 27804,
+          "output_tokens": 344,
+          "total_tokens": 28148
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.062,
+          "input_tokens": 14273,
+          "output_tokens": 301,
+          "total_tokens": 14574
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.051,
+          "input_tokens": 12983,
+          "output_tokens": 796,
+          "total_tokens": 13779
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,235 @@
+{
+  "bug_id": "99705",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-07-21",
+    "resolved": "d68e7ebc38cb42b8b237392b28045edeec761503"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/astconv/mod.rs",
+    "compiler/rustc_typeck/src/check/wfcheck.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/combine.rs",
+    "compiler/rustc_infer/src/infer/at.rs",
+    "compiler/rustc_typeck/src/collect/item_bounds.rs",
+    "compiler/rustc_trait_selection/src/infer.rs",
+    "compiler/rustc_middle/src/ty/abstract_const.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly `generic_const_exprs`, allowing const expressions involving generic parameters in type positions like `BarStruct<{T::ABC}>` and `IteratorStruct<{T::ABC}>`.",
+        "Defines trait `Foo` with associated const `ABC`, exercising use of trait-associated constants as const generic arguments.",
+        "Defines `MyIterator` with associated type `Output`, then implements it for `IteratorStruct<N>` so `Output = BarStruct<N>`.",
+        "Uses const-generic structs `IteratorStruct<const N: usize>` and `BarStruct<const N: usize>`, testing parameterized types over array lengths.",
+        "`BarStruct` stores `[usize; N]`, exercising array lengths driven by const generics and type-level integer propagation.",
+        "Function `test<T: Foo>()` returns `impl MyIterator`, exercising opaque return types constrained by an associated type equality.",
+        "The return type requires `Output = BarStruct<{T::ABC}>`, forcing the compiler to relate the hidden concrete type with a const-dependent associated type.",
+        "The where-clause `[(); {T::ABC}]: Sized` is a well-formedness bound used by `generic_const_exprs` to permit evaluation of the generic const expression."
+      ],
+      "summary": "This reproducer checks nightly handling of const generics combined with trait-associated constants, associated types, and `impl Trait` return types. It verifies that rustc can normalize `T::ABC` through opaque return typing, prove the associated type equality, and accept the generic const expression under the required well-formedness bound."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is that the same trait-associated const expression `T::ABC` is accepted in the where-clause/well-formedness context (`[(); {T::ABC}]: Sized`) but rejected in the opaque return type’s associated-type equality (`impl MyIterator<Output = BarStruct<{T::ABC}>>`). Since `T` is explicitly bounded by `Foo`, the E0599 message claiming `ABC` is not found on `T` is inconsistent with the source and indicates the compiler lost or failed to apply the `T: Foo` bound while checking the `impl Trait` return type. The reproducer combines `generic_const_exprs`, associated consts from traits, const generic arguments, associated type projection, and opaque return types. That strongly suggests a compiler defect in type checking / HIR lowering / predicate collection for opaque return types where generic parameters and their trait bounds are not propagated correctly into const-generic expressions embedded inside associated type constraints.",
+      "possible_causes": [
+        "Bug in rustc handling of `impl Trait` return types: the parameter environment for the opaque type may not include the function's `T: Foo` bound when checking const expressions inside associated-type equality constraints.",
+        "Defect in name resolution or type checking for trait-associated consts used inside const generic arguments within opaque return types, causing `T::ABC` to be treated as if `T` were unbounded only in that context.",
+        "Incorrect predicate collection / lowering of bounds for `impl MyIterator<Output = ...>` where the associated type equality contains a const expression, so the trait bound on `T` is dropped before validating `T::ABC`.",
+        "Normalization or projection bug when relating the hidden concrete type `IteratorStruct<{T::ABC}>` to the opaque return bound `MyIterator<Output = BarStruct<{T::ABC}>>`, specifically for trait-associated consts under `generic_const_exprs`.",
+        "Well-formedness checking inconsistency between where-clause const expressions and return-type const expressions, indicating separate compiler paths where only the opaque-return path mishandles generic associated const references."
+      ],
+      "evidence": [
+        "`T` is declared as `fn test<T: Foo>()`, so `T::ABC` should be valid everywhere in the signature; the emitted E0599 contradicts the explicit bound.",
+        "The same associated const `T::ABC` appears in the where-clause `[(); {T::ABC}]: Sized` without triggering 'trait bound missing'; this shows the compiler can see `T: Foo` in at least one checking path.",
+        "The error is reported specifically at `BarStruct<{T::ABC}>` inside `impl MyIterator<Output = ...>`, isolating the failure to the opaque return type / associated type constraint context.",
+        "The hidden returned value `IteratorStruct::<{T::ABC}>{}` matches the implemented `MyIterator` output `BarStruct<N>`, so semantically the program is consistent and should type-check under `generic_const_exprs`.",
+        "The reproducer's feature mix—trait-associated consts + const generics + associated type equality + `impl Trait`—matches known fragile compiler areas involving param-env propagation and projection/normalization."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1459,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/astconv/mod.rs",
+        "reason": "Most suspicious because the emitted error is E0599 on `T::ABC` specifically while lowering/checking the return type `impl MyIterator<Output = BarStruct<{T::ABC}>>`. That points to AST/HIR-to-ty conversion or associated-item lookup in a type context where the function’s `T: Foo` bound may not be visible when processing const generic arguments inside the opaque return bound."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "The reproducer shows a well-formedness asymmetry: `[(); {T::ABC}]: Sized` is accepted, but the same const expression in the opaque return bound is rejected. This file handles item/signature well-formedness and builds the checking context for signatures, making it a strong candidate for a param-env/bounds propagation bug specific to `impl Trait` return types."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Opaque return types (`impl Trait`) are central to the failure. If the inference context used for defining/checking the hidden type drops caller bounds or mishandles generic const expressions embedded in trait/associated-type constraints, this file is a likely source."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "The bug involves `generic_const_exprs` and a trait-associated const used as a const generic argument. This file governs whether such consts are accepted under the current parameter environment, so an inconsistency between where-clause handling and opaque return bound handling could originate here."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "The return type contains an associated type equality `Output = BarStruct<{T::ABC}>`. Relating and normalizing that projection in the presence of an opaque type and const generics may be failing here, especially if obligations generated during projection lose the `T: Foo` bound."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "reason": "Type/const relation logic for equating the hidden concrete type `IteratorStruct<{T::ABC}>` with the opaque bound involving `Output = BarStruct<{T::ABC}>` flows through combine/equate machinery. A bug in how constants or obligations are related under the current param-env could explain the spurious missing-associated-const error."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/at.rs",
+        "reason": "This file packages the `ParamEnv` and obligation cause for inference operations. Since the observed symptom strongly suggests the wrong parameter environment is used when checking the opaque return type, this is a plausible location for the bound-loss bug."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect/item_bounds.rs",
+        "reason": "Opaque type bounds are computed here. Because the failure occurs inside the declared `impl MyIterator<Output = ...>` return bound, incorrect collection/lowering of opaque item bounds involving const generic expressions and associated consts could trigger exactly this behavior."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/infer.rs",
+        "reason": "Contains convenience inference queries under a `ParamEnv`. While less direct than astconv or opaque-type code, the bug pattern fits a side-effect-free trait/obligation probe performed with an incomplete environment when validating the opaque return type."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/abstract_const.rs",
+        "reason": "Abstract-const expansion participates in generic const expression handling. Since `T::ABC` works in one const-expression context but not another, a mismatch in how abstract consts are represented or expanded within opaque return type bounds is a plausible contributing factor."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 124.601,
+    "stage_times_sec": {
+      "checkout": 3.912,
+      "load_bug_context": 0.034,
+      "test_behavior_analysis": 6.337,
+      "test_failure_analysis": 11.123,
+      "load_file_candidates": 0.076,
+      "search_suspicious_files": 103.119
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 340785,
+      "output_tokens": 6116,
+      "total_tokens": 346901,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.337,
+          "input_tokens": 490,
+          "output_tokens": 321,
+          "total_tokens": 811
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.123,
+          "input_tokens": 1378,
+          "output_tokens": 655,
+          "total_tokens": 2033
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 6.813,
+          "input_tokens": 27037,
+          "output_tokens": 364,
+          "total_tokens": 27401
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.392,
+          "input_tokens": 26607,
+          "output_tokens": 318,
+          "total_tokens": 26925
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.042,
+          "input_tokens": 26636,
+          "output_tokens": 310,
+          "total_tokens": 26946
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.982,
+          "input_tokens": 26874,
+          "output_tokens": 415,
+          "total_tokens": 27289
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.047,
+          "input_tokens": 26795,
+          "output_tokens": 333,
+          "total_tokens": 27128
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 6.359,
+          "input_tokens": 26859,
+          "output_tokens": 341,
+          "total_tokens": 27200
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.066,
+          "input_tokens": 26868,
+          "output_tokens": 295,
+          "total_tokens": 27163
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.104,
+          "input_tokens": 26742,
+          "output_tokens": 355,
+          "total_tokens": 27097
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.632,
+          "input_tokens": 25603,
+          "output_tokens": 363,
+          "total_tokens": 25966
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.2,
+          "input_tokens": 26622,
+          "output_tokens": 279,
+          "total_tokens": 26901
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.368,
+          "input_tokens": 26916,
+          "output_tokens": 300,
+          "total_tokens": 27216
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.818,
+          "input_tokens": 26600,
+          "output_tokens": 381,
+          "total_tokens": 26981
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.367,
+          "input_tokens": 6051,
+          "output_tokens": 313,
+          "total_tokens": 6364
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.904,
+          "input_tokens": 12707,
+          "output_tokens": 773,
+          "total_tokens": 13480
+        }
+      ]
+    }
+  }
+}

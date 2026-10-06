@@ -1,0 +1,228 @@
+{
+  "bug_id": "97405",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-05-24",
+    "resolved": "ee160f2f5e73b6f5954bc33f059c316d9e8582c4"
+  },
+  "final_top10": [
+    "compiler/rustc_infer/src/infer/outlives/verify.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_borrowck/src/region_infer/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `opaque<F>(_: F) -> impl Iterator` to return a hidden iterator type from `b\"\".iter()`, exercising `impl Trait` in return position and opaque type inference.",
+        "Uses `assert_static<T: 'static>` to force the compiler to prove a value, including any nested associated types, satisfies the `'static` lifetime bound.",
+        "Inside `generic_fn<T>`, calls `opaque(async {}).next()` to test an opaque type instantiated from an async block type, even though the returned iterator is independent of `F`.",
+        "Also calls `opaque(|| {}).next()` with a closure type, checking whether the same lifetime reasoning bug appears for non-async anonymous function-like types.",
+        "The `.next()` call introduces the associated type requirement `<impl Iterator as Iterator>::Item`, so borrow checking and trait solving must infer the yielded reference lifetime.",
+        "Because `b\"\".iter()` yields `&u8`, the compiler should be able to see the item is effectively `'static`, since the byte string literal has static storage duration.",
+        "The generic parameter `T` is unused, but the reproducer checks whether proving the associated type's lifetime incorrectly becomes dependent on unrelated generic parameters.",
+        "Expected diagnostics show rustc reporting the associated type may not live long enough, exposing a bug in opaque type lifetime/trait solving around anonymous types."
+      ],
+      "summary": "The reproducer hides a slice iterator behind `impl Iterator`, then asks rustc to prove `.next()` results are `'static` via `assert_static`. It does this inside an unrelated generic function and instantiates the opaque type with both an async block and a closure. Since the iterator comes from a byte string literal, the item lifetime should be `'static`. The failure demonstrates a compiler bug where lifetime proof for the opaque iterator’s associated `Item` wrongly depends on unrelated generic context or anonymous argument types."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is consistent across two different anonymous argument kinds (`async {}` and `|| {}`), which strongly suggests the bug is not specific to async lowering but to how return-position `impl Trait`/opaque types are represented and queried in a generic context. In both cases, `opaque<F>(_: F) -> impl Iterator { b\"\".iter() }` returns the same concrete iterator (`slice::Iter<'static, u8>`), so `<impl Iterator as Iterator>::Item` should normalize to `&'static u8`, and `Option<_>` should satisfy `T: 'static`. However, inside `generic_fn<T>`, rustc emits E0310 saying the associated type may not live long enough, despite the generic parameter `T` being unused and unrelated to the returned iterator. The common pattern is: (a) RPIT/opaque type returned from a function generic over an otherwise irrelevant type parameter, (b) projection through an associated type via `.next()`, and (c) a required `'static` outlives proof. This points to a compiler defect in lifetime/outlives computation or trait projection for opaque types, where hidden type lifetime information is not properly propagated or is spuriously made dependent on surrounding generic parameters/inference variables. The defect is likely in the production compiler logic that computes bounds for opaque types or normalizes `<impl Trait as Trait>::Assoc` under generics, causing the hidden concrete type's `'static` lifetime to be lost.",
+      "possible_causes": [
+        "Incorrect outlives inference for return-position `impl Trait` (opaque types): the compiler may fail to derive that the hidden type `slice::Iter<'static, u8>` has `Item = &'static u8`, so `<impl Iterator as Iterator>::Item: 'static` is not proven.",
+        "Bug in associated-type projection/normalization for opaque types: when evaluating `.next()` and the projection `<impl Iterator as Iterator>::Item`, rustc may not normalize the projection using the hidden concrete type in a generic function body.",
+        "Opaque type bounds computation may be incorrectly capturing unrelated generic context: the unused `T` in `generic_fn<T>` appears to influence the lifetime proof, suggesting the opaque type's required region constraints are over-generalized or accidentally tied to surrounding generics.",
+        "Region/lifetime solving for hidden types behind RPIT may be dropping the `'static` origin of the byte-string literal iterator item, producing an unconstrained or placeholder lifetime instead of `&'static u8`.",
+        "Type checking around anonymous argument types (closure/async block) may instantiate distinct opaque type obligations incorrectly, but since both forms fail identically, the deeper defect is likely shared RPIT hidden-type registration or borrow-check/typeck interaction rather than async-specific code."
+      ],
+      "evidence": [
+        "Both `opaque(async {}).next()` and `opaque(|| {}).next()` fail with the same E0310, indicating a common compiler path for anonymous input types and opaque return types rather than a reproducer-specific mistake.",
+        "The returned value of `opaque` is always `b\"\".iter()`, whose concrete type is an iterator over a byte string literal with static storage; therefore its `Item` should effectively be `&'static u8`.",
+        "The generic parameter `T` in `generic_fn<T>` is unused, yet the lifetime proof fails only within this generic context, indicating spurious dependence on unrelated generics.",
+        "The error specifically mentions the associated type `<impl Iterator as Iterator>::Item`, showing the failure occurs during projection/lifetime reasoning for the opaque type's trait-associated item.",
+        "`assert_static<T: 'static>` only requires proving the resulting `Option<<impl Iterator as Iterator>::Item>` is `'static`; this should succeed if the hidden iterator item lifetime were correctly propagated from the concrete hidden type."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1427,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+        "reason": "What fails specifically is the proof of `<impl Iterator as Iterator>::Item: 'static`. Verifier bounds for alias/projection outlives checks - alias decomposition and environment-derived bounds included - are computed in this file, so a defect here would make an opaque associated type fail `'static` verification even though its hidden type is in fact `&'static u8`."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "Most directly implicated: the bug is about return-position `impl Trait`/opaque types in a generic context, where the hidden concrete type `slice::Iter<'static, u8>` seems not to be remapped back to the opaque definition with the correct lifetime information. This file specifically handles recovering and validating opaque hidden types from instantiations, including remapping generic arguments/regions and checking for escaping regions, which matches the observed loss or misassociation of `'static`."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Highly suspicious because the failure is fundamentally an outlives/region proof issue for an opaque type’s associated item. This file performs post-NLL inference for opaque types, rewriting region variables in opaque arguments and hidden types into stable named regions/erased regions. A mistake here could easily cause the hidden type’s `'static` region to be forgotten or made spuriously dependent on unrelated generics."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "This is the inference-layer bookkeeping for opaque types and the machinery that replaces local opaque aliases with inference vars and emits obligations tying them back to the definition. Since the bug appears during proving properties of `<impl Iterator as Iterator>::Item` under generics, incorrect opaque-type registration or obligation generation here could explain why normalization/outlives reasoning fails later."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The emitted error explicitly concerns the projected associated type `<impl Iterator as Iterator>::Item`. This file is central to projection/normalization of associated types during trait solving. If projection through an opaque `impl Iterator` is not normalized using the hidden concrete type in this generic context, the compiler would fail exactly as seen."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "Also relevant to associated-type projection handling at the inference layer. If immediate normalization of `<impl Iterator as Iterator>::Item` is deferred incorrectly or obligations are recorded without enough information from the opaque hidden type, the later `'static` proof can fail even though the underlying iterator item is `&'static u8`."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "The reproducer forces proof of `'static` for `Option<<impl Iterator as Iterator>::Item>`. This file lowers type-outlives obligations into region constraints and deferred verification checks. A bug here could make the outlives proof for the projected item overly conservative or accidentally dependent on unrelated generic parameters like the unused `T`."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Opaque type region inference in NLL uses member constraints of the form ‘region is one of these candidates’. Since the symptom suggests the hidden type’s region is not being resolved to `'static`, an error in how member constraints for opaque types are stored or interpreted could produce exactly this kind of spurious lifetime failure."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/mod.rs",
+        "reason": "Core region solver logic is a plausible source because the bug manifests as an E0310 outlives failure in a generic function, despite a concretely `'static` hidden type. If region solving or propagation around opaque/member constraints is wrong, the solver may leave the projected item lifetime insufficiently constrained."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+        "reason": "The failure may come from computing implied outlives bounds for types involving opaque returns and projections. This file computes region outlives relationships implied by well-formedness, and an omission here could make the compiler fail to derive that the iterator item is `'static` from the hidden type."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 128.696,
+    "stage_times_sec": {
+      "checkout": 1.782,
+      "load_bug_context": 0.044,
+      "test_behavior_analysis": 7.526,
+      "test_failure_analysis": 11.322,
+      "load_file_candidates": 0.106,
+      "search_suspicious_files": 107.916
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 332931,
+      "output_tokens": 6415,
+      "total_tokens": 339346,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.526,
+          "input_tokens": 456,
+          "output_tokens": 383,
+          "total_tokens": 839
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.322,
+          "input_tokens": 1394,
+          "output_tokens": 778,
+          "total_tokens": 2172
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.185,
+          "input_tokens": 27173,
+          "output_tokens": 419,
+          "total_tokens": 27592
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 5.03,
+          "input_tokens": 26726,
+          "output_tokens": 175,
+          "total_tokens": 26901
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.657,
+          "input_tokens": 26957,
+          "output_tokens": 416,
+          "total_tokens": 27373
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.142,
+          "input_tokens": 26949,
+          "output_tokens": 340,
+          "total_tokens": 27289
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.434,
+          "input_tokens": 26968,
+          "output_tokens": 394,
+          "total_tokens": 27362
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.188,
+          "input_tokens": 27028,
+          "output_tokens": 321,
+          "total_tokens": 27349
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.387,
+          "input_tokens": 26995,
+          "output_tokens": 344,
+          "total_tokens": 27339
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.022,
+          "input_tokens": 26664,
+          "output_tokens": 445,
+          "total_tokens": 27109
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.189,
+          "input_tokens": 26298,
+          "output_tokens": 442,
+          "total_tokens": 26740
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.167,
+          "input_tokens": 26785,
+          "output_tokens": 361,
+          "total_tokens": 27146
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.081,
+          "input_tokens": 26615,
+          "output_tokens": 318,
+          "total_tokens": 26933
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.86,
+          "input_tokens": 24504,
+          "output_tokens": 399,
+          "total_tokens": 24903
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.546,
+          "input_tokens": 11419,
+          "output_tokens": 880,
+          "total_tokens": 12299
+        }
+      ]
+    }
+  }
+}

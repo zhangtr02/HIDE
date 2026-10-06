@@ -1,0 +1,260 @@
+{
+  "bug_id": "129811",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-08-29",
+    "resolved": "100fde5246bf56f22fb5cc85374dd841296fce0e"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/coroutine.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+    "compiler/rustc_hir_typeck/src/callee.rs",
+    "compiler/rustc_trait_selection/src/traits/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_middle/src/mir/query.rs",
+    "compiler/rustc_ty_utils/src/layout.rs",
+    "compiler/rustc_mir_transform/src/shim.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `async_closure`, so `async || ...` syntax is parsed and lowered using unstable compiler machinery.",
+        "Defines `orchestrate_memd_routing` as an async generic function taking `impl Fn() -> Fut` where `Fut: Future`, exercising opaque argument types and async lowering.",
+        "Calling `operation().await` requires the closure call result to implement `Future`, testing trait-based awaitability and generic future handling.",
+        "`orchestrate_simple_crud` passes an async closure to a function expecting a synchronous `Fn` returning a future, probing closure kind and signature matching.",
+        "The async closure body contains `async {}.await`, creating and immediately awaiting an inner async block, stressing nested async lowering.",
+        "This nests two future-producing layers: the async closure itself and the inner async block, exercising normalization of closure output futures.",
+        "The closure captures nothing, so the compiler can infer minimal capture state while still checking async closure trait implementation.",
+        "`main` is empty; compilation alone is the reproducer, targeting type checking and MIR/HIR lowering rather than runtime behavior."
+      ],
+      "summary": "The reproducer is compile-only and focuses on nightly async-closure support. It defines an async generic helper expecting a callable that returns a future, then passes an `async || ...` closure whose body immediately awaits an inner async block. This exercises async closure parsing, closure trait matching against `Fn() -> Fut`, future inference, nested async lowering, and await/type normalization in the compiler."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is a compiler query cycle triggered during MIR optimization, not a user-facing type error. All salient inputs point to unstable async-closure handling combined with nested async lowering. The call site passes `async || async {}.await` into a generic `async fn` parameterized as `impl Fn() -> Fut` where `Fut: Future`, so the compiler must reconcile an async closure with the ordinary closure trait `Fn() -> Fut`, infer the returned future type, lower the async closure body, and optimize MIR for the generated coroutine/future state machines. The stack trace says the cycle occurs while optimizing MIR for an inner closure/body and is reused when computing the layout of the async closure body, which strongly suggests self-referential query dependencies introduced by lowering or normalizing the async closure’s output future. The nested pattern `async closure` containing `async {}.await` is especially suspicious because it creates two generated future bodies and requires the compiler to reason about the closure call result and the awaited inner future simultaneously. Since the closure captures nothing and the program is otherwise minimal, the likely defect is in compiler handling of async closure signature/trait implementation or MIR/layout computation for nested async bodies, not in user code.",
+      "possible_causes": [
+        "A bug in async-closure lowering where an `async || ...` passed to a parameter of type `impl Fn() -> Fut` creates a self-referential relation between the closure’s call signature and the generated future/body type.",
+        "Incorrect normalization or projection of the async closure’s output future type during trait selection for `Fn() -> Fut`, causing the compiler to depend on MIR optimization/layout of the same generated async body it is currently computing.",
+        "A defect in MIR generation/optimization for nested async constructs (`async closure` containing `async block` plus immediate `.await`) that introduces a query cycle between optimizing the inner coroutine body and computing its layout.",
+        "Improper handling of await inside async-closure bodies, where the await desugaring for `async {}.await` inside the generated closure future recursively references the enclosing closure/coroutine MIR.",
+        "A compiler bug in closure kind/signature matching between async closures and ordinary closure traits (`Fn`) under the unstable `async_closure` feature, leading to cyclic obligations or recursive query evaluation in later MIR/layout stages.",
+        "An issue in layout computation for the generated future/state machine of the async closure, possibly because the inferred state type indirectly includes itself through nested future normalization or generator witness construction."
+      ],
+      "evidence": [
+        "Compiler error is `E0391: cycle detected when optimizing MIR`, indicating an internal compiler query dependency problem rather than a normal semantic rejection.",
+        "The cycle is reported for `orchestrate_simple_crud::{closure#0}::{closure#0}::{closure#0}::{closure#1}`, showing the failure is inside synthesized nested closure/async bodies produced by lowering.",
+        "The note says the cycle is used when computing layout of `{async closure body@src/main.rs:10:39: 10:53}`, directly implicating async-closure body layout/state-machine generation.",
+        "The reproducer uses nightly-only `#![feature(async_closure)]`, so it exercises unstable compiler machinery specific to async closures.",
+        "The passed expression `async || async {}.await` combines an async closure with an inner async block and immediate await, creating nested future-producing constructs that stress lowering and normalization.",
+        "`orchestrate_memd_routing` expects `impl Fn() -> Fut` with `Fut: Future`, so the compiler must model the async closure as a callable returning a future and infer/normalize that future type.",
+        "The closure captures nothing and the program is minimal, reducing the likelihood of borrow/capture issues and isolating the problem to compiler handling of async closure + nested async lowering.",
+        "Compilation fails before code generation/runtime; `main` is empty, so the defect is in type checking/lowering/MIR/layout infrastructure of the compiler."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1833,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "reason": "Most suspicious because the compiler reports a query cycle while optimizing MIR and then computing the layout of an async-closure body. This file performs MIR-to-state-machine lowering for async/coroutine bodies and computes coroutine frame layout, exactly the area stressed by a nested `async || async {}.await` pattern."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "Async closures are unstable and this file is the main closure type-checking entry point. The reproducer specifically relies on matching an `async || ...` closure against `impl Fn() -> Fut`, so a bug in deriving the async closure signature or body-local coroutine signature could create a self-referential future type that later triggers the MIR/layout cycle."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "reason": "This file is dedicated to coroutine-closure support and synthesizes alternate MIR for async/coroutine closures. Since the failure involves an async closure rather than only an async block, and the reported cycle is inside nested synthesized closure bodies, coroutine-closure-specific body construction is highly suspect."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/callee.rs",
+        "reason": "The call `operation().await` forces the compiler to resolve callable traits and the return type of the passed async closure under `Fn() -> Fut`. If async closures are being incorrectly treated during call resolution or deferred closure call handling, that could induce recursive obligations feeding into MIR/layout computation."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/normalize.rs",
+        "reason": "The reproducer stresses normalization of the async closure’s output future type through nested async constructs and `await`. A normalization bug could easily create a cycle where the closure output type depends on the very coroutine body layout currently being computed."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "Trait confirmation is involved when establishing that the async closure satisfies callable/future-related obligations. Mis-confirmation of closure or coroutine/future candidates could create recursive obligations around the closure’s output future type, leading to the observed query cycle."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "This file lowers async closures, async blocks, and await expressions from AST to HIR. The reproducer combines all three in one expression, so a desugaring bug here could create malformed nested async structure that later manifests as a MIR optimization/layout cycle."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/query.rs",
+        "reason": "The error note specifically mentions computing layout of an async closure body. This file defines coroutine layout query result types used to represent saved locals and state-machine layout, so defects or mismatches in coroutine layout modeling could contribute to the self-referential query dependency."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/layout.rs",
+        "reason": "The cycle is explicitly 'used when computing layout' of the async-closure body. This file provides the `layout_of` query and handles coroutine layout-related computation, making it a plausible location if the generated future/state machine type ends up indirectly containing itself."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/shim.rs",
+        "reason": "Less likely than the main coroutine files, but this file builds synthetic MIR bodies for closure/coroutine-related shims, including closure adapters. Because the async closure is being coerced into a callable form compatible with `Fn() -> Fut`, an incorrect shim/adaptor path could participate in the recursive MIR dependency."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 187.66,
+    "stage_times_sec": {
+      "checkout": 4.18,
+      "load_bug_context": 0.113,
+      "test_behavior_analysis": 6.518,
+      "test_failure_analysis": 16.246,
+      "load_file_candidates": 0.232,
+      "search_suspicious_files": 160.371
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 425204,
+      "output_tokens": 7111,
+      "total_tokens": 432315,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.518,
+          "input_tokens": 377,
+          "output_tokens": 310,
+          "total_tokens": 687
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 16.245,
+          "input_tokens": 1131,
+          "output_tokens": 800,
+          "total_tokens": 1931
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.482,
+          "input_tokens": 26912,
+          "output_tokens": 338,
+          "total_tokens": 27250
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.541,
+          "input_tokens": 26928,
+          "output_tokens": 273,
+          "total_tokens": 27201
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.526,
+          "input_tokens": 26289,
+          "output_tokens": 284,
+          "total_tokens": 26573
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.099,
+          "input_tokens": 26712,
+          "output_tokens": 344,
+          "total_tokens": 27056
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.497,
+          "input_tokens": 26636,
+          "output_tokens": 287,
+          "total_tokens": 26923
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 10.165,
+          "input_tokens": 26992,
+          "output_tokens": 422,
+          "total_tokens": 27414
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.94,
+          "input_tokens": 26760,
+          "output_tokens": 381,
+          "total_tokens": 27141
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.021,
+          "input_tokens": 26772,
+          "output_tokens": 365,
+          "total_tokens": 27137
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.657,
+          "input_tokens": 26856,
+          "output_tokens": 330,
+          "total_tokens": 27186
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.989,
+          "input_tokens": 26723,
+          "output_tokens": 371,
+          "total_tokens": 27094
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.529,
+          "input_tokens": 26767,
+          "output_tokens": 328,
+          "total_tokens": 27095
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.904,
+          "input_tokens": 26847,
+          "output_tokens": 310,
+          "total_tokens": 27157
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.232,
+          "input_tokens": 27032,
+          "output_tokens": 279,
+          "total_tokens": 27311
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.463,
+          "input_tokens": 26949,
+          "output_tokens": 290,
+          "total_tokens": 27239
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 10.374,
+          "input_tokens": 26829,
+          "output_tokens": 350,
+          "total_tokens": 27179
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 8.921,
+          "input_tokens": 8850,
+          "output_tokens": 310,
+          "total_tokens": 9160
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 14.0,
+          "input_tokens": 12842,
+          "output_tokens": 739,
+          "total_tokens": 13581
+        }
+      ]
+    }
+  }
+}

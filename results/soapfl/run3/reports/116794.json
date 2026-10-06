@@ -1,0 +1,249 @@
+{
+  "bug_id": "116794",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-10-15",
+    "resolved": "c543b6f3516767150af84d94c14a27b19d4b0291"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+    "compiler/rustc_borrowck/src/region_infer/mod.rs",
+    "compiler/rustc_middle/src/ty/adjustment.rs",
+    "compiler/rustc_hir_typeck/src/rvalue_scopes.rs",
+    "compiler/rustc_hir_analysis/src/check/region.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a function returning `*mut impl Sized`, using `impl Trait` in a raw pointer return type to create an opaque concrete pointee type.",
+        "Introduces an explicit lifetime parameter `<'a: 'a>` and takes `&'a str`, exercising lifetime handling even though the return type does not name `'a`.",
+        "Returns `&mut ()` from the function, relying on coercion from a mutable reference to a raw mutable pointer (`*mut ()`).",
+        "Calls the function with `&String::new()`, creating a temporary `String` and immediately borrowing it as `&str` via deref coercion.",
+        "Tests temporary lifetime rules: the borrowed temporary should be dropped at the end of the statement, not kept alive by the call result.",
+        "Triggers borrow checking for error E0716 (“temporary value dropped while borrowed”), because the compiler treats the argument borrow as needing a longer lifetime.",
+        "Exercises interaction between opaque return types, raw pointers, and region inference/borrow checking on nightly rustc.",
+        "Uses `drop(x)` only to keep the returned value live past the statement, ensuring the temporary-borrow diagnostic is relevant."
+      ],
+      "summary": "The reproducer checks whether rustc correctly diagnoses a borrowed temporary passed into a function returning a raw pointer with an opaque `impl Sized` pointee. It combines lifetime parameters, deref coercion from `String` to `&str`, reference-to-raw-pointer coercion, and temporary drop semantics. The expected behavior is a borrow-checker error that the temporary `String` is dropped while still borrowed."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on borrow checking and temporary lifetime analysis in the presence of an opaque return type embedded inside a raw pointer: `fn opaque<'a: 'a>(_: &'a str) -> *mut impl Sized`. The argument borrow comes from `&String::new()`, so the temporary `String` should be dropped at the end of the statement unless the borrow is required longer. The reproducer intentionally keeps the call result alive with `drop(x)`, forcing the compiler to decide whether the argument borrow is tied to the result lifetime. The key similarity across the code and diagnostic is that the return type does not semantically carry a borrow of `'a`, yet the compiler still concludes the temporary borrow must outlive the statement. This suggests an over-conservative or incorrect dependency introduced during type/lifetime analysis of opaque `impl Trait` in return position, especially when wrapped in a raw pointer. Since raw pointers do not participate in borrow tracking like references, borrowck should not infer that the returned `*mut impl Sized` keeps the input `&'a str` alive. A likely compiler defect is in how hidden types for opaque return types are related to input regions during type checking, region inference, or borrow-checker liveness computation, causing a false propagation of `'a` into the returned raw-pointer-based opaque type.",
+      "possible_causes": [
+        "Incorrect region/lifetime constraint generation for return-position `impl Trait` nested under `*mut`, causing the input lifetime `'a` to be treated as escaping through the return type even though raw pointers should not impose borrow-liveness requirements like references.",
+        "Bug in opaque type (`impl Trait`) hidden-type inference or lifetime capture analysis, where the hidden concrete type derived from `&mut ()` is over-associated with the function's input region parameters and thus creates a spurious outlives relation to the call result.",
+        "Borrow checker / MIR region inference defect when handling calls returning raw pointers to opaque types, incorrectly extending the lifetime of the argument borrow to the lifetime of the local `x` because the result is considered to depend on the borrowed argument.",
+        "Improper handling of coercions in type checking—specifically `&mut ()` to `*mut ()` combined with opaque return typing—leading the compiler to preserve reference-like provenance/lifetime constraints after coercion to a raw pointer.",
+        "Potential issue in drop-liveness or use-live analysis around temporaries at call sites, where the presence of an opaque return type prevents recognizing that the temporary borrow is only needed for the duration of the call expression."
+      ],
+      "evidence": [
+        "The return type is `*mut impl Sized`, not a reference type, so the result should not normally keep the input borrow alive in borrow checking.",
+        "The parameter lifetime `'a` appears only in the argument type `&'a str` and is not named in the explicit return type, indicating any dependency of the result on `'a` must come from incorrect inference/capture.",
+        "The function body returns `&mut ()`, which is immediately coerced to a raw pointer; raw pointer coercion should erase borrow semantics relevant to E0716-style lifetime extension.",
+        "The compiler emits E0716 on `opaque(&String::new())`, meaning it inferred that the temporary backing the borrowed `&str` must live until `drop(x)`, i.e. beyond the statement.",
+        "The reproducer specifically combines opaque return types, raw pointers, and temporary borrows, matching a likely edge case in return-position `impl Trait` lifetime/region handling rather than a problem in the source program logic."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1681,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Most directly matches the failure: borrowck is inferring/rewriting opaque `impl Trait` hidden types after region inference, and this bug looks like an incorrect propagation of the input lifetime `'a` through an opaque return type nested under a raw pointer."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Opaque-type inference is a prime suspect because the hidden type for `*mut impl Sized` is inferred from `&mut ()` and may be incorrectly tied to the function's input lifetime, creating the spurious borrow dependency seen in E0716."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "This file handles remapping generics/regions between the enclosing function and the opaque type; a mistake here could cause `'a` to be captured or preserved in the opaque return type when it should not affect the raw-pointer result."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Opaque types commonly generate member constraints for regions. If those constraints are over-conservative for raw-pointer-contained opaque types, borrowck could wrongly conclude the argument borrow must outlive `x`."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "The false E0716 suggests an incorrect lowering of type-outlives obligations into region constraints, possibly treating the opaque hidden type or raw-pointer coercion as if it still carried reference-style lifetime requirements."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+        "reason": "This is where MIR type-checking obligations become borrowck region constraints. A bad conversion around the call result type `*mut impl Sized` could easily introduce the bogus outlives edge that extends the temporary borrow."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/mod.rs",
+        "reason": "If the constraints are produced correctly but solved too conservatively, region inference itself could be extending the temporary borrow because it thinks the call result remains related to the input region through the opaque type."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/adjustment.rs",
+        "reason": "The reproducer relies on coercion from `&mut ()` to `*mut ()`. If adjustment/coercion modeling preserves reference-like lifetime relationships too long when combined with opaque return typing, it could trigger this exact misbehavior."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/rvalue_scopes.rs",
+        "reason": "The error is E0716 about a temporary from `&String::new()`. Although the root issue appears opaque-type-related, temporary lifetime extension logic is still relevant because a misinteraction here could incorrectly treat the borrow as needing to survive to `drop(x)`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/region.rs",
+        "reason": "This file builds the scope tree and terminating scopes that underpin temporary drop semantics. It is less likely than the opaque-type and borrowck files, but still plausible if the temporary's destruction scope is miscomputed in this edge case."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 161.202,
+    "stage_times_sec": {
+      "checkout": 2.882,
+      "load_bug_context": 0.096,
+      "test_behavior_analysis": 5.676,
+      "test_failure_analysis": 13.776,
+      "load_file_candidates": 0.125,
+      "search_suspicious_files": 138.647
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 389451,
+      "output_tokens": 6230,
+      "total_tokens": 395681,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.676,
+          "input_tokens": 372,
+          "output_tokens": 324,
+          "total_tokens": 696
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.775,
+          "input_tokens": 1102,
+          "output_tokens": 724,
+          "total_tokens": 1826
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.339,
+          "input_tokens": 26529,
+          "output_tokens": 323,
+          "total_tokens": 26852
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.74,
+          "input_tokens": 26781,
+          "output_tokens": 301,
+          "total_tokens": 27082
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.817,
+          "input_tokens": 26275,
+          "output_tokens": 269,
+          "total_tokens": 26544
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.31,
+          "input_tokens": 26569,
+          "output_tokens": 312,
+          "total_tokens": 26881
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.919,
+          "input_tokens": 26496,
+          "output_tokens": 335,
+          "total_tokens": 26831
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 10.445,
+          "input_tokens": 26915,
+          "output_tokens": 386,
+          "total_tokens": 27301
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.58,
+          "input_tokens": 26704,
+          "output_tokens": 341,
+          "total_tokens": 27045
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.322,
+          "input_tokens": 26706,
+          "output_tokens": 342,
+          "total_tokens": 27048
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.706,
+          "input_tokens": 26699,
+          "output_tokens": 339,
+          "total_tokens": 27038
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.896,
+          "input_tokens": 26445,
+          "output_tokens": 304,
+          "total_tokens": 26749
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.728,
+          "input_tokens": 26856,
+          "output_tokens": 339,
+          "total_tokens": 27195
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.453,
+          "input_tokens": 26676,
+          "output_tokens": 123,
+          "total_tokens": 26799
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.822,
+          "input_tokens": 26977,
+          "output_tokens": 330,
+          "total_tokens": 27307
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.578,
+          "input_tokens": 26680,
+          "output_tokens": 340,
+          "total_tokens": 27020
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 4.134,
+          "input_tokens": 2079,
+          "output_tokens": 140,
+          "total_tokens": 2219
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.825,
+          "input_tokens": 12590,
+          "output_tokens": 658,
+          "total_tokens": 13248
+        }
+      ]
+    }
+  }
+}

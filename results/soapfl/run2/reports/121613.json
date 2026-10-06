@@ -1,0 +1,251 @@
+{
+  "bug_id": "121613",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-25",
+    "resolved": "381d69953bb7c3390cec0fee200f24529cb6320f"
+  },
+  "final_top10": [
+    "compiler/rustc_infer/src/infer/error_reporting/need_type_info.rs",
+    "compiler/rustc_hir_typeck/src/pat.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+    "compiler/rustc_ast_lowering/src/pat.rs",
+    "compiler/rustc_ast_lowering/src/path.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_parse/src/parser/path.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Uses fully qualified syntax `<Foo as A>::Assoc` to name an associated type from a trait implementation.",
+        "Constructs a value of that associated type with struct literal syntax: `<Foo as A>::Assoc { br: 2 }`.",
+        "Exercises trait-associated type resolution during type checking, confirming the alias maps to `StructStruct`.",
+        "Uses a qualified path with an enum type, `<E>::V(..)`, as a pattern naming the `V` variant.",
+        "Matches `E::V(|a, b| a.cmp(b))`, supplying a closure where the variant expects a `u8` payload.",
+        "Checks compiler diagnostics and lowering for closure expressions in argument position with an obvious type mismatch.",
+        "Exercises pattern parsing and name resolution for enum variants through type-qualified syntax rather than plain `E::V`.",
+        "Combines associated-type struct construction and enum destructuring in one function to stress parser/type-checker interactions."
+      ],
+      "summary": "The reproducer combines two unusual path forms: constructing a trait-associated type via fully qualified syntax and pattern-matching an enum variant via `<E>::V(..)`. It then passes a closure to a variant expecting `u8`, forcing type checking and diagnostics. Overall it stresses parsing, path resolution, associated type normalization, enum variant lookup, and mismatch handling on nightly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failing case combines two uncommon but related qualified-path forms inside `main`: (1) a fully qualified associated type path used as a struct literal head, `<Foo as A>::Assoc { br: 2 }`, and (2) a type-qualified enum variant path used in pattern position, `let <E>::V(..) = ...`. Both require nontrivial lowering/resolution of `QPath`/qualified paths during type checking. The query stack shows the ICE happens while type-checking `main`, not later in borrowck or codegen, so the defect is likely in HIR/typeck handling of these expressions/patterns. The second statement intentionally introduces a type mismatch by constructing `E::V(|a, b| a.cmp(b))` even though `V` expects `u8`; the compiler should emit normal diagnostics, but instead panics during analysis. This strongly suggests an unhandled compiler-internal assumption when producing diagnostics for an invalid enum-variant constructor under qualified-path syntax, possibly interacting with closure argument/type inference. The common pattern is qualified-path normalization/name resolution in unusual syntactic positions, especially where the resolved item is an ADT constructor or associated type alias and diagnostics must recover from invalid types.",
+      "possible_causes": [
+        "A bug in type checking or HIR lowering for qualified paths (`QPath`) used in pattern position, specifically `<E>::V(..)`, causing the compiler to treat a type-qualified enum variant path as an unexpected form and panic instead of reporting a normal mismatch/error.",
+        "A defect in diagnostic/recovery code for enum variant constructor type mismatches when the argument is a closure expression and the variant is referenced through qualified syntax; the compiler may assume a successfully inferred callable/function-like constructor state that does not hold here.",
+        "Incorrect resolution/normalization of fully qualified associated types used as struct literal heads (`<Foo as A>::Assoc { ... }`), potentially leaving an unexpected intermediate node that later typeck/diagnostic code for `main` does not handle robustly.",
+        "A missing `match` arm / `bug!`-style internal assertion in expression-or-pattern type checking for paths that can resolve either to associated types or enum variants, exposed only when both forms appear in the same body and error recovery is triggered.",
+        "Faulty error-recovery interaction between associated-type path construction and subsequent enum-pattern checking in the same function, leading to inconsistent `Res`/`TyKind` state during `typeck` analysis."
+      ],
+      "evidence": [
+        "Query stack pinpoints the crash in `[typeck] type-checking main`, so the issue is in compiler semantic analysis rather than parsing or code generation.",
+        "The reproducer uses two uncommon qualified forms: `<Foo as A>::Assoc { br: 2 }` and `<E>::V(..)`, both of which stress `QPath` resolution in different syntactic contexts.",
+        "`<Foo as A>::Assoc` must normalize from a trait associated type to the concrete struct `StructStruct`, showing associated-type resolution is active in the failing function.",
+        "`<E>::V(..)` uses qualified syntax for an enum variant in pattern position, a less common path form likely to hit under-tested compiler branches.",
+        "`E::V(|a, b| a.cmp(b))` is an obvious type mismatch because `V` expects `u8`; rustc should emit a standard error, but instead ICEs, indicating broken recovery/diagnostics around this mismatch.",
+        "The compiler output says `due to 2 previous errors` and also reports an ICE, which is consistent with rustc encountering ordinary user errors first and then panicking while trying to continue analysis/diagnose them.",
+        "The behavior summary explicitly stresses parser/type-checker interactions, path resolution, associated type normalization, enum variant lookup, and mismatch handling, all aligning with a defect in qualified-path typeck/diagnostic handling."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1743,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_infer/src/infer/error_reporting/need_type_info.rs",
+        "reason": "The stack puts `FindInferSourceVisitor` - implemented in this file - directly on the path into the panic while an inference/type-annotation diagnostic is being emitted. Given the reproducer deliberately builds a type error around unusual qualified-path forms, the most plausible defect is the visitor mis-processing a qpath/pattern/expression node and requesting generic-args metadata that does not match the resolved item."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/pat.rs",
+        "reason": "Most suspicious because the ICE occurs during type-checking `main`, and the reproducer directly stresses pattern type checking with the unusual qualified pattern `<E>::V(..)`. This file handles HIR pattern checking, variant/path patterns, expected-type matching, and mismatch diagnostics, all of which are implicated by the closure-vs-`u8` constructor mismatch and the qualified-path pattern form."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "Highly suspicious because the same function also type-checks `<Foo as A>::Assoc { br: 2 }` and `E::V(|a, b| a.cmp(b))`. This file covers expression checking for struct literals, constructor calls, coercions, and closure argument typing, so a panic could arise here while handling the invalid enum payload expression or recovering from it."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "This file contains shared `FnCtxt` machinery for path resolution, constructor/callee checking, generic argument handling, and diagnostics during body type checking. Since the bug likely involves an internal assumption failure around qualified paths resolving to an associated type or enum constructor, the common helper logic here is a strong candidate."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/pat.rs",
+        "reason": "The pattern `<E>::V(..)` is an uncommon qualified-path form in pattern position. If lowering produces an unexpected HIR `QPath` or pattern shape, later typeck could ICE. This file is specifically responsible for lowering AST patterns and their paths into HIR."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "Both unusual constructs rely on correct lowering of qualified paths: `<Foo as A>::Assoc` and `<E>::V`. A bug in `lower_qpath` or related path-lowering logic could leave malformed or inconsistent HIR that only crashes once type checking reaches `main`."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "Late resolution is responsible for resolving names in expressions and patterns before type checking. The reproducer mixes type-relative associated-type syntax and a type-qualified enum variant pattern, so an incorrect `PartialRes`/`Res` for one of these paths could propagate into typeck and trigger the ICE."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/path.rs",
+        "reason": "Qualified path syntax like `<Foo as A>::Assoc` and `<E>::V` is parsed here. Although the query stack points later than parsing, these uncommon path forms may be ambiguously represented from the parser, especially across expression vs pattern contexts, making this a secondary suspect."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "Expression lowering is relevant for `<Foo as A>::Assoc { br: 2 }` and for the closure expression passed to `E::V(...)`. If lowering of a qualified-path struct literal head or closure-containing constructor expression is malformed, the later typeck crash would appear during checking `main`."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The associated type `<Foo as A>::Assoc` must be projected to `StructStruct`. If the ICE involves bad normalization/projection state interacting with type checking or diagnostics, this file is a plausible source, though less direct than the HIR typeck/lowering files."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 156.928,
+    "stage_times_sec": {
+      "checkout": 1.045,
+      "load_bug_context": 0.061,
+      "test_behavior_analysis": 5.754,
+      "test_failure_analysis": 12.645,
+      "load_file_candidates": 0.107,
+      "search_suspicious_files": 137.314
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 421003,
+      "output_tokens": 7189,
+      "total_tokens": 428192,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.754,
+          "input_tokens": 407,
+          "output_tokens": 279,
+          "total_tokens": 686
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.645,
+          "input_tokens": 2163,
+          "output_tokens": 790,
+          "total_tokens": 2953
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.381,
+          "input_tokens": 27899,
+          "output_tokens": 391,
+          "total_tokens": 28290
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.622,
+          "input_tokens": 27903,
+          "output_tokens": 340,
+          "total_tokens": 28243
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.527,
+          "input_tokens": 27422,
+          "output_tokens": 390,
+          "total_tokens": 27812
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.395,
+          "input_tokens": 27659,
+          "output_tokens": 349,
+          "total_tokens": 28008
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.199,
+          "input_tokens": 27643,
+          "output_tokens": 384,
+          "total_tokens": 28027
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.33,
+          "input_tokens": 28044,
+          "output_tokens": 375,
+          "total_tokens": 28419
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.98,
+          "input_tokens": 27774,
+          "output_tokens": 353,
+          "total_tokens": 28127
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.446,
+          "input_tokens": 27800,
+          "output_tokens": 351,
+          "total_tokens": 28151
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.273,
+          "input_tokens": 27885,
+          "output_tokens": 391,
+          "total_tokens": 28276
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.219,
+          "input_tokens": 27679,
+          "output_tokens": 358,
+          "total_tokens": 28037
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.843,
+          "input_tokens": 28008,
+          "output_tokens": 359,
+          "total_tokens": 28367
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.041,
+          "input_tokens": 27928,
+          "output_tokens": 302,
+          "total_tokens": 28230
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.804,
+          "input_tokens": 28054,
+          "output_tokens": 263,
+          "total_tokens": 28317
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.704,
+          "input_tokens": 27811,
+          "output_tokens": 347,
+          "total_tokens": 28158
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.702,
+          "input_tokens": 16132,
+          "output_tokens": 382,
+          "total_tokens": 16514
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.817,
+          "input_tokens": 12792,
+          "output_tokens": 785,
+          "total_tokens": 13577
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,242 @@
+{
+  "bug_id": "115789",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-09-13",
+    "resolved": "d9c8274fb7e2c9087c27a87bf4d85bf1d78cd1e0"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_dataflow/src/value_analysis.rs",
+    "compiler/rustc_mir_transform/src/dataflow_const_prop.rs",
+    "compiler/rustc_mir_transform/src/instsimplify.rs",
+    "compiler/rustc_codegen_ssa/src/mir/rvalue.rs",
+    "compiler/rustc_codegen_ssa/src/mir/operand.rs",
+    "compiler/rustc_codegen_ssa/src/mir/place.rs",
+    "compiler/rustc_codegen_ssa/src/glue.rs",
+    "compiler/rustc_builtin_macros/src/deriving/default.rs",
+    "compiler/rustc_builtin_macros/src/deriving/generic/mod.rs",
+    "compiler/rustc_monomorphize/src/collector.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Derives `Default` for struct `A`, so the compiler generates an impl requiring each field type to implement `Default`.",
+        "Uses `Box<[bool]>` as a field, exercising the standard-library `Default` implementation for boxed slices.",
+        "`Default::default()` is invoked with an explicit target type `A`, testing trait resolution through type-directed default construction.",
+        "The boxed slice default value is expected to be an empty heap-allocated slice, checking unsized slice handling behind `Box`.",
+        "No field is read afterward, so the program mainly tests successful type checking, trait selection, and code generation for derived defaults.",
+        "The reproducer is pinned to a nightly toolchain, indicating a regression or ICE likely tied to compiler behavior on this specific version.",
+        "The code is minimal and side-effect free, isolating compiler handling of derive expansion and monomorphization rather than runtime logic."
+      ],
+      "summary": "This reproducer defines a struct with a `Box<[bool]>` field, derives `Default`, and constructs it via `Default::default()`. It exercises derive expansion, trait resolution, std `Default` for boxed slices, unsized slice support behind `Box`, and nightly compiler codegen/type-check behavior on a minimal case."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an internal compiler error during MIR optimization/codegen rather than a user-code type error. The program is extremely small, type-correct, and only exercises derived `Default` for a struct whose single field is `Box<[bool]>`. The query stack shows the panic while optimizing MIR for the generated `<impl>::default`, then for `main`, which strongly suggests the problematic compiler path is the synthesized MIR for derived `Default` or the MIR/call handling of `Default::default()` for `Box<[T]>`. A key commonality is that `Box<[bool]>` is a DST container whose default value is an empty boxed slice. That means the compiler must lower/optimize construction of a boxed unsized slice, likely involving zero-length allocation semantics, unsizing/coercion, or special handling of `Box<[T]>::default`. Since the crash occurs late (`optimized_mir`, then `start_codegen`) on valid code, the likely defect is an invalid MIR transformation or assumption in codegen/monomorphization for derived default on boxed slices, especially for zero-length DST values.",
+      "possible_causes": [
+        "A bug in MIR optimization for the auto-derived `Default` impl, where the generated body for a field of type `Box<[bool]>` is transformed into invalid MIR or triggers an unsupported case.",
+        "Incorrect compiler handling of `Default::default()` for `Box<[T]>`/boxed DSTs, especially the zero-length boxed slice case, leading to malformed MIR or codegen state.",
+        "A defect in unsized coercion or layout/codegen logic for `Box<[bool]>` constructed as an empty slice, causing an ICE when optimizing or monomorphizing the derived default implementation.",
+        "An optimization pass at `-Z mir-opt-level=3` making an invalid assumption about heap allocation, metadata, or niche/layout properties of `Box<[T]>` for empty slices.",
+        "A regression in monomorphization/codegen for standard library lang-item/intrinsic paths used by boxed slice default construction, exposed through derive-generated code but not caused by the reproducer itself."
+      ],
+      "evidence": [
+        "The compiler panics in `rustc_interface::passes::start_codegen`, indicating an internal compiler failure after successful parsing/type checking of valid Rust code.",
+        "The query stack explicitly shows `#0 [optimized_mir] optimizing MIR for <impl at src/main.rs:1:10: 1:17>::default`, directly implicating the derived `Default` implementation.",
+        "The reproducer is minimal and side-effect free, so the distinctive feature is the derived default of a struct containing `Box<[bool]>`.",
+        "`Box<[bool]>` is an unsized slice behind `Box`; its default is an empty boxed slice, which exercises DST metadata and zero-length boxed allocation handling.",
+        "The failure happens on nightly with `-Z mir-opt-level=3`, consistent with a regression or optimizer bug rather than misuse in the reproducer.",
+        "No user-facing trait/type error is reported; instead rustc asks for an ICE report, confirming the defect is in compiler production code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1667,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_dataflow/src/value_analysis.rs",
+        "reason": "The backtrace places `value_analysis::Map::for_each_projection_value` directly under the const-prop logic that crashes. The natural reading is that the tracked-place/projection walk mishandles aggregate fields or wide-pointer values - it seems to assume something invalid while decomposing or assigning the `Box<[bool]>` value."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/dataflow_const_prop.rs",
+        "reason": "Most suspicious because the ICE happens while computing `optimized_mir` with `-Z mir-opt-level=3`, and this pass is specifically enabled at that level. The reproducer is tiny and likely produces a very simple derived `Default` body where `Box<[bool]>::default()` for an empty boxed slice may be constant-folded or analyzed incorrectly, especially with DST/fat-pointer metadata involved."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/instsimplify.rs",
+        "reason": "This MIR peephole simplification pass rewrites pointer/metadata-related patterns and can affect slice/boxed-slice operations. Since the failing case centers on `Box<[bool]>` default construction and optimized MIR of the derived `default` impl, a bad simplification around wide pointers, metadata, or primitive clone/default patterns is plausible."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/rvalue.rs",
+        "reason": "If optimized MIR remains valid enough to reach codegen but contains a problematic rvalue for constructing the empty boxed slice, this file is a strong suspect because it lowers MIR rvalues, casts, aggregates, and length/metadata-related expressions into backend IR. `Box<[bool]>` default touches unsized slice representation and heap object construction."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/operand.rs",
+        "reason": "`Box<[bool]>` is represented as a fat pointer, so operand lowering for scalar pairs / references / metadata is directly relevant. An incorrect assumption about immediate vs pair vs ref representation for the boxed DST during derived `Default` codegen could trigger an ICE late in `start_codegen`."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/place.rs",
+        "reason": "Place lowering handles unsized places and metadata-carrying addresses. Constructing or moving a `Box<[bool]>` default value may involve places with attached metadata; bugs here could surface only for boxed slices and only once MIR optimization exposes a sharper pattern."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/glue.rs",
+        "reason": "This file computes size/alignment for DSTs such as slices. An empty boxed slice still needs correct DST layout/metadata handling, and a bug in `size_and_align_of_dst` or related logic could crash when codegen tries to handle `Box<[bool]>` even though the source program is minimal."
+      },
+      {
+        "path": "compiler/rustc_builtin_macros/src/deriving/default.rs",
+        "reason": "The query stack points directly at optimizing MIR for the synthesized `<impl>::default`. Although derive expansion for structs is usually simple, this file creates the exact generated body and could be emitting an expression shape that later MIR/codegen mishandles specifically for `Box<[bool]>` fields."
+      },
+      {
+        "path": "compiler/rustc_builtin_macros/src/deriving/generic/mod.rs",
+        "reason": "If the root issue is in derive synthesis rather than later optimization, it would likely be in the generic derive framework that constructs field-by-field `Default::default()` expressions and trait bounds. The reproducer exercises exactly that path for a single-field struct."
+      },
+      {
+        "path": "compiler/rustc_monomorphize/src/collector.rs",
+        "reason": "The query stack reaches `collect_and_partition_mono_items`, so a monomorphization-time issue involving collection of the derived default impl, `Box<[bool]>::default`, or drop glue for boxed slices is possible. This is less likely than MIR optimization, but still relevant given the late-stage ICE."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 147.226,
+    "stage_times_sec": {
+      "checkout": 3.01,
+      "load_bug_context": 0.09,
+      "test_behavior_analysis": 5.031,
+      "test_failure_analysis": 10.524,
+      "load_file_candidates": 0.602,
+      "search_suspicious_files": 127.969
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 399993,
+      "output_tokens": 6560,
+      "total_tokens": 406553,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.03,
+          "input_tokens": 356,
+          "output_tokens": 258,
+          "total_tokens": 614
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.524,
+          "input_tokens": 2192,
+          "output_tokens": 636,
+          "total_tokens": 2828
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.905,
+          "input_tokens": 27531,
+          "output_tokens": 359,
+          "total_tokens": 27890
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.634,
+          "input_tokens": 27783,
+          "output_tokens": 322,
+          "total_tokens": 28105
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.028,
+          "input_tokens": 27170,
+          "output_tokens": 349,
+          "total_tokens": 27519
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.159,
+          "input_tokens": 27668,
+          "output_tokens": 335,
+          "total_tokens": 28003
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.571,
+          "input_tokens": 27492,
+          "output_tokens": 365,
+          "total_tokens": 27857
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.736,
+          "input_tokens": 27894,
+          "output_tokens": 358,
+          "total_tokens": 28252
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.394,
+          "input_tokens": 27692,
+          "output_tokens": 327,
+          "total_tokens": 28019
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.611,
+          "input_tokens": 27736,
+          "output_tokens": 351,
+          "total_tokens": 28087
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.294,
+          "input_tokens": 27700,
+          "output_tokens": 366,
+          "total_tokens": 28066
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.439,
+          "input_tokens": 27427,
+          "output_tokens": 357,
+          "total_tokens": 27784
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.873,
+          "input_tokens": 27819,
+          "output_tokens": 341,
+          "total_tokens": 28160
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.218,
+          "input_tokens": 27731,
+          "output_tokens": 310,
+          "total_tokens": 28041
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.27,
+          "input_tokens": 27970,
+          "output_tokens": 365,
+          "total_tokens": 28335
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.069,
+          "input_tokens": 24975,
+          "output_tokens": 348,
+          "total_tokens": 25323
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.737,
+          "input_tokens": 12857,
+          "output_tokens": 813,
+          "total_tokens": 13670
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,251 @@
+{
+  "bug_id": "117761",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-08",
+    "resolved": "7adc89b69b941afceadcf8609dd6b2999353e550"
+  },
+  "final_top10": [
+    "compiler/rustc_codegen_ssa/src/mir/block.rs",
+    "compiler/rustc_codegen_ssa/src/mir/operand.rs",
+    "compiler/rustc_codegen_ssa/src/mir/place.rs",
+    "compiler/rustc_codegen_llvm/src/builder.rs",
+    "compiler/rustc_mir_transform/src/gvn.rs",
+    "compiler/rustc_mir_transform/src/unreachable_prop.rs",
+    "compiler/rustc_mir_transform/src/simplify.rs",
+    "compiler/rustc_codegen_llvm/src/abi.rs",
+    "compiler/rustc_target/src/abi/call/x86_64.rs",
+    "compiler/rustc_codegen_llvm/src/type_of.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `Affine2` containing `Mat2` and `Vec2`, then calls an `inverse(&self)` method on a temporary struct value.",
+        "`inverse` first borrows `self.matrix2` as `&Mat2`, then moves `self.translation` by value, mixing borrow and copy-style field access from `&self`.",
+        "`Mat2` and `Vec2` derive `Clone, Copy`, so accessing fields through `&self` relies on implicit copying from a shared reference.",
+        "`Mat2` uses `#[repr(align(8))]`, exercising explicit type alignment and backend/layout handling for an aligned array wrapper.",
+        "`mat2_ref` and `vec2_move` are `#[inline(never)]`, discouraging inlining so MIR/LLVM must preserve distinct call and argument passing behavior.",
+        "Both callees are infinite `loop {}` functions, making the first call diverging and the second call statically unreachable.",
+        "The method contains a borrow before a diverging call, probing compiler treatment of liveness, drop elaboration, and unreachable code after divergence.",
+        "Constructing the receiver inline in `main` tests temporary lifetime handling, field projection from temporaries, and ABI/codegen for aligned `Copy` fields."
+      ],
+      "summary": "The reproducer creates an `Affine2` temporary and calls `inverse(&self)`, which borrows an aligned `Mat2` field and then would copy-move a `Vec2` field. Because the first non-inlined callee diverges forever, the second call is unreachable. This stresses Rust’s handling of field access through `&self`, `Copy` semantics, explicit alignment, temporary receivers, and compiler MIR/codegen behavior around divergence and unreachable paths."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is a codegen-time ICE triggered by a very small MIR shape: a method taking `&self`, projecting two `Copy` fields out of that shared reference, first passing an explicitly aligned field by reference to a non-inlined diverging function, then having a second by-value call that is statically unreachable. The reproducer combines several stressors in one place: field projection from a temporary receiver, implicit copying of `Copy` fields from `&self`, explicit `repr(align)` on one field, and divergence before the second field use. The stack shows the panic happens during code generation rather than type checking or borrow checking, and the enabled MIR optimizations (`-Z mir-opt-level=2`, `-Z inline-mir`, `+GVN`) strongly suggest an invalid MIR/codegen interaction after optimization. The most likely defect is in compiler production code that lowers or optimizes aggregates/field projections across unreachable blocks, especially when one field has stronger alignment requirements and the receiver is a temporary. In particular, MIR or LLVM codegen may be incorrectly preserving, reusing, or computing a place/reference for `self` or one of its fields after the first diverging call, leading to malformed IR or an internal invariant violation in codegen.",
+      "possible_causes": [
+        "A bug in MIR-to-LLVM lowering for field projection from a temporary borrowed receiver (`&self`) when one field is passed by reference and a later field access is in dead/unreachable code after a diverging call.",
+        "Incorrect handling of `Copy` field extraction from `&self` in optimized MIR, where borrow/copy projections are merged or reordered across divergence, producing invalid codegen state.",
+        "A backend/layout bug involving `#[repr(align(8))]` field addressing inside an aggregate temporary, possibly causing an invalid assumption about alignment or by-ref argument ABI during codegen.",
+        "An optimization bug in MIR simplification/GVN/dead-unreachable handling that fails to properly terminate liveness or place usage after a `!`-returning call, leaving stale projections or locals for codegen.",
+        "A defect in codegen for unreachable successors of non-inlined divergent calls, especially when the predecessor borrowed a field of an aggregate and the aggregate was constructed inline as a temporary."
+      ],
+      "evidence": [
+        "The compiler panics during `codegen_crate`/`start_codegen`, so the failure is in production compiler codegen or a late MIR-to-codegen phase, not in parsing/type checking.",
+        "`inverse(&self)` accesses fields through a shared reference, first `mat2_ref(&self.matrix2)` then `vec2_move(self.translation)`, which stresses compiler handling of field projection, implicit `Copy`, and borrow/value use from the same receiver.",
+        "`Mat2` is `#[repr(align(8))]`, making this more likely to hit a layout/alignment-sensitive bug in code generation for field addresses or ABI passing.",
+        "`mat2_ref` and `vec2_move` are `#[inline(never)]`, so the compiler must preserve explicit call boundaries and argument lowering instead of optimizing everything away via inlining.",
+        "The first callee is an infinite loop, so the second call is unreachable; this directly points to possible defects in MIR unreachable-block cleanup, liveness, or codegen of dead successors.",
+        "The receiver is an inline temporary `Affine2 { ... }.inverse()`, which exercises temporary lifetime and aggregate field projection handling in MIR/codegen.",
+        "The issue appears under MIR optimization flags (`-Z mir-opt-level=2 -Z inline-mir -Z mir-enable-passes=+GVN`), supporting the hypothesis that an optimization pass creates malformed or inconsistent MIR consumed by codegen."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1699,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/block.rs",
+        "reason": "Most suspicious because the ICE occurs during codegen and the reproducer centers on a diverging call followed by statically unreachable code. This file lowers MIR terminators and call continuations, so a bug handling unreachable successors after a non-inlined diverging call is a strong fit."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/operand.rs",
+        "reason": "The failing pattern mixes borrowing one field through &self and then copying another Copy field from the same borrowed aggregate. Operand lowering is where by-ref vs immediate/pair representations are decided, making it likely if optimized MIR leaves an awkward field projection from a temporary receiver."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/place.rs",
+        "reason": "Field projection and address computation for an inline temporary with an explicitly aligned field strongly point at place lowering. This file handles typed places, projections, and alignment-sensitive addressing, which matches the aligned Mat2 borrow in the reproducer."
+      },
+      {
+        "path": "compiler/rustc_codegen_llvm/src/builder.rs",
+        "reason": "If the optimized MIR reaching codegen is valid but LLVM IR emission panics on malformed/unreachable control flow or an invalid load/address sequence, the generic LLVM builder layer is a plausible crash site during instruction emission."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/gvn.rs",
+        "reason": "The bug reproduces specifically with MIR optimization flags and +GVN enabled. GVN could incorrectly value-number or rewrite projections/copies across a diverging call, producing malformed MIR later consumed by codegen."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/unreachable_prop.rs",
+        "reason": "The second call is unreachable because the first callee diverges forever. A bug in unreachable propagation could leave an inconsistent CFG or stale statements/projections in blocks later handed to codegen."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/simplify.rs",
+        "reason": "CFG simplification often runs after unreachable-related transformations. If unreachable blocks or call continuations after divergence are simplified incorrectly, codegen may see invalid successor structure or local usage."
+      },
+      {
+        "path": "compiler/rustc_codegen_llvm/src/abi.rs",
+        "reason": "The reproducer stresses ABI lowering for passing an aligned Copy aggregate by reference and another small struct by value. If the panic is caused by argument lowering or callsite attributes for these field-derived arguments, this file is relevant."
+      },
+      {
+        "path": "compiler/rustc_target/src/abi/call/x86_64.rs",
+        "reason": "On x86_64, small aggregate argument classification and alignment can affect byval/direct passing decisions. Since the reproducer involves an aligned wrapper and a small by-value struct, target ABI classification is a secondary but plausible contributor."
+      },
+      {
+        "path": "compiler/rustc_codegen_llvm/src/type_of.rs",
+        "reason": "Less likely than terminator/place/operand lowering, but still plausible because the reproducer explicitly uses #[repr(align(8))]. If codegen constructs an inconsistent LLVM type/layout for the aligned field-containing aggregate, this file could be involved."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 158.821,
+    "stage_times_sec": {
+      "checkout": 0.867,
+      "load_bug_context": 0.062,
+      "test_behavior_analysis": 6.893,
+      "test_failure_analysis": 11.529,
+      "load_file_candidates": 0.12,
+      "search_suspicious_files": 139.35
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 417774,
+      "output_tokens": 7125,
+      "total_tokens": 424899,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.892,
+          "input_tokens": 560,
+          "output_tokens": 360,
+          "total_tokens": 920
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.529,
+          "input_tokens": 2492,
+          "output_tokens": 755,
+          "total_tokens": 3247
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.389,
+          "input_tokens": 27949,
+          "output_tokens": 419,
+          "total_tokens": 28368
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.938,
+          "input_tokens": 28179,
+          "output_tokens": 373,
+          "total_tokens": 28552
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.272,
+          "input_tokens": 27714,
+          "output_tokens": 363,
+          "total_tokens": 28077
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.126,
+          "input_tokens": 27987,
+          "output_tokens": 341,
+          "total_tokens": 28328
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.503,
+          "input_tokens": 27917,
+          "output_tokens": 333,
+          "total_tokens": 28250
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.164,
+          "input_tokens": 28335,
+          "output_tokens": 327,
+          "total_tokens": 28662
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.28,
+          "input_tokens": 28131,
+          "output_tokens": 308,
+          "total_tokens": 28439
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.026,
+          "input_tokens": 28121,
+          "output_tokens": 387,
+          "total_tokens": 28508
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.401,
+          "input_tokens": 28131,
+          "output_tokens": 403,
+          "total_tokens": 28534
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.739,
+          "input_tokens": 27978,
+          "output_tokens": 314,
+          "total_tokens": 28292
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 10.112,
+          "input_tokens": 28327,
+          "output_tokens": 430,
+          "total_tokens": 28757
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 11.074,
+          "input_tokens": 28067,
+          "output_tokens": 312,
+          "total_tokens": 28379
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.656,
+          "input_tokens": 28352,
+          "output_tokens": 394,
+          "total_tokens": 28746
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.139,
+          "input_tokens": 28197,
+          "output_tokens": 330,
+          "total_tokens": 28527
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.512,
+          "input_tokens": 7262,
+          "output_tokens": 339,
+          "total_tokens": 7601
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.987,
+          "input_tokens": 14075,
+          "output_tokens": 637,
+          "total_tokens": 14712
+        }
+      ]
+    }
+  }
+}

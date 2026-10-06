@@ -1,0 +1,244 @@
+{
+  "bug_id": "111935",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-05-24",
+    "resolved": "5ea3f0ae08c07472239a94ce55601e9b63eb1f45"
+  },
+  "final_top10": [
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/at.rs",
+    "compiler/rustc_infer/src/infer/combine.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+    "compiler/rustc_middle/src/ty/util.rs",
+    "compiler/rustc_middle/src/error.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/eq.rs",
+    "compiler/rustc_ty_utils/src/opaque_types.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `type_alias_impl_trait`, allowing `type Opaque<T> = impl Sized;` as an opaque return type alias.",
+        "Defines a generic opaque alias `Opaque<T>` whose hidden concrete type is inferred from functions returning it.",
+        "Declares generic function `foo<T>() -> Opaque<T>`, tying the opaque alias instantiation to the function’s generic parameter `T`.",
+        "Inside `foo<T>`, recursively calls `foo::<u8>()`, forcing a concrete instantiation `Opaque<u8>` while the surrounding function expects `Opaque<T>`.",
+        "Assigns the recursive call to `let _: ()`, adding an explicit expected type `()` to trigger type checking of the returned opaque type.",
+        "Exercises compiler comparison of opaque types with different generic arguments, where `Opaque<T>` and `Opaque<u8>` must remain distinct.",
+        "Checks that rustc reports a generic-parameter mismatch (`expected generic type parameter, found u8`) instead of incorrectly equating opaque instantiations.",
+        "Also touches recursive function body checking and hidden-type inference for TAIT during type checking on nightly."
+      ],
+      "summary": "The reproducer uses nightly `type_alias_impl_trait` to define a generic opaque alias and return it from a generic function. Inside that function, it recursively calls a differently instantiated version, `foo::<u8>()`, then forces type checking via assignment to `()`. This exercises rustc’s handling of generic TAIT instantiations, hidden-type inference, and diagnostics when `Opaque<T>` is incorrectly matched against `Opaque<u8>`."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on generic `type_alias_impl_trait` (TAIT) identity and hidden-type inference during type checking. The reproducer defines a generic opaque alias `Opaque<T>` and a generic function `foo<T>() -> Opaque<T>`, then recursively invokes `foo::<u8>()` inside `foo<T>`. This forces the compiler to compare an opaque instantiated with the current generic parameter (`Opaque<T>`) against the same opaque alias instantiated with a concrete argument (`Opaque<u8>`). The emitted diagnostic `E0792: expected generic type parameter, found u8` shows rustc is already in code that validates opaque type generic arguments and detects a mismatch between the defining use of the opaque alias and a concrete substitution. The common pattern is therefore: generic opaque type alias + recursive/in-body defining use + mismatched substitution of alias generic arguments + expected-type driven type checking. A likely compiler defect is in the production logic that maps, equates, or validates generic arguments for opaque/hidden types during TAIT checking, especially when a defining use is type-checked inside the same generic function and a recursive call introduces a different instantiation. The bug would most plausibly live in code handling opaque type instantiation comparison, hidden type registration, or normalization across param-env/binder contexts, where `T` and `u8` may be incorrectly unified, rejected too late, or diagnosed from the wrong path.",
+      "possible_causes": [
+        "Defect in TAIT opaque type generic-argument validation: the compiler code that checks whether a defining use of `Opaque<T>` is supplied with the function's own generic parameters may mishandle a recursive call returning `Opaque<u8>` and trigger the mismatch through incorrect argument comparison logic.",
+        "Bug in hidden-type inference/registration for generic opaque aliases: rustc may incorrectly record or reuse the hidden type for `Opaque<T>` across different instantiations, failing to keep `Opaque<T>` and `Opaque<u8>` distinct during body type checking.",
+        "Incorrect substitution or normalization of generic arguments for opaque types under binders/param-env: production code may substitute the callee's concrete `u8` into the caller's `T`-parameterized opaque in the wrong context, leading to the `expected generic type parameter, found u8` failure.",
+        "Defect in recursive defining-use handling for TAIT: when type-checking a function that defines the hidden type of a generic opaque alias, a recursive call with different generic arguments may pass through a code path not correctly guarding against cross-instantiation hidden-type comparison.",
+        "Bug in the diagnostic/error path for E0792 emission on generic TAITs: even if rejection is intended, the underlying compiler logic that identifies the offending opaque argument may be using the wrong source of generic arguments, indicating a flaw in opaque type relation code rather than in user code."
+      ],
+      "evidence": [
+        "The reproducer uses nightly `type_alias_impl_trait` with a generic alias `type Opaque<T> = impl Sized;`, directly exercising unstable compiler machinery for generic opaque types.",
+        "`foo<T>() -> Opaque<T>` ties the opaque alias instantiation to a function generic parameter, so type checking must preserve the distinction between `T` and concrete substitutions.",
+        "Inside `foo<T>`, the recursive call `foo::<u8>()` introduces a different instantiation of the same opaque alias, creating the exact condition for an opaque-argument comparison bug.",
+        "The explicit assignment `let _: () = foo::<u8>();` forces type checking of the call result and exposes the mismatch during body checking rather than allowing it to remain unconstrained.",
+        "The compiler emits `error[E0792]: expected generic type parameter, found u8` and points back to the TAIT declaration generic parameter, showing the failing logic is specifically in opaque-type generic-parameter validation.",
+        "The additional unconditional recursion warning indicates rustc successfully analyzes the recursive call structurally; the actual hard failure is specifically tied to opaque/generic type reasoning, not parsing or recursion detection.",
+        "The behavior summary explicitly stresses comparison of `Opaque<T>` versus `Opaque<u8>` and hidden-type inference for TAIT, matching likely defect locations in opaque type instantiation and hidden-type tracking code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1625,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Most directly responsible for remapping and validating generic arguments of opaque types. The reproducer specifically triggers comparison between `Opaque<T>` and `Opaque<u8>`, and E0792 points to logic that expects opaque generics to be the defining generic parameters. A bug in reverse-mapping or argument validation here would naturally produce this failure."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Core inference-layer handling for opaque/TAIT hidden type tracking. The reproducer stresses hidden-type registration across different instantiations of the same generic opaque alias during body type checking, so incorrect recording or reuse of hidden types here is highly plausible."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/at.rs",
+        "reason": "This file carries the `DefineOpaqueTypes` policy used when relating types in inference. Since the failure occurs while type checking a defining use of a generic TAIT and comparing opaque instantiations, an incorrect relation mode or opaque-definition allowance here could trigger the mismatch path."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "reason": "Shared type relation infrastructure used by equality/subtyping, including opaque-type handling under inference. If `Opaque<T>` and `Opaque<u8>` are being related in the wrong environment or with incorrect generic substitution, the bug could stem from this common combine logic."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "HIR body type checking sets up function checking and replaces opaque return types with inference variables. Because the issue arises inside the body of `foo<T>` while checking a recursive call and return-position TAIT, this is a likely entry point where the problematic opaque-type handling is initiated."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "Contains much of expression and call type checking in function bodies. The failing line is a recursive call with explicit generic args whose result is forced against `()`, so the bug may arise in expression/call checking code that invokes relation and opaque-type machinery with the wrong expectations."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/util.rs",
+        "reason": "This file includes utilities for checking uniqueness/validity of generic parameters and reports `NotUniqueParam`-style issues, which is closely related to diagnostics like ‘expected generic type parameter, found `u8`’. The E0792 path may depend on helper logic here."
+      },
+      {
+        "path": "compiler/rustc_middle/src/error.rs",
+        "reason": "Contains `OpaqueHiddenTypeMismatch` and related middle-layer diagnostics. Even if the underlying rejection is intended, the observed E0792 path may reflect a bug in how opaque generic mismatches are diagnosed or sourced, making this file relevant to the failure mode."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/eq.rs",
+        "reason": "Equality type-op wiring can be involved when the body checker forces the recursive call result into an expected type context. If opaque instantiations are being equated through a query path, a bug here could expose or mishandle the generic mismatch."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/opaque_types.rs",
+        "reason": "Responsible for discovering and validating local opaque type uses, including TAIT-related legality checks. Since the reproducer is about a defining use of a generic type alias `impl Trait` within the same function body, this validation layer is also a credible source of the buggy behavior."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 149.92,
+    "stage_times_sec": {
+      "checkout": 3.807,
+      "load_bug_context": 0.094,
+      "test_behavior_analysis": 7.307,
+      "test_failure_analysis": 14.055,
+      "load_file_candidates": 0.098,
+      "search_suspicious_files": 124.558
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 378807,
+      "output_tokens": 6792,
+      "total_tokens": 385599,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.307,
+          "input_tokens": 381,
+          "output_tokens": 322,
+          "total_tokens": 703
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.055,
+          "input_tokens": 1181,
+          "output_tokens": 853,
+          "total_tokens": 2034
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.888,
+          "input_tokens": 26785,
+          "output_tokens": 344,
+          "total_tokens": 27129
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.83,
+          "input_tokens": 26831,
+          "output_tokens": 346,
+          "total_tokens": 27177
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.849,
+          "input_tokens": 26455,
+          "output_tokens": 318,
+          "total_tokens": 26773
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.328,
+          "input_tokens": 26710,
+          "output_tokens": 390,
+          "total_tokens": 27100
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.58,
+          "input_tokens": 26673,
+          "output_tokens": 349,
+          "total_tokens": 27022
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.406,
+          "input_tokens": 27084,
+          "output_tokens": 398,
+          "total_tokens": 27482
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.528,
+          "input_tokens": 26931,
+          "output_tokens": 342,
+          "total_tokens": 27273
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.339,
+          "input_tokens": 26909,
+          "output_tokens": 331,
+          "total_tokens": 27240
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.64,
+          "input_tokens": 26890,
+          "output_tokens": 410,
+          "total_tokens": 27300
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.392,
+          "input_tokens": 26710,
+          "output_tokens": 355,
+          "total_tokens": 27065
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.504,
+          "input_tokens": 26993,
+          "output_tokens": 295,
+          "total_tokens": 27288
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.342,
+          "input_tokens": 27001,
+          "output_tokens": 330,
+          "total_tokens": 27331
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.354,
+          "input_tokens": 27041,
+          "output_tokens": 341,
+          "total_tokens": 27382
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.941,
+          "input_tokens": 15557,
+          "output_tokens": 338,
+          "total_tokens": 15895
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 15.609,
+          "input_tokens": 12675,
+          "output_tokens": 730,
+          "total_tokens": 13405
+        }
+      ]
+    }
+  }
+}

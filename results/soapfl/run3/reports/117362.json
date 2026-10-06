@@ -1,0 +1,251 @@
+{
+  "bug_id": "117362",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-10-30",
+    "resolved": "608e9682f0a6482903de8d3332770104a0ad943c"
+  },
+  "final_top10": [
+    "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+    "compiler/rustc_middle/src/mir/interpret/queries.rs",
+    "compiler/rustc_codegen_ssa/src/mir/constant.rs",
+    "compiler/rustc_monomorphize/src/collector.rs",
+    "compiler/rustc_codegen_llvm/src/consts.rs",
+    "compiler/rustc_middle/src/mir/interpret/error.rs",
+    "compiler/rustc_middle/src/mir/consts.rs",
+    "compiler/rustc_codegen_ssa/src/mono_item.rs",
+    "compiler/rustc_const_eval/src/const_eval/error.rs",
+    "compiler/rustc_codegen_llvm/src/base.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines trait `C` with associated const `BOO`, exercising trait-associated constants and generic const access through a type parameter.",
+        "Defines trait `Foo<T>` with associated const `BAR`, then implements it for `A<T>` where `T: C`, testing generic associated const evaluation in impls.",
+        "Computes `BAR` as `[5, 6, 7][T::BOO]`, exercising compile-time constant indexing that depends on another trait-associated const.",
+        "Uses `T::BOO` inside an associated const initializer, stressing const-eval across trait bounds and monomorphized generic impls.",
+        "Function `foo<T: C>()` returns `&'static usize` by taking a reference to `<A<T> as Foo<T>>::BAR`, testing promotion/static storage of associated consts.",
+        "Implements `C` for `()` with `BOO = 42`, intentionally making the const array index out of bounds for the length-3 array.",
+        "Calling `foo::<()>()` forces evaluation of `<A<()> as Foo<()>>::BAR`, so the compiler must handle the invalid const expression during const-eval/codegen.",
+        "`main` prints the referenced associated const, ensuring the bad const is actually used and not optimized away, exposing compiler behavior around erroneous associated consts."
+      ],
+      "summary": "The reproducer targets const evaluation of generic trait-associated constants. `Foo<T>::BAR` is defined from an array indexed by `T::BOO`, and `()` provides an invalid index `42`. Taking `&<A<T> as Foo<T>>::BAR` and printing it forces monomorphization and evaluation of that associated const. This exercises trait bounds, associated consts, generic const expressions, constant indexing, and compiler handling of out-of-bounds const evaluation."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in the compiler’s handling of erroneous associated-const evaluation during MIR/codegen, not a normal user-facing const-eval diagnostic. The reproducer combines: (a) a trait-associated const used through a generic parameter (`T::BOO`), (b) another associated const in a generic impl (`<A<T> as Foo<T>>::BAR`), (c) a compile-time array index expression that becomes out-of-bounds only after monomorphization (`[5, 6, 7][42]` for `T = ()`), and (d) taking a reference to that associated const, which forces the compiler to treat it as a static-like constant for codegen/mono-item collection. The query stack shows the panic occurs while optimizing MIR for `main` and then collecting/partitioning mono items, meaning the compiler likely allowed an invalid const-eval result to propagate too far instead of cleanly emitting and containing E0080. The common thread is deferred const-eval of an associated const behind trait resolution and monomorphization, followed by use-by-reference, which stresses the path that lowers/promotes/constants-for-codegen after an evaluation failure. This suggests a defect in the compiler’s error-handling or validation for unevaluated/erroneous associated consts during MIR const qualification, const allocation creation, or mono item collection.",
+      "possible_causes": [
+        "A bug in const-eval error propagation for trait-associated consts in generic impls: an out-of-bounds evaluation (`[5, 6, 7][T::BOO]`) is detected too late or converted into an internal state that later codegen/MIR assumes is valid.",
+        "Incorrect handling of `<A<T> as Foo<T>>::BAR` when referenced as `&'static usize`, causing the compiler to attempt promotion/static allocation of an associated const whose evaluation already failed, leading to an ICE during MIR optimization or mono-item collection.",
+        "A defect in monomorphization-specific evaluation of associated consts: the compiler may mishandle the transition from unevaluated generic const to concrete const for `T = ()`, especially when the const depends on trait selection plus a nested associated const (`T::BOO`).",
+        "Missing validation/guard in `collect_and_partition_mono_items` or an earlier codegen preparation step for constants with prior E0080 failures, allowing erroneous MIR/constants to be traversed as if they were codegenable mono items.",
+        "A bug in MIR constant folding/const qualification for associated constants used by reference, where an invalid constant index is not rejected cleanly and instead leaves malformed MIR or invalid constant operands that trigger a later panic.",
+        "Improper interaction between trait-associated const resolution and const promotion/static borrowing: taking `&<A<T> as Foo<T>>::BAR` may enter a path that expects a fully evaluatable constant, but receives an erroring abstract const/valtree/allocation instead."
+      ],
+      "evidence": [
+        "The const initializer in the impl is provably invalid after monomorphization: `const BAR: usize = [5, 6, 7][T::BOO];` with `impl C for () { const BOO: usize = 42; }` gives an out-of-bounds constant index.",
+        "The compiler output references `rustc --explain E0080`, confirming this is a const-eval failure scenario that should normally be diagnosed gracefully rather than ICE.",
+        "The query stack ends at `#0 [optimized_mir] optimizing MIR for main` and `#1 [collect_and_partition_mono_items]`, indicating the crash happens late, after the compiler has progressed into MIR optimization/codegen preparation instead of stopping cleanly at const-eval error reporting.",
+        "The reproducer forces actual use of the associated const via `&<A<T> as Foo<T>>::BAR` and `println!`, ensuring monomorphization and codegen paths are exercised rather than leaving the const unused.",
+        "The problematic expression is not a plain local const but a generic trait-associated const accessed through trait resolution (`T::BOO` and `<A<T> as Foo<T>>::BAR`), which is a more complex compiler path than ordinary constant evaluation.",
+        "The backtrace includes codegen-related queries and mono-item collection, consistent with an invalid constant leaking into downstream compilation stages rather than being fully contained at the point of evaluation."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1701,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+        "reason": "Most suspicious because this is the query-facing CTFE entry point that should turn the out-of-bounds associated-const evaluation into a handled E0080 instead of letting an invalid/errored result leak into later MIR optimization and mono-item collection. The reproducer specifically forces evaluation of a monomorphized associated const through `<A<()> as Foo<()>>::BAR`."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/interpret/queries.rs",
+        "reason": "This layer resolves and evaluates `UnevaluatedConst`/`GlobalId` under a typing environment. The bug involves deferred evaluation of a generic associated const after monomorphization, so the wrapper logic that evaluates `<A<T> as Foo<T>>::BAR` for `T=()` is a strong suspect for mishandling an evaluation failure or returning a form downstream code treats as valid."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/constant.rs",
+        "reason": "The reproducer takes a reference to an associated const, forcing codegen-side MIR constant handling. If codegen tries to materialize a constant operand whose CTFE already failed, missing guards here could explain why compilation proceeds into `optimized_mir`/mono collection and then ICEs instead of stopping cleanly."
+      },
+      {
+        "path": "compiler/rustc_monomorphize/src/collector.rs",
+        "reason": "The query stack explicitly includes `collect_and_partition_mono_items`. This collector walks MIR uses and may be traversing a constant-by-reference or promoted-like path for `<A<T> as Foo<T>>::BAR`; if it assumes such constants are codegenable even after CTFE failure, it could trigger the late ICE."
+      },
+      {
+        "path": "compiler/rustc_codegen_llvm/src/consts.rs",
+        "reason": "LLVM constant lowering is a plausible downstream crash site for an associated const referenced as `&'static usize`. If an erroneous const allocation or partially evaluated constant reaches backend constant emission, this file is where invalid const materialization could surface."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/interpret/error.rs",
+        "reason": "This file defines `ErrorHandled` and the distinction between reported failures and non-fatal 'too generic' results. The bug pattern suggests the out-of-bounds CTFE may be misclassified or insufficiently propagated, allowing later stages to continue with an errored associated const."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/consts.rs",
+        "reason": "This file models evaluated constants (`ConstValue`, allocation-backed forms) used by MIR and codegen. A malformed or incorrectly represented constant result after failed associated-const evaluation could propagate through this representation layer and confuse later passes."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mono_item.rs",
+        "reason": "Shared SSA mono-item definition/predefinition logic is relevant because the failure appears during mono-item collection/codegen preparation. If associated const references are incorrectly treated as definable/codegenable items despite prior CTFE failure, the bug may manifest here."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/error.rs",
+        "reason": "The reproducer should produce a normal const-eval diagnostic for an out-of-bounds index. If the ICE is caused by defective CTFE diagnostic/reporting glue for associated consts in generic impls, this file is a plausible source of improper containment of the error state."
+      },
+      {
+        "path": "compiler/rustc_codegen_llvm/src/base.rs",
+        "reason": "This file drives LLVM backend codegen after mono-item partitioning. Given the late query stack and codegen involvement, it is a weaker but still plausible place where an invalid constant use from MIR/codegen preparation is not rejected before backend processing."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 161.676,
+    "stage_times_sec": {
+      "checkout": 1.401,
+      "load_bug_context": 0.123,
+      "test_behavior_analysis": 6.392,
+      "test_failure_analysis": 14.501,
+      "load_file_candidates": 0.252,
+      "search_suspicious_files": 139.006
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 417248,
+      "output_tokens": 7700,
+      "total_tokens": 424948,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.392,
+          "input_tokens": 461,
+          "output_tokens": 371,
+          "total_tokens": 832
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.5,
+          "input_tokens": 2369,
+          "output_tokens": 897,
+          "total_tokens": 3266
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.057,
+          "input_tokens": 27971,
+          "output_tokens": 308,
+          "total_tokens": 28279
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.767,
+          "input_tokens": 28223,
+          "output_tokens": 392,
+          "total_tokens": 28615
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.085,
+          "input_tokens": 27738,
+          "output_tokens": 403,
+          "total_tokens": 28141
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.976,
+          "input_tokens": 27981,
+          "output_tokens": 363,
+          "total_tokens": 28344
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.459,
+          "input_tokens": 27940,
+          "output_tokens": 370,
+          "total_tokens": 28310
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.194,
+          "input_tokens": 28357,
+          "output_tokens": 383,
+          "total_tokens": 28740
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.761,
+          "input_tokens": 28157,
+          "output_tokens": 372,
+          "total_tokens": 28529
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.09,
+          "input_tokens": 28142,
+          "output_tokens": 438,
+          "total_tokens": 28580
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.279,
+          "input_tokens": 28171,
+          "output_tokens": 390,
+          "total_tokens": 28561
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.514,
+          "input_tokens": 27900,
+          "output_tokens": 397,
+          "total_tokens": 28297
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.227,
+          "input_tokens": 28331,
+          "output_tokens": 378,
+          "total_tokens": 28709
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.639,
+          "input_tokens": 28120,
+          "output_tokens": 302,
+          "total_tokens": 28422
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.97,
+          "input_tokens": 28345,
+          "output_tokens": 358,
+          "total_tokens": 28703
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.909,
+          "input_tokens": 28218,
+          "output_tokens": 382,
+          "total_tokens": 28600
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.34,
+          "input_tokens": 7697,
+          "output_tokens": 426,
+          "total_tokens": 8123
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.711,
+          "input_tokens": 13127,
+          "output_tokens": 770,
+          "total_tokens": 13897
+        }
+      ]
+    }
+  }
+}

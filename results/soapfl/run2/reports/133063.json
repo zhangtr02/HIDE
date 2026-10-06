@@ -1,0 +1,256 @@
+{
+  "bug_id": "133063",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-11-15",
+    "resolved": "90ab8eaedd3efd7919bffa7638db66e67df3f0b8"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/build/matches/mod.rs",
+    "compiler/rustc_mir_build/src/build/matches/simplify.rs",
+    "compiler/rustc_mir_build/src/build/matches/test.rs",
+    "compiler/rustc_mir_build/src/thir/pattern/check_match.rs",
+    "compiler/rustc_pattern_analysis/src/usefulness.rs",
+    "compiler/rustc_pattern_analysis/src/rustc.rs",
+    "compiler/rustc_middle/src/thir.rs",
+    "compiler/rustc_middle/src/thir/visit.rs",
+    "compiler/rustc_mir_transform/src/validate.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `split_last` returning `Option<(&i32, &i32)>`, introducing borrowed tuple references without ever producing a value.",
+        "`assign_twice` contains an infinite `loop`, forcing the compiler to type-check a repeatedly reachable `match` body.",
+        "Matches on the unit value `()` with two arms, exercising pattern checking on a trivial scrutinee.",
+        "Uses the never pattern `!` inside an or-pattern `! | !`, a nightly-only exhaustiveness and usefulness checking feature.",
+        "Attaches a match guard `if let _ = split_last(&())` to the pattern, combining guard analysis with pattern usefulness.",
+        "The `if let _ = ...` guard always succeeds for both `Some` and `None`, stressing compiler treatment of vacuous wildcard destructuring.",
+        "Because `!` is uninhabited, the guarded arm is unreachable by value matching, so rustc must correctly separate pattern impossibility from guard evaluation.",
+        "Exercises MIR/HIR pattern analysis around uninhabited patterns, or-patterns, guards, and borrow-containing return types in one construct."
+      ],
+      "summary": "The reproducer is a minimal nightly test for rustc’s handling of uninhabited `!` patterns inside an or-pattern with a match guard. It matches `()` in an infinite loop, uses a guard calling a function returning borrowed references, and relies on wildcard `if let` destructuring. This stresses exhaustiveness, usefulness, reachability, and guard-analysis logic for impossible patterns."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a compiler ICE during MIR construction/early analysis for a match arm that combines several unusual pattern-analysis features: an uninhabited never-pattern `!`, an or-pattern `! | !`, and a match guard `if let _ = split_last(&())`. The scrutinee is `()`, so the arm is impossible by value matching, yet the guard is still syntactically present and must be represented correctly in THIR/MIR and later analyses. The query stack shows the panic occurs while building MIR for `assign_twice`, before or during unsafety checking, which strongly suggests a bug in lowering or validating match candidates/guards rather than in borrow checking or codegen. The common theme is incorrect handling of unreachable/uninhabited match patterns when combined with guard lowering, especially for or-pattern expansion. A likely defect is that rustc assumes such an arm has no reachable bindings/subpatterns and then mishandles guard evaluation or arm bookkeeping, leading to an internal invariant violation during MIR build or unsafety analysis.",
+      "possible_causes": [
+        "Bug in match lowering from HIR/THIR to MIR for guarded arms whose pattern is uninhabited (`!`), causing the arm to be treated inconsistently as both impossible and guard-bearing.",
+        "Incorrect handling of or-pattern expansion when each alternative is a never-pattern, leaving an empty or invalid candidate set that later MIR-building code does not expect.",
+        "Defect in usefulness/exhaustiveness/reachability data propagation into MIR construction: the compiler may mark the arm as unreachable and still attempt to build guard/test blocks for it, violating internal assumptions.",
+        "Mishandling of vacuous `if let _ = expr` guards on impossible patterns, where wildcard-destructuring always succeeds but should not resurrect an impossible pattern arm.",
+        "Invariant bug in unsafety-check preparation over MIR for match guards on unreachable arms, possibly due to missing source scope, fake read, or guard prebinding structures for an arm with no realizable pattern path."
+      ],
+      "evidence": [
+        "The query stack ends at `mir_built` for `assign_twice`, then `check_unsafety`, indicating the panic originates in MIR construction or immediately adjacent analysis rather than later optimization/codegen.",
+        "The reproducer specifically combines uninhabited never-patterns, an or-pattern, and a guard in one match arm, matching the sort of edge case that can break match-lowering invariants.",
+        "The scrutinee type is `()`, while the first arm pattern is `! | !`, making the arm impossible by construction and stressing compiler logic for separating pattern impossibility from guard handling.",
+        "The guard `if let _ = split_last(&())` is vacuous and always matches, which can expose bugs if the compiler incorrectly lets guard semantics interact with unreachable-pattern analysis.",
+        "The crash happens during crate analysis on nightly with unstable never-pattern support, consistent with a defect in experimental pattern-analysis/lowering code paths rather than user code semantics."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1858,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/mod.rs",
+        "reason": "Most suspicious because the ICE occurs in `mir_built` for `assign_twice`, and this file owns lowering of `match` arms, guards, and or-pattern handling into MIR. The reproducer specifically combines an impossible never-pattern arm with a guard, which is exactly the sort of arm bookkeeping and guard-lowering invariant managed here."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/simplify.rs",
+        "reason": "Highly suspicious because simplification rewrites complex match pairs, flattens irrefutable pieces, and handles or-pattern ordering/expansion. A `! | !` pattern on a `()` scrutinee can produce an empty or degenerate candidate set, and this file is a likely place for inconsistent simplification that later MIR-building code panics on."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/test.rs",
+        "reason": "This file selects and emits runtime tests for simplified match pairs, including special handling for `Never`. The reproducer centers on uninhabited never-patterns inside an or-pattern, so a bug here could arise if test selection assumes a reachable candidate or mishandles a guarded arm whose test space is impossible."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/pattern/check_match.rs",
+        "reason": "Strong secondary suspect because it performs THIR-based pattern checking and tracks contexts such as guards and refutability before MIR construction. If reachability/usefulness information for `! | !` with a guard is computed or propagated incorrectly, MIR building may later receive malformed assumptions and ICE."
+      },
+      {
+        "path": "compiler/rustc_pattern_analysis/src/usefulness.rs",
+        "reason": "The reproducer is fundamentally about usefulness/reachability of an uninhabited or-pattern with a guard. This file contains the core algorithm for redundant/unreachable pattern reasoning, and a bad result here could feed invalid expectations into later match lowering."
+      },
+      {
+        "path": "compiler/rustc_pattern_analysis/src/rustc.rs",
+        "reason": "This is the rustc-specific adapter for pattern analysis, including Rust-specific inhabitedness and constructor handling. Because the edge case depends on the never pattern `!`, guard context, and Rust-specific pattern semantics, incorrect integration here could misclassify the arm and destabilize MIR construction."
+      },
+      {
+        "path": "compiler/rustc_middle/src/thir.rs",
+        "reason": "THIR stores the typed representation of match arms, guards, and patterns consumed by MIR construction. If this edge case creates malformed or unexpected THIR arm/pattern structure for impossible guarded or-patterns, downstream MIR build code could panic while processing it."
+      },
+      {
+        "path": "compiler/rustc_middle/src/thir/visit.rs",
+        "reason": "Less likely than the main MIR-build files, but still plausible because pattern checking walks THIR through this visitor API. If traversal over guarded/or-pattern/never-pattern combinations skips or misvisits a node, it could contribute to bad reachability metadata or malformed lowering state."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/validate.rs",
+        "reason": "Lower probability, but relevant as a nearby invariant checker for built MIR. If the panic is triggered by validation immediately after MIR construction of a malformed guarded match arm, this file could be the one asserting on broken control-flow or typing assumptions."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "Included as a distant fallback because the query stack proceeds from `mir_built` into `check_unsafety`/analysis, and broken MIR from this edge case might first trip a MIR type-check invariant here. Still less suspicious than the MIR match-lowering and pattern-analysis files directly implicated by the reproducer."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 153.938,
+    "stage_times_sec": {
+      "checkout": 0.286,
+      "load_bug_context": 0.048,
+      "test_behavior_analysis": 6.966,
+      "test_failure_analysis": 11.343,
+      "load_file_candidates": 0.114,
+      "search_suspicious_files": 135.181
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 444524,
+      "output_tokens": 6921,
+      "total_tokens": 451445,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.966,
+          "input_tokens": 373,
+          "output_tokens": 310,
+          "total_tokens": 683
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.343,
+          "input_tokens": 2213,
+          "output_tokens": 604,
+          "total_tokens": 2817
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 6.605,
+          "input_tokens": 27845,
+          "output_tokens": 311,
+          "total_tokens": 28156
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.128,
+          "input_tokens": 27803,
+          "output_tokens": 319,
+          "total_tokens": 28122
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.14,
+          "input_tokens": 27147,
+          "output_tokens": 361,
+          "total_tokens": 27508
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.825,
+          "input_tokens": 27599,
+          "output_tokens": 332,
+          "total_tokens": 27931
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.691,
+          "input_tokens": 27630,
+          "output_tokens": 340,
+          "total_tokens": 27970
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.813,
+          "input_tokens": 27749,
+          "output_tokens": 311,
+          "total_tokens": 28060
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.391,
+          "input_tokens": 27763,
+          "output_tokens": 333,
+          "total_tokens": 28096
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.085,
+          "input_tokens": 27617,
+          "output_tokens": 294,
+          "total_tokens": 27911
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.265,
+          "input_tokens": 27755,
+          "output_tokens": 366,
+          "total_tokens": 28121
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.54,
+          "input_tokens": 27733,
+          "output_tokens": 316,
+          "total_tokens": 28049
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.949,
+          "input_tokens": 27462,
+          "output_tokens": 365,
+          "total_tokens": 27827
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.009,
+          "input_tokens": 27739,
+          "output_tokens": 348,
+          "total_tokens": 28087
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 5.938,
+          "input_tokens": 27919,
+          "output_tokens": 248,
+          "total_tokens": 28167
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.251,
+          "input_tokens": 27991,
+          "output_tokens": 280,
+          "total_tokens": 28271
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 10.021,
+          "input_tokens": 27680,
+          "output_tokens": 396,
+          "total_tokens": 28076
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 6.446,
+          "input_tokens": 14952,
+          "output_tokens": 319,
+          "total_tokens": 15271
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.051,
+          "input_tokens": 11554,
+          "output_tokens": 768,
+          "total_tokens": 12322
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,258 @@
+{
+  "bug_id": "133117",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-11-15",
+    "resolved": "90ab8eaedd3efd7919bffa7638db66e67df3f0b8"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/build/matches/mod.rs",
+    "compiler/rustc_mir_build/src/build/matches/test.rs",
+    "compiler/rustc_mir_build/src/thir/pattern/mod.rs",
+    "compiler/rustc_mir_build/src/thir/pattern/check_match.rs",
+    "compiler/rustc_pattern_analysis/src/rustc.rs",
+    "compiler/rustc_pattern_analysis/src/usefulness.rs",
+    "compiler/rustc_hir_typeck/src/pat.rs",
+    "compiler/rustc_hir_typeck/src/_match.rs",
+    "compiler/rustc_ast_passes/src/feature_gate.rs",
+    "compiler/rustc_ast_lowering/src/pat.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Matches the unit value `()` with two guarded match arms, so the compiler must type-check and lower pattern matching plus arm guards.",
+        "Uses the pattern `(!|!)`, an or-pattern containing two `!` subpatterns, forcing parsing and validation of nested alternative patterns.",
+        "Exercises the never type `!` in pattern position, an unusual corner case for pattern typing and exhaustiveness analysis.",
+        "Both arms have identical patterns and `if true` guards, requiring usefulness/reachability checking with guards present.",
+        "Because guards are always `true`, the first arm should capture any value matched by the pattern, making later identical arms effectively redundant.",
+        "Since the scrutinee is `()`, the compiler must reconcile a unit scrutinee against a pattern built from `!`, stressing type mismatch diagnostics.",
+        "Tests pattern matrix construction and simplification for or-patterns combined with guards and impossible/uninhabited pattern components.",
+        "Targets nightly parser/type-checker behavior around invalid or unstable pattern forms involving the never type."
+      ],
+      "summary": "The reproducer is a tiny `match` on `()` with two identical guarded arms using the unusual pattern `(!|!)`. It stresses parsing, type checking, pattern validation, usefulness/reachability analysis, and diagnostics for or-patterns containing the never type `!`, especially on nightly with guarded duplicate arms."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in the compiler’s pattern-analysis pipeline rather than a normal user-facing diagnostic path. The reproducer combines several unusual pattern features at once: an or-pattern `(!|!)`, use of the never type `!` in pattern position, guarded match arms, and duplicate arms over a unit scrutinee. The query stack shows the panic happens while building MIR for `main`, then during unsafety checking and crate analysis, which strongly suggests rustc accepted or partially lowered this malformed/unsupported pattern far enough to reach MIR construction. The common theme is mishandling of invalid or uninhabited patterns during pattern typing/usefulness lowering: the compiler likely fails to reject or normalize `!`-patterns before constructing pattern matrices or MIR for guarded arms. Because both arms are identical and guarded, reachability/usefulness code also has to reason about redundancy in the presence of guards and impossible subpatterns, which is a likely place for an invariant violation or unexpected internal state. Overall, the most plausible defect is missing validation or incorrect lowering for never-type patterns inside or-patterns, especially when guards are present, causing downstream MIR/pattern-analysis code to panic instead of emitting a proper error.",
+      "possible_causes": [
+        "Missing early validation in pattern checking that rejects or marks `!` in pattern position as invalid/unsupported before MIR lowering.",
+        "Incorrect THIR/MIR lowering of an or-pattern containing uninhabited/never subpatterns, leading to an internal invariant violation when building match candidates.",
+        "Bug in usefulness/reachability analysis for guarded duplicate arms where an or-pattern with impossible components is treated as a normal constructor pattern.",
+        "Pattern-type unification defect: the compiler may incorrectly attempt to reconcile a `!`-derived pattern against a `()` scrutinee and leave an inconsistent typed pattern for later passes.",
+        "Failure to normalize/eliminate uninhabited subpatterns inside `PatKind::Or` before matrix construction, causing downstream code to assume a non-empty set of valid alternatives.",
+        "Diagnostic recovery bug: after reporting errors for the invalid pattern form, rustc may continue into MIR construction with an errorful pattern node that later code does not defensively handle."
+      ],
+      "evidence": [
+        "The reproducer uses `(!|!)` in match-arm pattern position, an unusual never-type/or-pattern combination that stresses unsupported or invalid pattern handling.",
+        "The scrutinee is `()`, so any attempt to type/lower `!`-based patterns against unit requires robust mismatch handling and should normally produce diagnostics rather than a panic.",
+        "Both arms are identical and guarded with `if true`, forcing usefulness/reachability logic to analyze duplicate guarded patterns in addition to the invalid pattern form.",
+        "The query stack ends at `mir_built` for `main`, indicating the compiler progressed past parsing into lowering/analysis, consistent with missing validation or bad recovery.",
+        "The panic occurs during `analysis` after `mir_built` and `check_unsafety`, which matches a compiler-internal failure in match lowering or pattern-analysis infrastructure rather than a frontend parse error.",
+        "Compiler output says there were multiple previous errors/warnings, yet rustc still panicked, supporting the theory that erroneous pattern nodes were allowed to reach a later pass without proper guarding."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1858,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/mod.rs",
+        "reason": "An ICE at build/matches/mod.rs:1550, inside `traverse_candidate`, trips on the assertion `leaf_candidate.false_edge_start_block.is_some()`. Since the reproducer's `if true` guards and expanded or-pattern `!|!` directly stress candidate traversal and guard false-edge bookkeeping, this file is the likeliest home of the defect."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/test.rs",
+        "reason": "Most suspicious because the ICE occurs during `mir_built` for a `match`, and this file explicitly handles match test selection for lowered patterns, including a special `Never` test and rejection of illegal/unsimplified cases like direct or-patterns. A malformed THIR pattern such as `(!|!)` combined with guards could easily violate invariants here if error recovery let it through."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/pattern/mod.rs",
+        "reason": "This is the main THIR pattern lowering/validation entry point before MIR construction. The reproducer stresses invalid or unsupported pattern syntax involving `!` in pattern position inside an or-pattern. If early pattern lowering fails to reject or sanitize such a pattern, later MIR-building code can panic."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/pattern/check_match.rs",
+        "reason": "This file performs THIR-based match checking, including usefulness/reachability over match arms and guards before MIR construction. The duplicate guarded arms and impossible/uninhabited `(!|!)` pattern strongly point to a bug in match checking or in how erroneous patterns are propagated after diagnostics."
+      },
+      {
+        "path": "compiler/rustc_pattern_analysis/src/rustc.rs",
+        "reason": "This is the rustc adapter layer for the usefulness/exhaustiveness engine. The reproducer combines or-patterns, guards, and an uninhabited/never-like pattern shape against a `()` scrutinee, exactly the kind of Rust-specific constructor/inhabitedness handling this file mediates. A bad translation of `!` patterns into analysis constructors could trigger downstream invariant failures."
+      },
+      {
+        "path": "compiler/rustc_pattern_analysis/src/usefulness.rs",
+        "reason": "Usefulness/reachability analysis is directly stressed by two identical guarded arms and an or-pattern with impossible components. If the algorithm mishandles empty/uninhabited alternatives or guarded redundancy, it could leave MIR-building with inconsistent assumptions or panic during analysis."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/pat.rs",
+        "reason": "Pattern type checking must reconcile the scrutinee type `()` with subpatterns involving `!`. If this file permits an inconsistent typed pattern or recovers incorrectly after emitting errors, later THIR/MIR stages may ICE on malformed pattern data."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/_match.rs",
+        "reason": "This file type-checks `match` expressions, including arm patterns and guards. Because the reproducer uses guarded duplicate arms with a highly unusual pattern form, a bug here could incorrectly accept or incompletely reject the match and allow invalid state to reach MIR construction."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/feature_gate.rs",
+        "reason": "The summary indicates nightly behavior around unstable or invalid never-type pattern forms. If `!` in pattern position is feature-gated or otherwise supposed to be rejected earlier, missing or incomplete gating here could explain why later stages receive unsupported syntax and panic instead of cleanly erroring."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/pat.rs",
+        "reason": "AST-to-HIR pattern lowering is a plausible earlier source if `(!|!)` is lowered into an unexpected HIR pattern shape. Given the unusual use of `!` in pattern position, incorrect lowering or insufficient syntax rejection here could poison later pattern analysis."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 185.54,
+    "stage_times_sec": {
+      "checkout": 4.949,
+      "load_bug_context": 0.091,
+      "test_behavior_analysis": 6.489,
+      "test_failure_analysis": 11.866,
+      "load_file_candidates": 20.689,
+      "search_suspicious_files": 141.457
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 447070,
+      "output_tokens": 7254,
+      "total_tokens": 454324,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.489,
+          "input_tokens": 324,
+          "output_tokens": 275,
+          "total_tokens": 599
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.866,
+          "input_tokens": 2143,
+          "output_tokens": 657,
+          "total_tokens": 2800
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.264,
+          "input_tokens": 27830,
+          "output_tokens": 394,
+          "total_tokens": 28224
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.882,
+          "input_tokens": 27788,
+          "output_tokens": 349,
+          "total_tokens": 28137
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.189,
+          "input_tokens": 27132,
+          "output_tokens": 328,
+          "total_tokens": 27460
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.1,
+          "input_tokens": 27584,
+          "output_tokens": 352,
+          "total_tokens": 27936
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.935,
+          "input_tokens": 27615,
+          "output_tokens": 401,
+          "total_tokens": 28016
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.379,
+          "input_tokens": 27734,
+          "output_tokens": 377,
+          "total_tokens": 28111
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.742,
+          "input_tokens": 27748,
+          "output_tokens": 341,
+          "total_tokens": 28089
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.295,
+          "input_tokens": 27602,
+          "output_tokens": 328,
+          "total_tokens": 27930
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.673,
+          "input_tokens": 27740,
+          "output_tokens": 364,
+          "total_tokens": 28104
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.935,
+          "input_tokens": 27718,
+          "output_tokens": 369,
+          "total_tokens": 28087
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.909,
+          "input_tokens": 27447,
+          "output_tokens": 334,
+          "total_tokens": 27781
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.855,
+          "input_tokens": 27724,
+          "output_tokens": 335,
+          "total_tokens": 28059
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.847,
+          "input_tokens": 27904,
+          "output_tokens": 318,
+          "total_tokens": 28222
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.92,
+          "input_tokens": 27976,
+          "output_tokens": 300,
+          "total_tokens": 28276
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.62,
+          "input_tokens": 27665,
+          "output_tokens": 356,
+          "total_tokens": 28021
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 6.567,
+          "input_tokens": 14937,
+          "output_tokens": 312,
+          "total_tokens": 15249
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.311,
+          "input_tokens": 14459,
+          "output_tokens": 764,
+          "total_tokens": 15223
+        }
+      ]
+    }
+  }
+}

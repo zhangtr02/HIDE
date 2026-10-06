@@ -1,0 +1,251 @@
+{
+  "bug_id": "118021",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-17",
+    "resolved": "a57770440f1ebe5b992551d3bcc489ae211908d4"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+    "compiler/rustc_middle/src/mir/interpret/queries.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_resolve/src/late/diagnostics.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables unstable `generic_const_exprs`, exercising const evaluation and type-level constant usage on nightly Rust.",
+        "Defines a struct with a lifetime parameter but incorrectly names it `'static`, colliding with Rust’s built-in `'static` lifetime syntax.",
+        "Uses an undeclared lifetime `'a` in the field type, testing lifetime resolution and diagnostics for missing generic parameters.",
+        "References `Self::SIZE` inside a struct field type, exercising whether inherent associated constants are usable during type checking of the item.",
+        "Declares an inherent `impl DataWrapper<'a>` with `const SIZE`, testing binding of lifetimes between the struct definition and impl block.",
+        "Uses an array reference type `&'a [u8; Self::SIZE]`, combining lifetimes, arrays, and const expressions in a type context.",
+        "The code is ill-formed before runtime, so it targets parser/name-resolution/type-checking compiler paths rather than execution behavior.",
+        "The reproducer likely checks for an internal compiler failure or bad diagnostic when malformed lifetimes interact with const expressions and `Self` in item definitions."
+      ],
+      "summary": "This reproducer is a compile-fail case stressing early compiler phases. It mixes invalid lifetime syntax, an undeclared lifetime, and `Self::SIZE` in a struct field type under `generic_const_exprs`. The key exercised behaviors are parsing, lifetime/name resolution, associated-const lookup, and type checking for item definitions, especially around malformed generics that should produce clean diagnostics instead of crashing rustc."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is that the input is already ill-formed at the item/type-checking level, but rustc continues into MIR/CTFE processing for a type-level constant originating from the struct field type `&'a [u8; Self::SIZE]`. The reproducer combines several edge conditions in the same item: an invalid lifetime parameter name (`'static`), use of an undeclared lifetime (`'a`) in the struct field, and a `Self::SIZE` const expression in a struct field type under `generic_const_exprs`. The query stack shows the panic occurs while borrow-checking and const-evaluating `DataWrapper::data::{constant#0}`, meaning the compiler lowered the array length expression from the field type into an anonymous constant and attempted MIR/CTFE on it despite earlier name-resolution/type errors (E0261/E0262). This suggests a compiler bug in error handling or well-formedness checking for generic const expressions in item signatures: invalid generic/lifetime bindings are not stopping or poisoning later const-checking paths, and an internal assumption about resolved regions/generics/`Self` availability is violated.",
+      "possible_causes": [
+        "Missing error gating in the generic-const-expr/type-well-formedness pipeline: rustc should not proceed to MIR borrowck/CTFE for the anonymous constant behind `Self::SIZE` once lifetime resolution has already failed for the enclosing item.",
+        "Incorrect handling of malformed lifetime generics in struct definitions, especially when a user-written lifetime parameter is named `'static`; compiler code may treat it inconsistently between HIR lowering, name resolution, and later type checking.",
+        "Bug in anonymous constant lowering for array lengths in field types using `Self::ASSOC_CONST`, where the lowered const inherits an invalid or incomplete generic parameter environment from the enclosing struct/impl.",
+        "Failure in `check_well_formed` / `eval_to_valtree` for type-level constants to account for unresolved late-bound/free regions, causing internal assumptions to fail during MIR borrowck of the generated constant body.",
+        "Improper association or lookup of inherent associated consts (`Self::SIZE`) during checking of the defining type itself, especially when the `impl DataWrapper<'a>` generics do not match the malformed struct generics, leading to a mismatched `ParamEnv` or generic args list.",
+        "Const-checking/borrowck code for item-level anonymous constants may be assuming that all referenced lifetimes and generic parameters are fully resolved, but this case leaves `'a` unresolved and the item already erroneous, triggering an ICE instead of emitting only diagnostics."
+      ],
+      "evidence": [
+        "The code is compile-invalid before any runtime behavior: it defines `struct DataWrapper<'static>` and uses undeclared lifetime `'a` in the field, matching reported E0261/E0262 diagnostics.",
+        "The field type `&'a [u8; Self::SIZE]` forces creation of an anonymous type-level constant for the array length, which is exactly what appears in the query stack as `DataWrapper::data::{constant#0}`.",
+        "The query stack shows the panic happens during `mir_borrowck`, `mir_for_ctfe`, `eval_to_allocation_raw`, and `eval_to_valtree` for that anonymous constant, indicating rustc incorrectly progressed into MIR/const-eval for an already-invalid item.",
+        "`check_well_formed` for `DataWrapper` is on the query stack, so the crash is tied to type well-formedness checking of the struct item rather than code generation or runtime execution.",
+        "The reproducer explicitly enables `generic_const_exprs`, increasing involvement of type-level const evaluation machinery for `Self::SIZE` in the field type.",
+        "The interaction between malformed lifetimes, `Self` in a type context, and inherent associated const lookup is the key shared stress pattern across the behavior summary and the ICE location."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1699,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The query stack ends in `check_well_formed` for `DataWrapper`, and the crash is triggered while WF checking forces evaluation of the anonymous const from the field type. This file is the most likely place where erroneous items with unresolved lifetimes should be gated from further const-eval/CTFE."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "`Self::SIZE` in an array length under `generic_const_exprs` goes through const-evaluatability logic. The bug looks like malformed generics/lifetimes were not recognized as making the const non-evaluatable, allowing evaluation to continue on an invalid item."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+        "reason": "The panic path includes `eval_to_allocation_raw` for `DataWrapper::data::{constant#0}`. This file drives CTFE query entry points and may be missing proper early bailout when the enclosing item already has resolution/type errors."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/interpret/queries.rs",
+        "reason": "The stack includes `eval_to_allocation_raw` and type-level constant evaluation; this wrapper layer prepares the const-eval request and typing environment. A bad `TypingEnv`/generic args setup for an erroneous anon const could originate here."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Anonymous constants in type positions get their type through collect logic here. Since the failing node is `DataWrapper::data::{constant#0}`, a bad `anon_const_type_of` path for field-type array lengths involving `Self::SIZE` is plausible."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "The reproducer mixes invalid `'static` as a parameter name with an undeclared `'a`, and the ICE suggests later phases saw an inconsistent bound-variable environment. This file is central to resolving lifetime references into the model used by type checking."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "The struct and inherent impl use mismatched/malformed lifetime generics, and `Self::SIZE` depends on correct generic environment construction. If generics are computed inconsistently for the item or anon const, later WF/CTFE could ICE."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The source is already invalid at late resolution time with E0261/E0262. If late resolution marks the item erroneous but still leaves enough partial information for later const processing without proper poisoning, this file is a likely contributor."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late/diagnostics.rs",
+        "reason": "The compiler did emit lifetime-resolution errors, but the bug is that later phases still crashed. Recovery/diagnostic paths for missing or invalid lifetimes may be producing incomplete error placeholders that are not robust for anonymous const checking."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "The immediate panic occurs during `mir_borrowck` of the anonymous constant. This module explicitly assumes earlier HIR type checking succeeded; if an erroneous const body still reaches MIR type checking, an internal assumption here may be what turns bad recovery into an ICE."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 162.284,
+    "stage_times_sec": {
+      "checkout": 1.211,
+      "load_bug_context": 0.047,
+      "test_behavior_analysis": 7.946,
+      "test_failure_analysis": 15.386,
+      "load_file_candidates": 0.106,
+      "search_suspicious_files": 137.587
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 412663,
+      "output_tokens": 7305,
+      "total_tokens": 419968,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.946,
+          "input_tokens": 377,
+          "output_tokens": 309,
+          "total_tokens": 686
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.386,
+          "input_tokens": 2100,
+          "output_tokens": 790,
+          "total_tokens": 2890
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.041,
+          "input_tokens": 27894,
+          "output_tokens": 334,
+          "total_tokens": 28228
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 10.211,
+          "input_tokens": 27773,
+          "output_tokens": 353,
+          "total_tokens": 28126
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.007,
+          "input_tokens": 27415,
+          "output_tokens": 402,
+          "total_tokens": 27817
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.899,
+          "input_tokens": 27632,
+          "output_tokens": 347,
+          "total_tokens": 27979
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.029,
+          "input_tokens": 27567,
+          "output_tokens": 384,
+          "total_tokens": 27951
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.923,
+          "input_tokens": 27977,
+          "output_tokens": 376,
+          "total_tokens": 28353
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.162,
+          "input_tokens": 27774,
+          "output_tokens": 420,
+          "total_tokens": 28194
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.979,
+          "input_tokens": 27769,
+          "output_tokens": 363,
+          "total_tokens": 28132
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.505,
+          "input_tokens": 27778,
+          "output_tokens": 410,
+          "total_tokens": 28188
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.699,
+          "input_tokens": 27624,
+          "output_tokens": 427,
+          "total_tokens": 28051
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.36,
+          "input_tokens": 27972,
+          "output_tokens": 357,
+          "total_tokens": 28329
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.958,
+          "input_tokens": 27912,
+          "output_tokens": 287,
+          "total_tokens": 28199
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.066,
+          "input_tokens": 27942,
+          "output_tokens": 322,
+          "total_tokens": 28264
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.73,
+          "input_tokens": 27763,
+          "output_tokens": 349,
+          "total_tokens": 28112
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.077,
+          "input_tokens": 6907,
+          "output_tokens": 367,
+          "total_tokens": 7274
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.914,
+          "input_tokens": 14487,
+          "output_tokens": 708,
+          "total_tokens": 15195
+        }
+      ]
+    }
+  }
+}

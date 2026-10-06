@@ -1,0 +1,13 @@
+{
+  "title": "Unsoundness due to where clauses not checked for well-formedness",
+  "labels": [
+    "A-lifetimes",
+    "P-high",
+    "T-compiler",
+    "I-unsound",
+    "C-bug",
+    "S-bug-has-test",
+    "T-types"
+  ],
+  "body": "This code does pass:  ([playground](https://play.rust-lang.org/?version=stable&mode=debug&edition=2021&gist=4225e75d1514837fb4df4d35ee880f55))\n```rust\ntrait Outlives<'a>: 'a {} // without `: 'a`, it fails as expected.\n\nfn t_is_static<T>()\nwhere\n    &'static T: Outlives<'static>,\n{\n}\n```\nBut according to [RFC 1214](https://github.com/rust-lang/rfcs/blob/master/text/1214-projections-lifetimes-and-wf.md) functions are responsible for checking the well-formedness of their own where clauses. So this should fail and require an explicit bound `T: 'static`.\n\nHere is an exploit of this unsoundness: ([playground](https://play.rust-lang.org/?version=stable&mode=debug&edition=2021&gist=4839e77e4f4058b1790a1e5ecf3f653e))\n```rust\ntrait Outlives<'a>: 'a {}\nimpl<'a, T> Outlives<'a> for &'a T {}\n\nfn step2<T>(t: T) -> &'static str\nwhere\n    &'static T: Outlives<'static>,\n    T: AsRef<str>,\n{\n    AsRef::as_ref(Box::leak(Box::new(t) as Box<dyn AsRef<str> + 'static>))\n}\n\nfn step1<T>(t: T) -> &'static str\nwhere\n    for<'a> &'a T: Outlives<'a>,\n    T: AsRef<str>,\n{\n    step2(t)\n}\n\nfn main() {\n    let s: &'static str = step1(&String::from(\"blah blah blah\"));\n    println!(\"{s}\");\n}\n```\n\n@rustbot label C-bug T-compiler T-types A-lifetimes I-unsound\n\n<!-- TRIAGEBOT_START -->\n\n<!-- TRIAGEBOT_ASSIGN_START -->\n\n<!-- TRIAGEBOT_ASSIGN_DATA_START$${\"user\":\"lcnr\"}$$TRIAGEBOT_ASSIGN_DATA_END -->\n\n<!-- TRIAGEBOT_ASSIGN_END -->\n<!-- TRIAGEBOT_END -->"
+}

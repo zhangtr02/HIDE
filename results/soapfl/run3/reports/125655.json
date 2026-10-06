@@ -1,0 +1,250 @@
+{
+  "bug_id": "125655",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-05-27",
+    "resolved": "bdbbb6c6a718d4d196131aa16bafb60e850311d9"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/fn_ctxt/suggestions.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_typeck/src/coercion.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_ty_utils/src/ty.rs",
+    "compiler/rustc_trait_selection/src/infer.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_middle/src/ty/adjustment.rs",
+    "compiler/rustc_trait_selection/src/solve/assembly/structural_traits.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Declares a `static` item inside `main`, exercising Rust’s support for local statics and their compile-time type checking.",
+        "Uses `dyn Fn() -> u32` directly as a `static` type, testing unsized trait objects in statics where a concrete sized type is required.",
+        "Initializes the static with a closure `|| -> u32 { ...; 0 }`, exercising closure-to-trait-object coercion and closure typing.",
+        "The closure body contains `...`, the obsolete/expression-syntax placeholder, provoking parser/type-check interaction in an invalid closure body.",
+        "`static` items require `Sync`; a `dyn Fn() -> u32` trait object without `+ Sync` triggers thread-safety checking and a `cannot be shared between threads safely` error.",
+        "Compiler emits multiple diagnostics for the same declaration, showing combined checking of sizedness, trait-object validity, and `Sync` requirements.",
+        "Tests nightly compiler behavior on invalid trait-object statics, especially diagnostic quality and error recovery around closure bodies and unsized types."
+      ],
+      "summary": "The reproducer defines a local `static` trait object of type `dyn Fn() -> u32` and initializes it with a closure containing `...`. This exercises closure coercion, unsized trait-object rejection in statics, mandatory `Sync` checking for `static` items, and parser/type-check recovery on invalid syntax. The expected failure is multiple diagnostics around sizedness and thread-safety."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on an invalid `static` item whose declared type is an unsized trait object (`dyn Fn() -> u32`) and whose initializer is a closure with an erroneous body (`...`). The reported diagnostics already show the compiler recognized ordinary user-facing errors: unsized type in a static, missing `Sync` for a static, and additional type-related rejection. However, instead of stopping after emitting these errors, rustc panics during the analysis pipeline while type-checking and then checking well-formedness of `main::foo`. The common theme is error recovery around a local static that combines several problematic features at once: local statics, trait-object unsizedness, closure-to-trait-object coercion, and invalid placeholder syntax in the closure body. This strongly suggests a compiler bug in the type-check / well-formedness path for statics where an errorful type or initializer leaves an unexpected internal type representation behind. In particular, the compiler likely continues WF/typeck processing on a `static` item after earlier errors, but some code assumes the static’s type is sized/concrete or that coercion from closure to trait object succeeded, and that assumption is violated under recovery. Since the query stack ends at `typeck` of `main::foo` followed by `check_well_formed`, the most plausible defect is missing defensive handling in static item checking for erroneous trait-object types or erroneous closure coercions, causing an ICE instead of graceful diagnostics.",
+      "possible_causes": [
+        "A bug in `rustc_hir_analysis` static item type-checking or well-formedness checking where `static foo: dyn Fn() -> u32` is treated as if it had a valid sized concrete type after errors were already emitted.",
+        "Missing error-recovery handling for closure-to-trait-object coercion in a `static` initializer: the closure body containing `...` may produce an error type, but later code still assumes coercion/adjustment data is valid and panics.",
+        "An ICE-triggering assumption in sizedness checking for statics: code validating that static types are `Sized` may not correctly handle an already-erroneous unsized trait object plus initializer errors.",
+        "A defect in `Sync`/trait obligation evaluation for `static` items with `dyn Fn()` trait objects under error recovery, where obligations are built or normalized from an invalid type and lead to an internal panic.",
+        "Local static handling may have a special-case bug compared with module-level statics, causing the typeck/WF path for nested statics to mishandle invalid trait-object declarations and recovered initializer expressions.",
+        "A compiler defect in well-formedness checking of trait-object statics where metadata-required unsized types (`dyn Trait`) are not rejected cleanly before subsequent analyses expect a fully valid type layout or normalization result."
+      ],
+      "evidence": [
+        "The reproducer intentionally uses `static foo: dyn Fn() -> u32`, an unsized trait object type, which should produce ordinary diagnostics rather than an ICE.",
+        "Compiler output shows expected user errors first: multiple `the size for values of type ...` diagnostics and `cannot be shared between threads safely`, proving rustc already detected the source-level invalidity.",
+        "The query stack pinpoints the crash to `typeck` of `main::foo`, then `check_well_formed`, indicating the panic happens in compiler analysis of the static item rather than parsing or codegen.",
+        "The initializer is a closure coerced toward a trait object type, and its body contains `...`, increasing the likelihood of an erroneous inferred type or failed coercion that later code mishandles.",
+        "The test behavior explicitly combines closure typing, trait-object rejection in statics, and recovery from invalid closure body syntax; this combination is consistent with a missing recovery guard in compiler production code.",
+        "Because the crash occurs after diagnostics are emitted and during analysis, the bug is likely not wrong rejection but failure to robustly propagate `ErrorGuaranteed`/error types through static item validation."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1786,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/suggestions.rs",
+        "reason": "The backtrace goes straight to `FnCtxt::suggest_missing_return_type` and `suggest_mismatched_types_on_tail` here while diagnostics are generated for the closure body. Since the reproducer combines a `...; 0` closure tail with invalid static/trait-object typing, this suggestion logic appears to be computing a return-type hint in a context where it is not valid to do so."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The query stack explicitly shows the ICE during `check_well_formed` after type-checking `main::foo`. This file is responsible for WF checking of item types and registering obligations for invalid declarations like `static foo: dyn Fn() -> u32`. The reproducer combines an unsized trait object static, missing `Sync`, and an errorful initializer, making WF recovery on erroneous static types the most likely panic site."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/coercion.rs",
+        "reason": "The initializer is a closure being coerced toward a `dyn Fn() -> u32` trait-object type, while the closure body itself is erroneous (`...`). That strongly points at closure-to-trait-object coercion and unsizing adjustment logic under error recovery. If coercion records invalid adjustments or assumes successful coercion despite prior errors, later analysis can ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "The query stack starts with `[typeck] type-checking main::foo`, so the body/item type-checking path is directly involved. Local statics inside a function are checked through HIR typeck machinery, and this file drives body checking and related obligations. It is a plausible place where invalid local static declarations with erroneous initializers are not guarded properly before later WF processing."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Well-formedness obligations for the `dyn Fn() -> u32` static type and its associated trait object constraints are generated here. A bug in WF obligation generation for erroneous/unsized trait-object statics could leave inconsistent obligations or trigger a panic when combined with recovery from the invalid closure body."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/ty.rs",
+        "reason": "The emitted diagnostics include multiple sizedness errors, and this file contains structural sizedness logic (`sized_constraint_for_ty`, ADT/type sized analysis). Since the invalid declaration is specifically an unsized trait object in a `static`, mishandling of sizedness computation or propagation of error types for this case is a realistic contributor."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/infer.rs",
+        "reason": "The reproducer triggers `Sync` checking for a `static` item and `Sized` checking for the declared type. This file provides helper queries like `type_is_sized_modulo_regions`, which may be used in item validation. If these checks are applied to an already erroneous trait object/coercion result without proper recovery, they could help produce the ICE."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "The multiple obligations involved here (`Sized`, `Sync`, trait-object well-formedness) are ultimately driven through the old fulfillment engine during type checking. An ICE after emitting user-facing errors can stem from fulfillment encountering malformed or partially recovered obligations and not handling them defensively."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/adjustment.rs",
+        "reason": "Closure-to-trait-object coercion and unsizing are represented via adjustments defined here. While this file is more data-model than algorithmic, an invalid or unexpected adjustment kind/target produced during recovery from the bad closure body could surface later as an ICE, making it a secondary suspect."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/solve/assembly/structural_traits.rs",
+        "reason": "The case prominently involves structural handling of `Sized` and auto-trait-like decomposition for a `dyn Fn()` trait object. This file contains built-in structural trait logic and includes `bug!` paths for unexpected type shapes, so erroneous recovered types from the static declaration could trip assumptions here."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 152.077,
+    "stage_times_sec": {
+      "checkout": 0.571,
+      "load_bug_context": 0.037,
+      "test_behavior_analysis": 5.377,
+      "test_failure_analysis": 15.55,
+      "load_file_candidates": 0.107,
+      "search_suspicious_files": 130.435
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 427621,
+      "output_tokens": 7268,
+      "total_tokens": 434889,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.377,
+          "input_tokens": 359,
+          "output_tokens": 303,
+          "total_tokens": 662
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.55,
+          "input_tokens": 2108,
+          "output_tokens": 811,
+          "total_tokens": 2919
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.189,
+          "input_tokens": 27899,
+          "output_tokens": 353,
+          "total_tokens": 28252
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.164,
+          "input_tokens": 27818,
+          "output_tokens": 370,
+          "total_tokens": 28188
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.42,
+          "input_tokens": 27405,
+          "output_tokens": 360,
+          "total_tokens": 27765
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.399,
+          "input_tokens": 27700,
+          "output_tokens": 315,
+          "total_tokens": 28015
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.312,
+          "input_tokens": 27622,
+          "output_tokens": 376,
+          "total_tokens": 27998
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.145,
+          "input_tokens": 27952,
+          "output_tokens": 397,
+          "total_tokens": 28349
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.711,
+          "input_tokens": 27794,
+          "output_tokens": 359,
+          "total_tokens": 28153
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.49,
+          "input_tokens": 27738,
+          "output_tokens": 392,
+          "total_tokens": 28130
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.439,
+          "input_tokens": 27836,
+          "output_tokens": 369,
+          "total_tokens": 28205
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.327,
+          "input_tokens": 27589,
+          "output_tokens": 361,
+          "total_tokens": 27950
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.911,
+          "input_tokens": 27803,
+          "output_tokens": 382,
+          "total_tokens": 28185
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.859,
+          "input_tokens": 27799,
+          "output_tokens": 315,
+          "total_tokens": 28114
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.258,
+          "input_tokens": 28053,
+          "output_tokens": 261,
+          "total_tokens": 28314
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.99,
+          "input_tokens": 27874,
+          "output_tokens": 358,
+          "total_tokens": 28232
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.635,
+          "input_tokens": 25001,
+          "output_tokens": 335,
+          "total_tokens": 25336
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.157,
+          "input_tokens": 11271,
+          "output_tokens": 851,
+          "total_tokens": 12122
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,336 @@
+{
+  "bug_id": "122861",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-03-22",
+    "resolved": "0ad927c0c07b65fc0dae37105e09c877c87c296a"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+    "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_hir_analysis/src/impl_wf_check.rs",
+    "compiler/rustc_trait_selection/src/solve/trait_goals.rs",
+    "compiler/rustc_trait_selection/src/traits/coherence.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a custom `Cow<'a, B, O = <B as ToOwned>::Owned>` enum using a default type parameter that depends on an associated type projection.",
+        "Uses `?Sized` and an explicit lifetime bound `'a` on `B`, exercising generic well-formedness for potentially unsized borrowed types.",
+        "Specializes `ToString` for `Cow<'_, str>`, relying on the standard blanket relationship between `ToString` and `Display` for string-like values.",
+        "Implements `Display` for `Cow<'a, B>` with a free lifetime `'a` that is not introduced in the impl header, testing lifetime name resolution in impls.",
+        "The `Display` impl omits trait method bodies, so rustc must validate trait implementation completeness and report missing required items.",
+        "Because `ToString` is implemented for `Cow<'_, str>`, rustc must check whether the corresponding `Display` requirement is satisfied despite the malformed impl.",
+        "Exercises trait solving around associated-type defaults, unsized parameters, and impl matching for a custom type named like `std::borrow::Cow`.",
+        "Main is empty; the reproducer isolates front-end compiler behavior in parsing, name resolution, trait checking, and well-formedness validation."
+      ],
+      "summary": "This reproducer defines a custom `Cow` with an associated-type default, then adds a `ToString` impl for `Cow<str>` and a malformed `Display` impl using an undeclared lifetime and no method body. It targets rustc’s handling of generic defaults, `?Sized`, lifetime resolution in impl headers, and trait checking/completeness, while keeping runtime behavior irrelevant."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in the coherence/specialization pipeline for `ToString`, triggered while the crate already contains malformed impls that should have been rejected cleanly. The reproducer combines several stressors: a user-defined `Cow` with a default type parameter using an associated type projection (`<B as ToOwned>::Owned`), an impl of `ToString` for `Cow<'_, str>`, and a malformed `Display` impl written as `impl<B: ?Sized> Display for Cow<'a, B> {}` where lifetime `'a` is not introduced. The query stack shows the crash happens in `specialization_graph_of` for `alloc::string::ToString` during coherence, even though earlier stages also report ordinary user errors (undeclared lifetime, missing trait items, etc.). This strongly suggests rustc continues building/inspecting the specialization graph or overlap/coherence data for `ToString` using an impl whose self type or predicates are not fully well-formed due to prior error recovery. The common pattern is an interaction between errorful impl headers, projection-based generic defaults, and the blanket `ToString`/`Display` relationship, causing the next-solver coherence path to operate on invalid or incompletely resolved generic arguments instead of bailing out gracefully.",
+      "possible_causes": [
+        "A defect in coherence/specialization graph construction for `ToString` that does not robustly handle impls with prior header errors (such as an undeclared lifetime in the self type), leading to an ICE instead of emitting only diagnostics.",
+        "A bug in the next-solver coherence path when evaluating the `ToString` blanket relation against `Display` for a self type containing a defaulted associated-type projection (`O = <B as ToOwned>::Owned`), especially after error recovery has produced an invalid generic substitution.",
+        "Missing validation or early bailout in trait selection/coherence when an impl's self type is ill-formed due to unresolved late/early-bound lifetime parameters, causing specialization graph logic to inspect malformed trait refs.",
+        "Improper handling of custom types structurally resembling `std::borrow::Cow` in trait coherence, where projection defaults plus `?Sized` parameters and `str` specialization expose an assumption violation in compiler code that expects fully normalized, well-formed self types.",
+        "An error-recovery bug in well-formedness/coherence integration: rustc reports normal E0261/E0392-style errors but still feeds the erroneous `Display` impl into `coherent_trait`/`specialization_graph_of`, where internal invariants about impl completeness or generic parameter ownership are violated."
+      ],
+      "evidence": [
+        "Query stack ends at `specialization_graph_of` for trait `alloc::string::ToString`, then `coherent_trait`, showing the ICE occurs during trait coherence/specialization rather than parsing or codegen.",
+        "The reproducer contains `impl ToString for Cow<'_, str> {}`; `ToString` is tightly coupled to `Display`, so coherence likely inspects related impl satisfaction/overlap involving the malformed `Display` impl.",
+        "The `Display` impl header uses `Cow<'a, B>` but does not declare `'a` in `impl<B: ?Sized>`, indicating an ill-formed impl self type that should be diagnosed but not crash the compiler.",
+        "The `Display` impl body is empty, so rustc must also check trait item completeness; this adds another ordinary error path, increasing the likelihood that coherence is processing partially erroneous impl data.",
+        "The custom `Cow` enum uses a default type parameter `O = <B as ToOwned>::Owned`, which introduces associated-type projection into generic argument formation and normalization during impl checking.",
+        "`B: ?Sized + 'a` and specialization on `str` mean the solver must reason about unsized types, lifetimes, and projections simultaneously, matching the kind of edge case that can break normalization/coherence invariants.",
+        "Compiler flags include `-Z next-solver=coherence`, directly implicating the newer coherence/trait-solving path as part of the failing code path.",
+        "The compiler output says there are ordinary user errors and warnings, yet it still panics; this is characteristic of a compiler bug in error recovery or in later passes assuming earlier-invalid impls were filtered out."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1764,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+        "reason": "The ICE happens in `specialization_graph_of` for `alloc::string::ToString`, so the code that incrementally inserts impls and reasons about overlap/specialization is the most direct suspect. This reproducer likely feeds an erroneous `ToString` impl/self type relationship into specialization graph construction after error recovery, and this file is where such malformed impl interactions can violate assumptions."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+        "reason": "The query stack shows `coherent_trait` immediately above `specialization_graph_of`. This module coordinates per-impl coherence checking and is responsible for skipping impls whose trait refs already contain errors; the bug may be that the malformed impl is not filtered out early enough before specialization/coherence processing continues."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The reproducer stresses impl-header well-formedness with an undeclared lifetime `'a`, `?Sized`, and a defaulted associated-type projection. Since `check_well_formed` appears in the query stack, a likely failure mode is that WF checking emits diagnostics but still leaves behind partially invalid impl/type information that later coherence code mishandles."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "A central malformed element is `impl<B: ?Sized> Display for Cow<'a, B> {}` where `'a` is never introduced. This file resolves lifetime references into bound variables, so a bug in resolving or recovering from that missing lifetime could produce an invalid trait ref/self type that later crashes coherence/specialization."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The undeclared lifetime error originates in late name resolution. If late resolution/recovery for the free lifetime in the impl header leaves an inconsistent HIR or error placeholder in the impl self type, downstream coherence over `ToString` could ICE instead of cleanly ignoring the impl."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/impl_wf_check.rs",
+        "reason": "This file performs early impl-specific WF validation intended to reject problematic impls before harder-to-diagnose failures in coherence/trait matching. The reproducer is exactly an impl-header error case, so missing early bailout here could allow malformed impl metadata into specialization graph construction."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/solve/trait_goals.rs",
+        "reason": "The crash only reproduces under `-Z next-solver=coherence`, which points at the newer coherence/trait-solving path. `ToString` coherence depends on evaluating impl candidates and equating trait refs, so next-solver candidate handling for an errorful impl/self type could be part of the failure."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+        "reason": "Overlap/coherence checking of trait impls is implemented here, and it is one of the main callers involved when determining whether impls can coexist or specialize. Given the malformed `Display` impl plus the `ToString` blanket relationship, overlap logic may be operating on incompletely well-formed headers."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The custom `Cow` uses a default type parameter `O = <B as ToOwned>::Owned`, so normalization of associated-type projections is part of forming/inspecting the impl self type. If normalization in the trait-selection/coherence path does not handle errorful impl headers robustly, it could contribute to the ICE."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "Associated-type projection `<B as ToOwned>::Owned` is a key stressor in the reproducer. Projection handling during trait matching/coherence may be leaving unresolved or malformed aliases in the impl subject, which could then break specialization graph insertion or overlap reasoning."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 215.321,
+    "stage_times_sec": {
+      "checkout": 0.291,
+      "load_bug_context": 0.174,
+      "test_behavior_analysis": 6.613,
+      "test_failure_analysis": 14.804,
+      "load_file_candidates": 52.524,
+      "search_suspicious_files": 140.916
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 30,
+      "input_tokens": 432771,
+      "output_tokens": 10234,
+      "total_tokens": 443005,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.612,
+          "input_tokens": 371,
+          "output_tokens": 344,
+          "total_tokens": 715
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.804,
+          "input_tokens": 2151,
+          "output_tokens": 873,
+          "total_tokens": 3024
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_bounds_rs",
+          "latency_sec": 4.747,
+          "input_tokens": 1251,
+          "output_tokens": 220,
+          "total_tokens": 1471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_bounds_rs_repair",
+          "latency_sec": 3.421,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_errors_rs",
+          "latency_sec": 4.017,
+          "input_tokens": 1247,
+          "output_tokens": 220,
+          "total_tokens": 1467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_errors_rs_repair",
+          "latency_sec": 3.495,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_generics_rs",
+          "latency_sec": 4.939,
+          "input_tokens": 1292,
+          "output_tokens": 220,
+          "total_tokens": 1512
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_generics_rs_repair",
+          "latency_sec": 3.011,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_lint_rs",
+          "latency_sec": 5.773,
+          "input_tokens": 1314,
+          "output_tokens": 220,
+          "total_tokens": 1534
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_lint_rs_repair",
+          "latency_sec": 5.686,
+          "input_tokens": 255,
+          "output_tokens": 206,
+          "total_tokens": 461
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_mod_rs",
+          "latency_sec": 5.431,
+          "input_tokens": 1399,
+          "output_tokens": 220,
+          "total_tokens": 1619
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_mod_rs_repair",
+          "latency_sec": 4.947,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_object_safety_rs",
+          "latency_sec": 3.528,
+          "input_tokens": 1240,
+          "output_tokens": 220,
+          "total_tokens": 1460
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_astconv_object_safety_rs_repair",
+          "latency_sec": 3.419,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.451,
+          "input_tokens": 28037,
+          "output_tokens": 370,
+          "total_tokens": 28407
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.458,
+          "input_tokens": 27905,
+          "output_tokens": 372,
+          "total_tokens": 28277
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.98,
+          "input_tokens": 27524,
+          "output_tokens": 330,
+          "total_tokens": 27854
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.653,
+          "input_tokens": 27716,
+          "output_tokens": 425,
+          "total_tokens": 28141
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.793,
+          "input_tokens": 27721,
+          "output_tokens": 425,
+          "total_tokens": 28146
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.618,
+          "input_tokens": 28105,
+          "output_tokens": 430,
+          "total_tokens": 28535
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.221,
+          "input_tokens": 27873,
+          "output_tokens": 293,
+          "total_tokens": 28166
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.904,
+          "input_tokens": 27866,
+          "output_tokens": 363,
+          "total_tokens": 28229
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.009,
+          "input_tokens": 27952,
+          "output_tokens": 341,
+          "total_tokens": 28293
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.409,
+          "input_tokens": 27774,
+          "output_tokens": 356,
+          "total_tokens": 28130
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.916,
+          "input_tokens": 28082,
+          "output_tokens": 429,
+          "total_tokens": 28511
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.208,
+          "input_tokens": 27919,
+          "output_tokens": 344,
+          "total_tokens": 28263
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.97,
+          "input_tokens": 28164,
+          "output_tokens": 285,
+          "total_tokens": 28449
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.185,
+          "input_tokens": 27895,
+          "output_tokens": 409,
+          "total_tokens": 28304
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.96,
+          "input_tokens": 20584,
+          "output_tokens": 388,
+          "total_tokens": 20972
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.15,
+          "input_tokens": 9859,
+          "output_tokens": 824,
+          "total_tokens": 10683
+        }
+      ]
+    }
+  }
+}

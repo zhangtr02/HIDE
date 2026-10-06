@@ -1,0 +1,236 @@
+{
+  "bug_id": "103771",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-10-27",
+    "resolved": "1898c34e923bad763e723c68dd9f23a09f9eb0fc"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_middle/src/middle/resolve_lifetime.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_middle/src/ty/fold.rs",
+    "compiler/rustc_middle/src/ty/flags.rs",
+    "compiler/rustc_hir_typeck/src/check.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `closure_lifetime_binder`, allowing closures to introduce explicit `for<'a>` higher-ranked lifetime binders.",
+        "In `main`, constructs a closure expression with an explicit higher-ranked lifetime parameter `'a` and unit return type.",
+        "Inside that closure, creates another closure using `for<'c>`, introducing a second explicit lifetime binder on a nested closure.",
+        "The inner closure takes an argument of type `&'a ()`, referencing the outer closure’s higher-ranked lifetime from within the nested closure.",
+        "This exercises parsing and AST/HIR lowering of explicit lifetime binders on closures, including nested binders.",
+        "It tests lifetime resolution across nested closure scopes, where an inner closure body mentions an outer higher-ranked lifetime.",
+        "The code relies on type checking of higher-ranked closure signatures without ever invoking the closures, stressing compile-time analysis only.",
+        "The standalone closure expressions are statement-position values, so the compiler must still fully validate their types and lifetime binders."
+      ],
+      "summary": "The reproducer is a compile-only test using the unstable explicit closure lifetime binder feature. It builds a closure quantified over `'a`, then nests another closure quantified over `'c` whose parameter type uses the outer `'a`. This targets compiler handling of nested higher-ranked closure lifetimes, name resolution, and type/lifetime checking during lowering and validation, even though neither closure is called."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on unstable explicit closure lifetime binders (`closure_lifetime_binder`) combined with nesting. The outer closure introduces a higher-ranked lifetime `for<'a>`, and the inner closure introduces its own binder `for<'c>` while referring to `&'a ()` from the outer closure signature. This strongly suggests a compiler defect in handling lifetime scope/binder levels for nested closures, not ordinary borrow checking. Because the program is compile-only and the crash occurs during compiler analysis rather than codegen/runtime, the likely issue is in AST/HIR lowering, late resolution, or type-checking of closure signatures with explicit binders. The unused inner binder `'c` plus cross-binder reference to outer `'a` is a key stressor: the compiler must correctly represent that `'a` is free with respect to the inner closure’s binder but bound by the outer closure. A bug here could cause incorrect de Bruijn index shifting, wrong lifetime ownership, or an internal assumption violation during analysis.",
+      "possible_causes": [
+        "Incorrect handling of nested explicit closure lifetime binders in HIR lowering or type representation, causing the outer bound lifetime `'a` to be mis-scoped when referenced inside the inner closure signature.",
+        "A defect in late lifetime resolution/name resolution for closures, where the compiler incorrectly resolves `'a` inside the nested `for<'c>` closure as belonging to the wrong binder level or as an invalid local lifetime.",
+        "Bug in type checking of higher-ranked closure signatures, especially de Bruijn index shifting when an inner closure introduces a new binder but refers to an outer higher-ranked lifetime.",
+        "Internal compiler logic may assume closure lifetime binders are self-contained and fail when an inner closure parameter type captures an outer explicit bound lifetime from another closure binder.",
+        "Improper validation of explicit closure binders with unused inner lifetime parameters (`'c`) combined with outer lifetime use (`'a`), triggering an ICE during analysis query execution."
+      ],
+      "evidence": [
+        "The reproducer specifically uses the unstable `closure_lifetime_binder` feature, so the defect is likely in compiler support for this feature rather than general Rust lifetime checking.",
+        "Two nested closures each introduce explicit `for<...>` binders, creating a nontrivial binder stack that is prone to de Bruijn/scope bookkeeping bugs.",
+        "The inner closure parameter type `&'a ()` refers to the outer closure’s higher-ranked lifetime, directly testing cross-scope lifetime resolution across nested closure binders.",
+        "The failure happens during compiler analysis (`queries::analysis` appears in the stack trace), consistent with lowering/resolution/type-checking defects rather than runtime or code generation issues.",
+        "Neither closure is invoked; therefore the crash is caused purely by compile-time validation of closure signatures and lifetime binders.",
+        "The inner binder `'c` is introduced but unused, which can expose compiler bugs in binder construction/validation paths for nested higher-ranked closures."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1518,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+        "reason": "Most directly matches the failure mode: nested explicit `for<'...>` closure binders with an inner closure referring to an outer bound lifetime stresses late-bound lifetime collection and De Bruijn index assignment. This file is responsible for classifying HIR lifetime uses and recording late-bound vars for binder-bearing nodes, so an ICE during analysis is highly consistent with a bug here."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The reproducer depends on correct late lifetime resolution across nested closure binder scopes. The inner closure uses `&'a ()` where `'a` is introduced by the outer closure binder, which is exactly the sort of cross-scope lifetime lookup this pass handles. A wrong resolution to the wrong binder level or scope would later explode in analysis."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+        "reason": "AST lowering must decide which lifetimes are locally bound versus free when lowering closure signatures. This reproducer specifically stresses nested binders where `'a` should be treated as free relative to the inner `for<'c>` binder but still bound by the outer closure. The file documentation even mentions `current_binders` tracking and special handling of collected lifetime uses, making it very suspicious."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "Closure expressions are lowered here, including expression-specific handling for closures and their binders. Since the bug is triggered by explicit closure lifetime binders on nested closures, incorrect HIR construction or binder attachment during expression lowering is a strong possibility."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "After lowering/resolution, closure-specific type checking builds the internal closure signature and must preserve the distinction between the outer binder `'a` and the inner binder `'c`. Nested higher-ranked closure signatures are a natural stress point for this file, especially around `bound_sig` versus `liberated_sig` handling."
+      },
+      {
+        "path": "compiler/rustc_middle/src/middle/resolve_lifetime.rs",
+        "reason": "This file defines the resolved lifetime representations, including `LateBound(DebruijnIndex, ...)` and `Free(...)`. The suspected bug involves mis-scoping or mis-shifting bound lifetimes across nested closure binders, so the core lifetime-resolution model used by analysis may be implicated."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "If parsing/lowering/resolution succeed, the next fragile area is higher-ranked inference. The reproducer creates nested `for<...>` binders and requires correct instantiation/shifting of bound regions when relating closure signatures. A bug in higher-ranked binder instantiation could surface during analysis."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/fold.rs",
+        "reason": "Binder-aware folding and De Bruijn index management are central to manipulating nested higher-ranked lifetimes. Since the reproducer’s core stressor is an outer bound lifetime referenced under an inner binder, incorrect folding/shifting logic here could easily cause an internal compiler failure."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/flags.rs",
+        "reason": "This file computes cached binder-depth metadata such as `outer_exclusive_binder`. Nested closure lifetime binders with cross-binder references are exactly the kind of input that can expose incorrect binder-depth bookkeeping and later invariant violations during analysis."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "General function/closure body checking happens here after the closure signature is prepared. Even though the issue is likely earlier or more specialized, this pass is where mismatches between the prepared signature and nested closure parameter types can trigger analysis-time crashes."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 139.38,
+    "stage_times_sec": {
+      "checkout": 4.346,
+      "load_bug_context": 0.045,
+      "test_behavior_analysis": 6.309,
+      "test_failure_analysis": 13.062,
+      "load_file_candidates": 0.099,
+      "search_suspicious_files": 115.52
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 364535,
+      "output_tokens": 5768,
+      "total_tokens": 370303,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.309,
+          "input_tokens": 364,
+          "output_tokens": 282,
+          "total_tokens": 646
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.062,
+          "input_tokens": 2258,
+          "output_tokens": 588,
+          "total_tokens": 2846
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 6.339,
+          "input_tokens": 27886,
+          "output_tokens": 313,
+          "total_tokens": 28199
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.037,
+          "input_tokens": 27417,
+          "output_tokens": 282,
+          "total_tokens": 27699
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.3,
+          "input_tokens": 27466,
+          "output_tokens": 319,
+          "total_tokens": 27785
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.333,
+          "input_tokens": 27657,
+          "output_tokens": 325,
+          "total_tokens": 27982
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.291,
+          "input_tokens": 27732,
+          "output_tokens": 362,
+          "total_tokens": 28094
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.192,
+          "input_tokens": 27812,
+          "output_tokens": 311,
+          "total_tokens": 28123
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.981,
+          "input_tokens": 27777,
+          "output_tokens": 314,
+          "total_tokens": 28091
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.537,
+          "input_tokens": 27709,
+          "output_tokens": 317,
+          "total_tokens": 28026
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.196,
+          "input_tokens": 27375,
+          "output_tokens": 306,
+          "total_tokens": 27681
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.367,
+          "input_tokens": 26417,
+          "output_tokens": 321,
+          "total_tokens": 26738
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.236,
+          "input_tokens": 27442,
+          "output_tokens": 310,
+          "total_tokens": 27752
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.162,
+          "input_tokens": 27853,
+          "output_tokens": 325,
+          "total_tokens": 28178
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.789,
+          "input_tokens": 18590,
+          "output_tokens": 314,
+          "total_tokens": 18904
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.735,
+          "input_tokens": 12780,
+          "output_tokens": 779,
+          "total_tokens": 13559
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,251 @@
+{
+  "bug_id": "119564",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-01-04",
+    "resolved": "139fb2214675fed8143a12f6287a3a1e6e2e866d"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_mir_transform/src/coroutine.rs",
+    "compiler/rustc_borrowck/src/universal_regions.rs",
+    "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+    "compiler/rustc_infer/src/infer/relate/nll.rs",
+    "compiler/rustc_middle/src/ty/sty.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `coroutines` and `coroutine_trait` features, testing unstable generator/coroutine syntax and trait-based typing in rustc.",
+        "Imports `std::ops::Coroutine` and returns `impl Coroutine<Invariant<'a>>`, exercising opaque return types with coroutine trait inference.",
+        "Defines `Invariant<'a>(fn(&'a ()) -> &'a ())`, using function-pointer input/output to make the lifetime parameter invariant.",
+        "Declares `fn x<'a, 'b>()`, introducing two unrelated lifetimes so the compiler must keep `'a` and `'b` distinct.",
+        "Builds a coroutine closure `|_: Invariant<'a>| { ... }`, so the resume argument is tied to lifetime `'a`.",
+        "Uses `yield ()`, making the yielded expression determine coroutine state-machine typing and the resume type expected after suspension.",
+        "Assigns `let a: Invariant<'b> = yield ();`, forcing the post-`yield` resume value to match `Invariant<'b>` despite the coroutine being declared with `Invariant<'a>`.",
+        "Exercises rustc lifetime checking around invariance, coroutine witness/state typing, and resume-type unification across opaque coroutine return types."
+      ],
+      "summary": "The reproducer creates a nightly coroutine whose declared resume argument uses `Invariant<'a>`, but after `yield` it treats the resumed value as `Invariant<'b>`. Because `Invariant` is lifetime-invariant, `'a` and `'b` cannot be interchanged. This stresses rustc’s coroutine lowering, opaque `impl Coroutine` typing, and lifetime/unification logic for resume values across suspension points."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is a lifetime-soundness case involving coroutines, opaque return types, and invariance. The reproducer declares a coroutine returned as `impl Coroutine<Invariant<'a>>`, which means the coroutine resume argument should be `Invariant<'a>`. Inside the coroutine body, however, the value produced by `yield ()` is assigned to `Invariant<'b>`. Since `Invariant<'x>` is explicitly made invariant in its lifetime parameter via `fn(&'x ()) -> &'x ()`, unrelated lifetimes `'a` and `'b` must not unify or be substituted for one another. The compiler nevertheless accepts the program with only warnings, so the failure pattern strongly suggests that rustc is incorrectly relating the coroutine resume type after a suspension point to the declared coroutine input type, likely erasing, generalizing, or mis-binding region constraints during coroutine lowering or trait/opaque-type inference. The bug is therefore likely in compiler logic that computes or checks coroutine signature/resume types, especially when `yield` is used inside a coroutine closure returned as an opaque `impl Coroutine<_>` and lifetimes appear only through invariant wrappers.",
+      "possible_causes": [
+        "A defect in coroutine type checking/lowering where the resume type inferred from `yield` is not properly unified with the declared `Coroutine<Invariant<'a>>` resume argument, allowing `Invariant<'b>` to be accepted unsoundly.",
+        "A region inference bug during coroutine desugaring/state-machine construction that loses the distinction between late-bound or free lifetimes `'a` and `'b` across suspension points.",
+        "Incorrect variance handling in the compiler when computing obligations for coroutine resume values, treating the invariant wrapper `Invariant<'_>` as if its lifetime were substitutable or bivariant.",
+        "A bug in opaque return type (`impl Trait`) inference for `impl Coroutine<...>` that fails to propagate lifetime constraints from the hidden coroutine type back to the function signature.",
+        "An issue in trait obligation normalization/selection for `std::ops::Coroutine` where the coroutine closure's actual signature is accepted without enforcing exact equality of the resume argument type under invariance.",
+        "A borrow checker / MIR type-checking defect specific to generators-coroutines where the type of `yield` expressions is checked too loosely after transformation into the internal state machine."
+      ],
+      "evidence": [
+        "The code explicitly defines `Invariant<'a>(fn(&'a ()) -> &'a ())`, a standard pattern to force lifetime invariance; this means `'a` and `'b` cannot be interchanged.",
+        "The function signature returns `impl Coroutine<Invariant<'a>>`, so the coroutine's resume argument is declared in terms of `'a`.",
+        "Inside the coroutine body, `let a: Invariant<'b> = yield ();` forces the post-`yield` resume value to have type `Invariant<'b>`, conflicting with the declared `Invariant<'a>`.",
+        "The two lifetimes are introduced independently in `fn x<'a, 'b>()`, so there is no source-level constraint equating `'a` and `'b`.",
+        "The compiler output shows successful compilation with only unused/dead-code warnings and no lifetime/type error, indicating a missed rejection rather than user-code misuse.",
+        "The reproducer specifically stresses `yield`, coroutine closure typing, and `impl Coroutine<_>` together, pointing to coroutine lowering/inference rather than ordinary function lifetime checking."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1732,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "Most suspicious because the bug is centered on typing a coroutine closure returned as `impl Coroutine<Invariant<'a>>`. This file derives closure/coroutine signatures, including the liberated/body-local signature, so a mismatch between the declared resume argument `Invariant<'a>` and the post-`yield` type `Invariant<'b>` could be introduced or missed here."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "`yield` is type-checked here, and the reproducer specifically relies on the type of `yield ()` being the coroutine resume type. If rustc accepts `let a: Invariant<'b> = yield ();` inside a coroutine whose resume type should be `Invariant<'a>`, this file is a prime place where that relation may be checked too loosely."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "reason": "Coroutine lowering rewrites the body into a state machine and computes yield/resume typing conventions. A bug here could lose or generalize lifetime constraints across suspension points, especially for invariant lifetimes appearing only through the resume type."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/universal_regions.rs",
+        "reason": "The failure pattern strongly suggests `'a` and `'b` are not kept distinct across coroutine processing. This file constructs the universal/free region model for MIR bodies, including liberated input/output/yield/resume types, so incorrect handling of coroutine resume regions could explain the accepted program."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+        "reason": "If MIR borrowck later compares the coroutine’s expected resume type against the type flowing from `yield`, invariant relation logic should reject `Invariant<'a>` vs `Invariant<'b>`. A bug in how MIR type relations emit region constraints could allow this to pass."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/nll.rs",
+        "reason": "This is the core NLL-era type relation engine for higher-ranked regions and variance-sensitive relations. Since the reproducer depends on invariant lifetime mismatch being erroneously accepted, a defect in region/type relating under binders or universes is plausible here."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/sty.rs",
+        "reason": "This file defines coroutine type conventions via `CoroutineArgsExt`, including resume/yield/return components. If the compiler is extracting or interpreting the coroutine resume type incorrectly for opaque `impl Coroutine<_>` cases, the bug may stem from these core coroutine type helpers."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "The function returns an opaque `impl Coroutine<Invariant<'a>>`, so hidden-type inference must propagate the lifetime constraint from the concrete coroutine to the opaque type. If opaque inference fails to preserve the invariant `'a` requirement, it could allow the hidden coroutine to effectively use `'b`."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Opaque type remapping is another likely source because this reproducer mixes free lifetimes with `impl Trait`. Incorrect remapping/capture of `'a` and `'b` when constructing the opaque return type could erase the distinction needed to reject the code."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "The bug involves two unrelated function lifetimes used inside a coroutine/opaque-return context. If bound/free lifetime resolution or capture for closures/opaque types is wrong here, the compiler may incorrectly treat `'a` and `'b` as interchangeable or fail to record the necessary distinction."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 179.987,
+    "stage_times_sec": {
+      "checkout": 3.984,
+      "load_bug_context": 0.076,
+      "test_behavior_analysis": 7.224,
+      "test_failure_analysis": 14.679,
+      "load_file_candidates": 0.327,
+      "search_suspicious_files": 153.697
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 401664,
+      "output_tokens": 6752,
+      "total_tokens": 408416,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.224,
+          "input_tokens": 414,
+          "output_tokens": 336,
+          "total_tokens": 750
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.679,
+          "input_tokens": 1226,
+          "output_tokens": 686,
+          "total_tokens": 1912
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 11.039,
+          "input_tokens": 26881,
+          "output_tokens": 417,
+          "total_tokens": 27298
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 11.176,
+          "input_tokens": 26846,
+          "output_tokens": 339,
+          "total_tokens": 27185
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.769,
+          "input_tokens": 26382,
+          "output_tokens": 307,
+          "total_tokens": 26689
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.587,
+          "input_tokens": 26638,
+          "output_tokens": 351,
+          "total_tokens": 26989
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.17,
+          "input_tokens": 26585,
+          "output_tokens": 333,
+          "total_tokens": 26918
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.709,
+          "input_tokens": 27003,
+          "output_tokens": 344,
+          "total_tokens": 27347
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.738,
+          "input_tokens": 26737,
+          "output_tokens": 358,
+          "total_tokens": 27095
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.325,
+          "input_tokens": 26769,
+          "output_tokens": 316,
+          "total_tokens": 27085
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.9,
+          "input_tokens": 26859,
+          "output_tokens": 334,
+          "total_tokens": 27193
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.28,
+          "input_tokens": 26638,
+          "output_tokens": 321,
+          "total_tokens": 26959
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 10.032,
+          "input_tokens": 27001,
+          "output_tokens": 315,
+          "total_tokens": 27316
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.998,
+          "input_tokens": 26913,
+          "output_tokens": 157,
+          "total_tokens": 27070
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.52,
+          "input_tokens": 26996,
+          "output_tokens": 357,
+          "total_tokens": 27353
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 12.589,
+          "input_tokens": 26748,
+          "output_tokens": 400,
+          "total_tokens": 27148
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.414,
+          "input_tokens": 12813,
+          "output_tokens": 316,
+          "total_tokens": 13129
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 15.422,
+          "input_tokens": 12215,
+          "output_tokens": 765,
+          "total_tokens": 12980
+        }
+      ]
+    }
+  }
+}

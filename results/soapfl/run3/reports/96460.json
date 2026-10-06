@@ -1,0 +1,229 @@
+{
+  "bug_id": "96460",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-04-26",
+    "resolved": "055bf4ccd521c2c2185166c86951be7be145727c"
+  },
+  "final_top10": [
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_ast_lowering/src/path.rs",
+    "compiler/rustc_typeck/src/collect/type_of.rs",
+    "compiler/rustc_typeck/src/astconv/mod.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_typeck/src/collect/item_bounds.rs",
+    "compiler/rustc_ast_lowering/src/lib.rs",
+    "compiler/rustc_resolve/src/def_collector.rs",
+    "compiler/rustc_typeck/src/check/wfcheck.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a free function returning `PhantomData<impl Sized>`, using return-position `impl Trait` (opaque types) in a function signature.",
+        "Uses `PhantomData` to carry a type parameter only at compile time, so no runtime value of the hidden type exists.",
+        "Constrains the opaque return type only with the auto-bound `Sized`, giving the compiler minimal information about the hidden concrete type.",
+        "Returns the unit-like `PhantomData` constructor, requiring type inference to match it with `PhantomData<opaque-type>`.",
+        "Exercises interaction between RPIT opaque type creation and generic type constructors containing the opaque type as an argument.",
+        "Checks whether the compiler properly accepts or rejects `impl Trait` nested inside another return type, not as the top-level returned type.",
+        "Uses `core::marker::PhantomData` directly, touching core-library generic marker semantics rather than standard runtime behavior.",
+        "Main is empty, so the reproducer isolates type checking, opaque type inference, and signature lowering during compilation."
+      ],
+      "summary": "This reproducer is compile-time only. It defines a function whose return type is `PhantomData<impl Sized>`, combining return-position `impl Trait` with a generic marker type. The code isolates how rustc lowers, infers, and validates an opaque type nested inside `PhantomData`, with almost no trait information beyond `Sized`."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer is entirely compile-time and centers on return-position `impl Trait` used *inside* a generic ADT (`PhantomData<impl Sized>`) rather than as the top-level function return. The common pattern across the code and behavior is that the hidden opaque type has almost no semantic constraints (`impl Sized` only), no runtime manifestation, and is inferred only through the constructor `PhantomData`. That means the exercised compiler logic is not runtime codegen but type lowering, opaque type creation, well-formedness checking, and validation of where RPIT is permitted. A likely compiler bug is that rustc incorrectly accepts a nested `impl Trait` in function return position when it should be rejected or specially handled, due to incomplete validation of opaque types appearing as generic arguments inside another returned type. Another likely defect area is type inference / opaque-type definition collection: the compiler may be treating `PhantomData<impl Sized>` as if the inner opaque were a normal top-level RPIT, or it may be failing to enforce the syntactic/semantic restriction during HIR lowering or type checking. Since the build succeeds with only a dead-code warning, the failure pattern suggests a missing compiler-side check rather than an ICE or miscodegen.",
+      "possible_causes": [
+        "Missing or incorrect validation in rustc for return-position `impl Trait` nested inside generic type arguments (e.g. accepting `PhantomData<impl Sized>` when RPIT should only be allowed in supported positions).",
+        "Bug in HIR lowering / AST validation of opaque types, where `impl Trait` inside an ADT return type is incorrectly lowered into an opaque type definition instead of being rejected as an invalid placement.",
+        "Type-checking defect in opaque type collection/inference that allows a hidden type to be inferred through `PhantomData` with only the trivial `Sized` bound, bypassing intended restrictions on RPIT usage.",
+        "Well-formedness checking gap for generic return types containing opaque types, especially for zero-sized marker types like `PhantomData` that carry no runtime witness of the hidden concrete type.",
+        "Incorrect feature-gating or semantic-position checking for `impl Trait`, causing the compiler to treat nested usage in a function return signature as equivalent to ordinary top-level return-position `impl Trait`."
+      ],
+      "evidence": [
+        "The function signature uses `fn weird() -> PhantomData<impl Sized>`, so `impl Trait` appears nested as a generic argument rather than as the whole return type.",
+        "The return expression is just `PhantomData`, meaning the hidden type is never materialized at runtime and must be resolved purely by compiler type machinery.",
+        "The only bound on the opaque type is `Sized`, which provides almost no information; this stresses acceptance/validation logic more than meaningful trait solving.",
+        "The reproducer explicitly targets interaction between RPIT opaque type creation and a generic wrapper type (`PhantomData`).",
+        "Compilation succeeds on nightly-2022-04-26 with return code 0 and only a dead-code warning, indicating a likely missing rejection/check in compiler production code rather than a reproducer-side mistake.",
+        "`main` is empty, so the observed behavior isolates front-end phases such as parsing, lowering, type checking, and opaque type validation."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1416,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "Most suspicious because this reproducer hinges on whether nested `impl Trait` in a function return type (`PhantomData<impl Sized>`) is rejected at AST validation time. This pass explicitly tracks `impl Trait` position/context and is a natural place for a missing placement check."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "Lowering of paths/types is directly involved because the opaque `impl Trait` appears as a generic argument inside the returned path `PhantomData<...>`. The file documentation specifically mentions enforcing `impl Trait` placement rules in path segments, which matches a likely bug where nested usage is wrongly accepted."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect/type_of.rs",
+        "reason": "If the invalid syntax survives early passes, type collection may incorrectly create/accept an opaque type definition for the nested RPIT. This file is responsible for declared type computation and diagnostics around problematic opaque type definitions, fitting the observed missing rejection."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/astconv/mod.rs",
+        "reason": "Converting HIR type syntax into semantic `ty` forms is central when handling `PhantomData<impl Sized>`. A bug here could treat the inner `impl Trait` as a normal opaque type in an unsupported position instead of rejecting it."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "The reproducer stresses opaque-type inference with almost no constraints and only a `PhantomData` constructor witness. If the compiler incorrectly allows defining or inferring such an opaque type from this nested position, this inference support code is a plausible source."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "Once an opaque type is instantiated from the nested `impl Trait`, this code remaps and validates hidden types against opaque declarations. A missing legality check here could allow an opaque definition arising from an unsupported RPIT position to pass."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect/item_bounds.rs",
+        "reason": "Opaque types receive implicit bounds here, including `Sized` behavior. Since the reproducer uses only `impl Sized`, a bug in how bounds are computed for opaque types in this nested context could help the invalid construct slip through."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/lib.rs",
+        "reason": "As the central AST-to-HIR lowering context, this file is broadly suspicious if the bug comes from incorrectly creating HIR opaque items or carrying the wrong `ImplTraitContext` while lowering nested `impl Trait` occurrences."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/def_collector.rs",
+        "reason": "Definition collection creates defs for `impl Trait`/opaque items and tracks `ImplTraitContext`. If nested RPIT inside `PhantomData` is incorrectly assigned a valid opaque definition context, this file could be responsible."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "A secondary possibility is a well-formedness gap: even if parsing/lowering accepts the form, WF checking should potentially reject unsupported opaque-type placement in function signatures. Less direct than validation/lowering, but still relevant to the missing-check symptom."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 140.493,
+    "stage_times_sec": {
+      "checkout": 0.554,
+      "load_bug_context": 0.061,
+      "test_behavior_analysis": 6.337,
+      "test_failure_analysis": 12.873,
+      "load_file_candidates": 0.084,
+      "search_suspicious_files": 120.584
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 322266,
+      "output_tokens": 5415,
+      "total_tokens": 327681,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.337,
+          "input_tokens": 348,
+          "output_tokens": 287,
+          "total_tokens": 635
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.873,
+          "input_tokens": 949,
+          "output_tokens": 658,
+          "total_tokens": 1607
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.966,
+          "input_tokens": 26618,
+          "output_tokens": 327,
+          "total_tokens": 26945
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.899,
+          "input_tokens": 26211,
+          "output_tokens": 216,
+          "total_tokens": 26427
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.546,
+          "input_tokens": 26371,
+          "output_tokens": 352,
+          "total_tokens": 26723
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.096,
+          "input_tokens": 26385,
+          "output_tokens": 332,
+          "total_tokens": 26717
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.609,
+          "input_tokens": 26404,
+          "output_tokens": 346,
+          "total_tokens": 26750
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.315,
+          "input_tokens": 26417,
+          "output_tokens": 281,
+          "total_tokens": 26698
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.473,
+          "input_tokens": 26484,
+          "output_tokens": 337,
+          "total_tokens": 26821
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.101,
+          "input_tokens": 25980,
+          "output_tokens": 328,
+          "total_tokens": 26308
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.235,
+          "input_tokens": 25822,
+          "output_tokens": 288,
+          "total_tokens": 26110
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.48,
+          "input_tokens": 26269,
+          "output_tokens": 266,
+          "total_tokens": 26535
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 10.153,
+          "input_tokens": 26043,
+          "output_tokens": 350,
+          "total_tokens": 26393
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.201,
+          "input_tokens": 21645,
+          "output_tokens": 370,
+          "total_tokens": 22015
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.485,
+          "input_tokens": 10320,
+          "output_tokens": 677,
+          "total_tokens": 10997
+        }
+      ]
+    }
+  }
+}

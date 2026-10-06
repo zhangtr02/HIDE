@@ -1,0 +1,250 @@
+{
+  "bug_id": "117986",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-15",
+    "resolved": "dd430bc8c22f57992ec1457a87437d14283fdd65"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/coherence.rs",
+    "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+    "compiler/rustc_middle/src/traits/specialization_graph.rs",
+    "compiler/rustc_infer/src/infer/region_constraints/leak_check.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+    "compiler/rustc_middle/src/ty/fast_reject.rs",
+    "compiler/rustc_middle/src/ty/relate.rs",
+    "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+    "compiler/rustc_infer/src/infer/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly features `negative_impls` and `with_negative_coherence` to allow explicit negative trait impls and coherence reasoning that considers them.",
+        "Forbids `coherence_leak_check`, forcing the compiler to rely on stricter trait coherence/orphan overlap handling during impl checking.",
+        "Defines marker trait `Marker` and a blanket negative impl `!Marker for &'a T`, including unsized `T` via `?Sized`.",
+        "Defines trait `FnMarker` used only to test overlapping impl selection on function pointer types.",
+        "Adds `impl<T: ?Sized + Marker> FnMarker for fn(T) {}`, making function pointers over marker-qualified argument types implement `FnMarker`.",
+        "Adds `impl<T: ?Sized> FnMarker for fn(&T) {}`, covering function pointers whose argument is a shared reference to any possibly-unsized type.",
+        "Exercises coherence overlap between `fn(T)` and `fn(&T)`, where substituting `T = &U` would overlap unless the negative impl proves `&U: !Marker`.",
+        "Tests compiler handling of negative reasoning in trait coherence for function-pointer impls, a potential source of rustc overlap-check bugs."
+      ],
+      "summary": "The reproducer is a minimal coherence test. It uses nightly negative impls plus disabled leak-check fallback to make rustc decide whether two `FnMarker` impls for function pointer types overlap. The key proof is the blanket negative impl `&T: !Marker`, which should prevent `fn(&U)` from also matching the `fn(T)` impl requiring `T: Marker`."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure is centered on trait coherence/overlap checking with negative reasoning. The reproducer creates two impls of `FnMarker` for function pointer types: one generic over `fn(T)` but requiring `T: Marker`, and one for `fn(&T)` for all `T`. These only appear to overlap if the compiler considers a substitution like `T = &U`, yielding `fn(&U)` for both impls. However, the crate also provides an explicit blanket negative impl `impl<'a, T: ?Sized> !Marker for &'a T {}`, which should prove that any shared reference type can never satisfy `Marker`. With `with_negative_coherence` enabled and `coherence_leak_check` forbidden, rustc should use that negative impl during overlap checking rather than falling back to the old leak-check behavior. The emitted conflict error therefore suggests the coherence algorithm is not correctly incorporating explicit negative impl information when comparing these function-pointer impl headers, especially under type substitution involving references and `?Sized` parameters. The common pattern is: overlap check between structurally related impls (`fn(T)` vs `fn(&T)`), where disjointness depends on proving a trait obligation impossible via a blanket negative impl. The likely bug is in the compiler's coherence overlap/disjointness logic, not in the reproducer.",
+      "possible_causes": [
+        "The coherence overlap checker fails to use explicit negative impl evidence (`&T: !Marker`) to prove that the candidate overlap substitution `T = &U` is impossible.",
+        "Negative coherence reasoning under `with_negative_coherence` is incomplete for function pointer self types, so `fn(T)` and `fn(&T)` are treated as overlapping even when the trait bound on the first impl is refuted by a negative impl.",
+        "The impl-intersection/disjointness code likely mishandles normalization or unification for reference types inside function pointer signatures, losing the fact that the overlapping witness requires `&U: Marker` which is explicitly negated.",
+        "The compiler may still be routing this case through legacy coherence leak-check compatibility logic or a conservative fallback path, despite `#![forbid(coherence_leak_check)]`, causing a false-positive overlap error instead of accepting the impls as disjoint.",
+        "Blanket negative impl handling for `?Sized` referenced types may not be propagated correctly through trait obligation evaluation during coherence, so the solver cannot establish disjointness for all `&T` cases."
+      ],
+      "evidence": [
+        "Compiler error reports a conflict specifically between `impl<T: ?Sized + Marker> FnMarker for fn(T)` and `impl<T: ?Sized> FnMarker for fn(&T)`.",
+        "The reproducer includes an explicit blanket negative impl `impl<'a, T: ?Sized> !Marker for &'a T {}`, which should refute the only apparent overlap witness (`T = &U`).",
+        "Nightly features `negative_impls` and `with_negative_coherence` are enabled, indicating the test expects coherence to consider explicit negative impls.",
+        "`#![forbid(coherence_leak_check)]` turns the previous warning/fallback behavior into a hard error, showing the conflict arises from the compiler's coherence checking path rather than from codegen or parsing.",
+        "The compiler output itself says this pattern was previously accepted and changed due to a bug fix/regression area tied to coherence (`issue #56105`), reinforcing that the defect is in overlap-check logic.",
+        "Both impls are on function pointer types, so the disjointness decision depends on correctly reasoning about type substitution through `fn(...)` signatures and trait bounds."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1699,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+        "reason": "Most directly responsible for impl overlap checking. The reproducer fails in coherence by incorrectly treating `impl FnMarker for fn(T) where T: Marker` and `impl FnMarker for fn(&T)` as overlapping despite the explicit negative impl `!Marker for &T`. This file contains `overlapping_impls` and the negative/ambiguity reasoning used to prove disjointness."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+        "reason": "Builds the impl graph and invokes overlap logic when inserting impls. False conflict diagnostics between sibling impls commonly surface through this path, especially for future-compat / overlap classification during coherence."
+      },
+      {
+        "path": "compiler/rustc_middle/src/traits/specialization_graph.rs",
+        "reason": "Defines `OverlapMode` and the specialization graph structures consumed by coherence. Since the bug involves changed coherence behavior and negative-coherence mode, this shared overlap-policy layer is a plausible source of incorrect mode handling."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/region_constraints/leak_check.rs",
+        "reason": "The test explicitly forbids `coherence_leak_check`, and the diagnostic mentions phased-out leak-check behavior. If rustc is still taking a conservative or legacy leak-check path instead of using explicit negative impl evidence, this file is a strong suspect."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Coherence overlap checking relies on trait selection/evaluation to determine whether obligations like `&U: Marker` are satisfiable or refutable. A bug here could prevent the solver from exploiting the explicit negative impl during overlap disjointness checks."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+        "reason": "Negative impls and polarity-sensitive candidate collection are assembled here. If negative candidates are not considered correctly for coherence-related obligation evaluation, the overlap checker may fail to prove `&T: !Marker`."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/fast_reject.rs",
+        "reason": "Overlap checking starts with fast rejection on impl headers. The self types here are function pointers `fn(T)` vs `fn(&T)`, so an overly conservative or buggy fast-reject interaction around function signatures and references could misclassify the pair and force/taint later overlap handling."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/relate.rs",
+        "reason": "The overlap witness requires structurally relating function-pointer argument types under substitution (`T = &U`). If relation logic for `Ty`/impl subjects is mishandling function signatures or references, it could contribute to the false overlap result."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+        "reason": "This is the entry point for coherence checking in HIR analysis and coordinates impl validation. While likely not the deepest bug, it is part of the exact pipeline producing the conflict and may mishandle which overlap mode or checks are invoked."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/mod.rs",
+        "reason": "General inference plumbing used by coherence and trait evaluation. Since the failure depends on proving an obligation impossible via explicit negative impls under substitution, an inference-context bug could underlie the missed disjointness proof."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 196.891,
+    "stage_times_sec": {
+      "checkout": 3.423,
+      "load_bug_context": 0.083,
+      "test_behavior_analysis": 6.556,
+      "test_failure_analysis": 17.37,
+      "load_file_candidates": 0.112,
+      "search_suspicious_files": 169.347
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 392242,
+      "output_tokens": 6546,
+      "total_tokens": 398788,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.556,
+          "input_tokens": 408,
+          "output_tokens": 329,
+          "total_tokens": 737
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 17.37,
+          "input_tokens": 1196,
+          "output_tokens": 734,
+          "total_tokens": 1930
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.282,
+          "input_tokens": 26933,
+          "output_tokens": 292,
+          "total_tokens": 27225
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.541,
+          "input_tokens": 26812,
+          "output_tokens": 315,
+          "total_tokens": 27127
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 11.31,
+          "input_tokens": 26454,
+          "output_tokens": 264,
+          "total_tokens": 26718
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 13.133,
+          "input_tokens": 26671,
+          "output_tokens": 354,
+          "total_tokens": 27025
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.496,
+          "input_tokens": 26606,
+          "output_tokens": 281,
+          "total_tokens": 26887
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 11.635,
+          "input_tokens": 27016,
+          "output_tokens": 314,
+          "total_tokens": 27330
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 10.329,
+          "input_tokens": 26813,
+          "output_tokens": 376,
+          "total_tokens": 27189
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 14.708,
+          "input_tokens": 26808,
+          "output_tokens": 392,
+          "total_tokens": 27200
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 10.67,
+          "input_tokens": 26817,
+          "output_tokens": 377,
+          "total_tokens": 27194
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 13.056,
+          "input_tokens": 26663,
+          "output_tokens": 331,
+          "total_tokens": 26994
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 10.193,
+          "input_tokens": 27011,
+          "output_tokens": 328,
+          "total_tokens": 27339
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.284,
+          "input_tokens": 26951,
+          "output_tokens": 224,
+          "total_tokens": 27175
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.379,
+          "input_tokens": 26981,
+          "output_tokens": 267,
+          "total_tokens": 27248
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 11.31,
+          "input_tokens": 26802,
+          "output_tokens": 354,
+          "total_tokens": 27156
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.251,
+          "input_tokens": 5946,
+          "output_tokens": 323,
+          "total_tokens": 6269
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.74,
+          "input_tokens": 9354,
+          "output_tokens": 691,
+          "total_tokens": 10045
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,243 @@
+{
+  "bug_id": "113794",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-07-16",
+    "resolved": "4c8bb79d9f565115637cc6da739f8389e79f3a29"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+    "compiler/rustc_ty_utils/src/assoc.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_ty_utils/src/implied_bounds.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+    "compiler/rustc_ast_lowering/src/item.rs",
+    "compiler/rustc_resolve/src/late.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `return_position_impl_trait_in_trait`, allowing trait methods to return `impl Trait` directly in the trait definition.",
+        "Defines trait `Foo` with an associated method `bar` returning an opaque type constrained as `Sized + 'a`.",
+        "Uses a higher-ranked lifetime parameter `'other` with an outlives relation `'other: 'a`, stressing lifetime checking in trait method signatures.",
+        "References lifetime `'a` in the method bounds and return type without declaring `'a`, exercising name resolution and lifetime diagnostics.",
+        "Provides a default method body `{}` for a function returning `impl Sized + 'a`, forcing type inference for an empty block return.",
+        "Tests compiler handling of RPITIT opaque return types combined with explicit lifetime bounds on the hidden type.",
+        "Checks trait item parsing, lowering, and validation when generic lifetimes and opaque return types appear together in an invalid signature.",
+        "Includes an empty `main`, so all interesting behavior occurs during compile-time analysis rather than runtime execution."
+      ],
+      "summary": "This reproducer is a compile-fail trait-definition test on nightly Rust. It combines RPITIT (`impl Trait` in trait methods), generic lifetime outlives constraints, and an undeclared lifetime `'a` used in both the method bound and opaque return type. The default empty body further forces return-type inference. The bug is likely in compiler validation or diagnostics while parsing, resolving, and lowering this invalid trait method signature."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on an invalid trait method signature that uses return-position `impl Trait in trait` (RPITIT) together with lifetime bounds, while referencing an undeclared lifetime `'a`. The query stack shows the ICE happens during `check_mod_item_types`, so the compiler gets past parsing and into item type checking/analysis. The reproducer stresses several interacting subsystems: lifetime name resolution, generic bounds (`'other: 'a`), opaque type lowering for RPITIT, and validation of a default trait method body whose empty block must be checked against an opaque return type. The common theme is that an earlier user error (`'a` undeclared, consistent with E0261) is not handled robustly before RPITIT/lifetime processing continues. This strongly suggests the compiler is constructing or validating the RPITIT opaque type/lifetime environment under the assumption that all referenced late/early-bound lifetimes were successfully resolved, and then panics instead of gracefully emitting only diagnostics.",
+      "possible_causes": [
+        "Bug in RPITIT lowering/type-checking for trait methods where lifetime bounds on the opaque return type reference an unresolved lifetime, causing the compiler to proceed with invalid generic/lifetime data instead of bailing out after emitting E0261.",
+        "Defect in lifetime resolution or generic parameter collection for trait items: the undeclared lifetime `'a` used both in the outlives clause (`'other: 'a`) and opaque return bound (`impl Sized + 'a`) may leave missing `Region`/generic parameter entries that later RPITIT code assumes exist.",
+        "Insufficient error recovery in `check_mod_item_types` when validating trait method signatures with default bodies and opaque return types, leading to an ICE after prior lifetime-resolution errors have already been recorded.",
+        "Possible mismatch between HIR lowering and type validation for RPITIT in traits: the trait method's synthetic opaque type may capture lifetimes incorrectly or attempt to encode bounds involving undeclared lifetimes, triggering an internal compiler invariant violation.",
+        "Defect in trait item well-formedness checking for higher-ranked lifetime bounds combined with RPITIT, where invalid outlives constraints involving undeclared lifetimes are not rejected early enough before opaque type inference/validation runs."
+      ],
+      "evidence": [
+        "The reproducer explicitly uses undeclared lifetime `'a` in both `fn bar<'other: 'a>() -> impl Sized + 'a {}` and the compiler references `rustc --explain E0261`, which is the undeclared lifetime/name error.",
+        "Nightly feature `return_position_impl_trait_in_trait` is enabled, so the failing path likely involves experimental RPITIT handling rather than ordinary trait method checking.",
+        "The query stack ends at `check_mod_item_types` / `analysis`, indicating the ICE occurs during semantic type checking of items, not parsing or code generation.",
+        "The method is inside a trait and has a default body, forcing the compiler to both validate the trait signature and reason about the returned opaque type from an empty block, increasing the chance of faulty interaction in RPITIT validation.",
+        "The test behavior specifically combines higher-ranked lifetime syntax, outlives constraints, opaque return types, and an invalid signature; these are all consistent with a bug in compiler validation/error recovery for trait-item lifetimes and RPITIT.",
+        "The compiler reports 'due to 2 previous errors' and still ICEs, which is a strong indicator that production code failed to recover correctly from earlier user-facing diagnostics and later hit an internal assumption violation."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1642,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "Most suspicious because the reproducer hinges on an undeclared lifetime `'a` inside a trait method signature with RPITIT. This file resolves lifetime references into bound-variable representations and records captured lifetimes for opaque types, so a bad interaction between unresolved lifetimes and RPITIT lifetime capture could easily ICE during item type checking instead of recovering after E0261."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "This file has explicit special handling for RPITIT generics synthesis. The bug likely involves constructing the synthetic opaque type generics for a trait method whose lifetime environment is invalid (`'a` undeclared). If RPITIT generics are built assuming all lifetimes resolved correctly, later analysis can panic in `check_mod_item_types`."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/assoc.rs",
+        "reason": "RPITIT in traits creates synthetic associated types, and this file is responsible for registering/querying those associated items. An invalid trait method signature with default body could trigger faulty synthetic associated type creation or lookup when undeclared lifetime bounds are present."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "The reproducer specifically stresses opaque return types with lifetime bounds. This file remaps generics/regions for opaque types, and a missing or erroneous lifetime like `'a` could violate assumptions in reverse mapping when building the RPITIT opaque type."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/implied_bounds.rs",
+        "reason": "The query stack reaches item type analysis, and this file computes assumed well-formed types including a dedicated RPITIT path. The invalid opaque return type with lifetime bounds may cause implied-WF collection to process malformed signature data and ICE instead of stopping after prior errors."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "Well-formedness checking is a natural place for this invalid signature to be analyzed. Since the trait method combines undeclared lifetime use, outlives constraints, and RPITIT, deficient error recovery in WF checking could explain an ICE after diagnostics were already emitted."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "If the compiler gets as far as generating WF obligations for the opaque return or lifetime bounds, this logic may be handed malformed generic arguments or outlives predicates involving an unresolved lifetime, leading to an internal assumption failure."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+        "reason": "Although the ICE occurs later, this file is involved in collecting actually used lifetimes during lowering. RPITIT lowering depends on accurate lifetime capture, and an undeclared lifetime in the returned `impl Trait` bounds may leave inconsistent lowered data that later phases mishandle."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "Item lowering is a plausible upstream source because the bug is attached to a trait associated function using RPITIT with a default body. If lowering of the trait method or its synthetic opaque type recovers incorrectly from the missing lifetime, later `check_mod_item_types` could crash on malformed HIR."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The user-facing error is E0261 for undeclared lifetime `'a`, so late resolution definitely runs on this code. While resolution itself may emit the right error, a failure to mark the lifetime use as erroneous in all relevant places for RPITIT/trait methods could propagate inconsistent state into HIR analysis and trigger the ICE."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 149.042,
+    "stage_times_sec": {
+      "checkout": 3.865,
+      "load_bug_context": 0.067,
+      "test_behavior_analysis": 5.502,
+      "test_failure_analysis": 11.465,
+      "load_file_candidates": 0.329,
+      "search_suspicious_files": 127.814
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 396863,
+      "output_tokens": 6542,
+      "total_tokens": 403405,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.502,
+          "input_tokens": 355,
+          "output_tokens": 297,
+          "total_tokens": 652
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.464,
+          "input_tokens": 2202,
+          "output_tokens": 710,
+          "total_tokens": 2912
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.065,
+          "input_tokens": 27663,
+          "output_tokens": 408,
+          "total_tokens": 28071
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.499,
+          "input_tokens": 27784,
+          "output_tokens": 367,
+          "total_tokens": 28151
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.003,
+          "input_tokens": 27353,
+          "output_tokens": 268,
+          "total_tokens": 27621
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 10.177,
+          "input_tokens": 27665,
+          "output_tokens": 328,
+          "total_tokens": 27993
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.22,
+          "input_tokens": 27599,
+          "output_tokens": 353,
+          "total_tokens": 27952
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.165,
+          "input_tokens": 27963,
+          "output_tokens": 398,
+          "total_tokens": 28361
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.988,
+          "input_tokens": 27791,
+          "output_tokens": 336,
+          "total_tokens": 28127
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.525,
+          "input_tokens": 27837,
+          "output_tokens": 322,
+          "total_tokens": 28159
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.599,
+          "input_tokens": 27781,
+          "output_tokens": 359,
+          "total_tokens": 28140
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.467,
+          "input_tokens": 27551,
+          "output_tokens": 308,
+          "total_tokens": 27859
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.771,
+          "input_tokens": 27853,
+          "output_tokens": 299,
+          "total_tokens": 28152
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.374,
+          "input_tokens": 27868,
+          "output_tokens": 298,
+          "total_tokens": 28166
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.212,
+          "input_tokens": 28039,
+          "output_tokens": 304,
+          "total_tokens": 28343
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.696,
+          "input_tokens": 19888,
+          "output_tokens": 430,
+          "total_tokens": 20318
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 14.027,
+          "input_tokens": 13671,
+          "output_tokens": 757,
+          "total_tokens": 14428
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,253 @@
+{
+  "bug_id": "123863",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-04-12",
+    "resolved": "a07f3eb43acc5df851e15176c7081a900a30a4d7"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/generics.rs",
+    "compiler/rustc_ast_lowering/src/path.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_attr/src/builtin.rs",
+    "compiler/rustc_codegen_llvm/src/lib.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a const fn generic over a const parameter of type &'static str, exercising nightly support for non-integer const generics.",
+        "Applies duplicate #[repr(C)] attributes to a local struct, testing attribute validation and duplicate representation handling.",
+        "Declares a local generic struct Inner<const A: &'static str> inside a const fn, exercising item collection in function-local scope.",
+        "Uses the same const-generic parameter name A on both the function and local struct, testing generic parameter shadowing rules.",
+        "Calls Inner::concat_strs::<FOO, BAR>::ABSTR even though no such associated function or constant exists, forcing name resolution and type checking through invalid paths.",
+        "Supplies two const generic arguments <FOO, BAR> to Inner, although Inner declares only one const parameter, testing generic arity diagnostics.",
+        "References const items FOO and undeclared BAR in generic arguments, exercising const argument resolution and missing-name error handling.",
+        "Requires the compiler to process malformed const-generic code inside a const fn body without reaching runtime, stressing early semantic analysis."
+      ],
+      "summary": "The reproducer is a minimal compile-fail crate targeting nightly const generics. It defines a const fn with a &'static str const parameter, a local struct with duplicated repr attributes, and an invalid associated-item path using wrong generic arity and an undeclared const. The code exercises parser, attribute checking, const-generic validation, name resolution, and type-checking behavior around malformed function-local items."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during early semantic analysis of a malformed const item inside `concat_strs`, not a normal user-facing diagnostic path. The query stack shows the panic occurs while computing `type_of` and then type-checking `concat_strs::{constant#0}`, which strongly suggests the compiler created an anonymous const/body for the invalid path expression `Inner::concat_strs::<FOO, BAR>::ABSTR` and then failed to recover from prior errors. Common themes in the reproducer are: function-local item definitions, unsupported/complex const-generic parameters of type `&'static str`, reuse of the generic name `A` between outer function and inner struct, and an invalid associated-item/generic-argument path with wrong arity plus an unresolved const (`BAR`). Since rustc already reports ordinary user errors (E0223, E0412) but then panics, the likely compiler defect is missing error recovery or invariant checking in type collection/type checking for erroneous QPath/associated-item resolution involving local generic items and const generics. The duplicate `#[repr(C)]` likely contributes additional invalid metadata but is less directly tied to the query stack than the anonymous constant path expression.",
+      "possible_causes": [
+        "A defect in `type_of`/type collection for anonymous consts created from invalid path expressions, where an erroneous `QPath` or associated-item reference is not converted into an error type before later compiler stages assume it is well-formed.",
+        "Missing error recovery in type checking of function-local items with const generics, especially when a local struct inside a `const fn` is referenced through an invalid associated-item path with generic arguments.",
+        "A bug in generic argument arity validation for associated paths on local ADTs, where supplying `<FOO, BAR>` to `Inner<const A>` leaves inconsistent generic substitutions that later trigger an ICE instead of a clean diagnostic.",
+        "Incorrect handling of unresolved const generic arguments (`BAR`) in combination with invalid associated item lookup (`concat_strs`/`ABSTR`), causing the compiler to continue with partially-resolved const arguments and panic in later queries.",
+        "A defect around generic parameter shadowing between the outer const parameter `A` and inner local struct parameter `A`, leading to incorrect `DefId`/parameter environment construction during type checking of the local constant body.",
+        "An issue in compiler recovery for malformed associated-item chains on types (`Inner::concat_strs::<...>::ABSTR`) where name resolution/typeck emits errors but downstream analysis still expects a valid associated item or trait projection.",
+        "Potential instability in support for `&'static str` const generics in function-local contexts, especially when combined with erroneous syntax/semantics, causing internal assumptions in typeck or const-eval related query construction to be violated."
+      ],
+      "evidence": [
+        "The query stack ends at `#0 [type_of] computing type of \u0018concat_strs::{constant#0}\u0019` and `#1 [typeck] type-checking \u0018concat_strs::{constant#0}\u0019`, indicating the ICE is tied to an anonymous const/body inside the `const fn` rather than code generation or runtime.",
+        "The reproducer intentionally uses an invalid associated path `Inner::concat_strs::<FOO, BAR>::ABSTR`, which combines nonexistent associated items, wrong generic arity, and unresolved names; this is exactly the kind of malformed AST/HIR that should produce diagnostics but not panic.",
+        "Compiler output mentions ordinary errors `E0223` and `E0412`, showing rustc detected user mistakes first, then later crashed instead of fully recovering.",
+        "`Inner` is a function-local generic struct, and local items often exercise less common paths in name resolution and type checking compared with module-level items.",
+        "The code uses const generics of type `&'static str` on nightly, a less mature feature area that increases the chance of missing recovery/invariant enforcement.",
+        "The test behavior explicitly stresses malformed const-generic code inside a `const fn` body and function-local scope, matching the observed ICE during analysis rather than parsing.",
+        "The panic happens during analysis passes (`used_trait_imports`, `check_unused_traits`, `analysis`) after earlier errors, which is consistent with a downstream compiler pass encountering an unexpected erroneous type/path state left by insufficient recovery."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1775,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect.rs",
+        "reason": "Computing `type_of` for `concat_strs`' anonymous constant triggers the panic, and the stack runs into the `HirTyLowerer::ct_infer` implementation on `ItemCtxt` in this file. Most suspicious is the collection-layer lowering code here, chiefly the error-recovery path taken when const generic arguments inside item/type contexts are malformed."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Most suspicious because the ICE occurs in query `type_of` while computing `concat_strs::{constant#0}`. This file contains `anon_const_type_of`, which specifically computes types for anonymous consts based on their parent HIR context. The malformed associated-item path with bad const-generic arguments and unresolved names likely produced an anon const whose type computation failed to recover correctly."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "The bad expression `Inner::concat_strs::<FOO, BAR>::ABSTR` is an expression-path/type-checking problem involving invalid associated-item access, unresolved names, and wrong generic arity. This file is central to expression checking and recovery for such malformed paths, making it a strong candidate for leaving behind inconsistent state later observed by `type_of`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/generics.rs",
+        "reason": "The reproducer stresses generic argument lowering and validation by supplying `<FOO, BAR>` to `Inner<const A>`, with const arguments including an undeclared `BAR`. This file handles matching HIR generic arguments to expected parameters and arity/kind diagnostics, so a recovery bug here could create malformed generic args that later crash anon-const type computation."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "Lowering of qualified paths and associated-item-like syntax into HIR happens here. Since the invalid chain `Inner::concat_strs::<FOO, BAR>::ABSTR` likely becomes a problematic `hir::QPath`, an error-recovery bug during lowering could feed later phases a malformed path shape that triggers the ICE in `type_of`/typeck."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "Late resolution is responsible for resolving names in bodies, generic arguments, and anon consts. The reproducer mixes a local generic struct, reused generic parameter name `A`, unresolved `BAR`, and nonexistent associated items. A resolution recovery bug here could misresolve or partially resolve the path and const args, causing downstream type computation for the anonymous const to panic."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_attr/src/builtin.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_codegen_llvm/src/lib.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 146.613,
+    "stage_times_sec": {
+      "checkout": 0.428,
+      "load_bug_context": 0.062,
+      "test_behavior_analysis": 5.925,
+      "test_failure_analysis": 15.643,
+      "load_file_candidates": 0.11,
+      "search_suspicious_files": 124.445
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 430131,
+      "output_tokens": 6886,
+      "total_tokens": 437017,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.925,
+          "input_tokens": 372,
+          "output_tokens": 304,
+          "total_tokens": 676
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.643,
+          "input_tokens": 2173,
+          "output_tokens": 883,
+          "total_tokens": 3056
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.151,
+          "input_tokens": 28070,
+          "output_tokens": 368,
+          "total_tokens": 28438
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.628,
+          "input_tokens": 27941,
+          "output_tokens": 310,
+          "total_tokens": 28251
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.893,
+          "input_tokens": 27550,
+          "output_tokens": 263,
+          "total_tokens": 27813
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.783,
+          "input_tokens": 27749,
+          "output_tokens": 335,
+          "total_tokens": 28084
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.879,
+          "input_tokens": 27768,
+          "output_tokens": 281,
+          "total_tokens": 28049
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.381,
+          "input_tokens": 28057,
+          "output_tokens": 404,
+          "total_tokens": 28461
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.379,
+          "input_tokens": 27908,
+          "output_tokens": 401,
+          "total_tokens": 28309
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.884,
+          "input_tokens": 27904,
+          "output_tokens": 361,
+          "total_tokens": 28265
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.557,
+          "input_tokens": 27961,
+          "output_tokens": 368,
+          "total_tokens": 28329
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.582,
+          "input_tokens": 27831,
+          "output_tokens": 375,
+          "total_tokens": 28206
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.793,
+          "input_tokens": 27944,
+          "output_tokens": 383,
+          "total_tokens": 28327
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.355,
+          "input_tokens": 27940,
+          "output_tokens": 301,
+          "total_tokens": 28241
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.661,
+          "input_tokens": 28196,
+          "output_tokens": 313,
+          "total_tokens": 28509
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.59,
+          "input_tokens": 28006,
+          "output_tokens": 411,
+          "total_tokens": 28417
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.699,
+          "input_tokens": 22856,
+          "output_tokens": 357,
+          "total_tokens": 23213
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 8.199,
+          "input_tokens": 13905,
+          "output_tokens": 468,
+          "total_tokens": 14373
+        }
+      ]
+    }
+  }
+}

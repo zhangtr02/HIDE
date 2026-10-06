@@ -1,0 +1,250 @@
+{
+  "bug_id": "122859",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-03-20",
+    "resolved": "a7e4de13c1785819f4d61da41f6704ed69d5f203"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/prove_predicate.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Imports cross-crate traits `Foo`, `Super`, and `Unsatisfied`, so trait definitions and bounds are resolved through an external dependency.",
+        "Defines a generic function `foo<T: Foo>()`, exercising trait-bound checking on a type parameter.",
+        "Uses the associated type projection `T::FooAssoc`, requiring normalization of an associated type from trait `Foo`.",
+        "Further projects `<T::FooAssoc as Super>::SuperAssoc`, exercising nested associated-type lookup through another trait.",
+        "Calls `unsatisfied::<...>()` with an explicit generic argument, forcing the compiler to evaluate whether the projected type implements `Unsatisfied`.",
+        "The `unsatisfied<B: Unsatisfied>() {}` signature creates an intentionally unmet trait obligation, testing error reporting for unsatisfied bounds.",
+        "Because `foo` is never called, compilation still checks its body and validates generic obligations during type checking.",
+        "This stresses nightly rustc trait solving for projection obligations, especially around deferred normalization and cross-trait associated-type bounds."
+      ],
+      "summary": "The reproducer is a minimal generic trait-projection test. It defines `foo<T: Foo>()`, computes a nested associated type `<<T::FooAssoc as Super>::SuperAssoc>`, and passes it to a function requiring `Unsatisfied`. This forces rustc to normalize associated types across traits from another crate and then check an intentionally unsatisfied trait bound, even though `foo` is never called."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on trait solving for a nested associated-type projection used as an explicit generic argument. The code forms the type `<<T as Foo>::FooAssoc as Super>::SuperAssoc` from cross-crate traits, then immediately requires it to satisfy `Unsatisfied`. rustc reports E0277 rather than crashing, which indicates the compiler reaches trait-obligation evaluation but likely mishandles normalization/projection obligations in this specific nested case. The common structure across the reproducer behavior and output is: generic parameter `T: Foo` -> first associated type projection `T::FooAssoc` -> second projection through another trait `Super` -> trait bound check on the final projected type. This strongly points to compiler logic involved in associated-type normalization, elaboration of implied bounds from associated types, and construction/evaluation of trait obligations for projected types across crate boundaries. A likely defect is that rustc does not fully preserve or apply the necessary `Super`/projection constraints when checking the nested projection in function body type checking, causing it to emit an unsatisfied-bound error instead of correctly carrying the projection environment or normalizing under the available assumptions.",
+      "possible_causes": [
+        "Bug in trait solver obligation generation for nested associated-type projections, where rustc creates the `Unsatisfied` obligation on `<<T as Foo>::FooAssoc as Super>::SuperAssoc` without first correctly normalizing or proving the intermediate projection obligations.",
+        "Defect in implied-bound/elaboration handling for associated types from trait bounds: from `T: Foo`, the compiler may fail to bring into scope or exploit the bounds on `T::FooAssoc` needed to justify using it as `Super` before checking the final trait bound.",
+        "Issue in the new solver / fulfillment context for deferred normalization of projections in function bodies, especially for explicit generic arguments and nested projections coming from external crates.",
+        "Cross-crate metadata or predicate instantiation bug causing bounds attached to `Foo::FooAssoc` or `Super::SuperAssoc` to be lost or not instantiated correctly when imported from `crate_b`.",
+        "Problem in diagnostic path tied to projection obligations: rustc may prematurely report E0277 on the final projected type instead of recognizing the real missing or deferred projection constraint on the intermediate associated type."
+      ],
+      "evidence": [
+        "The failing type is a nested projection: `<<T as Foo>::FooAssoc as Super>::SuperAssoc`, which specifically exercises projection normalization logic.",
+        "The generic parameter only has the bound `T: Foo`, so any ability to use `T::FooAssoc` as `Super` must come from associated-type bounds elaborated from `Foo`; this stresses implied-bound propagation.",
+        "Traits are imported from another crate, increasing dependence on correct cross-crate predicate encoding and instantiation.",
+        "The error arises at the explicit turbofish call `unsatisfied::<...>()`, showing the failure occurs during obligation construction/checking for the projected type argument.",
+        "The compiler emits E0277 for the final projected type implementing `Unsatisfied`, suggesting rustc reached the final obligation but may have mishandled prerequisite projection obligations or normalization steps.",
+        "The reproducer summary explicitly highlights nightly trait solving, deferred normalization, and cross-trait associated-type bounds as the stressed area."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1759,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+        "reason": "Most suspicious because the reproducer depends on bounds attached to an associated type being propagated from trait `Foo` so that `T::FooAssoc` is known to satisfy `Super`. This file explicitly collects and remaps associated-type bounds, including recursion into nested projections, which matches the failure mode of losing or not elaborating the intermediate `Super` constraint."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "Nested projection `<<T as Foo>::FooAssoc as Super>::SuperAssoc` directly exercises associated-type projection and normalization. If rustc is failing to preserve or prove prerequisite projection obligations before checking the final `Unsatisfied` bound, this projection engine is a prime place for the bug."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "This file manages inference-layer projection normalization and cached projection results. A bug here could cause incomplete normalization or dropped obligations for the intermediate associated type when forming the final projected type in a generic function body."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/normalize.rs",
+        "reason": "The error pattern strongly suggests a normalization/deferred-normalization issue for nested associated types. This file is the central old-solver normalization path and is responsible for producing and threading obligations generated during normalization."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The reproducer stresses query-based normalization of a foldable type containing nested projections. If normalization through the query layer mishandles escaping bounds, obligations, or nested alias projections, this file would explain the observed bad bound checking."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "If the associated-type bounds from the defining trait are not turned into the right generic predicates, downstream trait solving would never know that `T::FooAssoc: Super`. This file computes item predicates and injects trait-related obligations, so it is relevant to lost implied bounds."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "The compiler reaches an E0277 during obligation evaluation, so the fulfillment engine may be prematurely evaluating the final `Unsatisfied` obligation without correctly incorporating or waiting on prerequisite projection obligations from normalization."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/normalize.rs",
+        "reason": "Function body type checking often goes through type-op normalization. Since the reproducer uses an explicit generic argument with a nested projection, a bug in this dispatch layer could cause normalization to be skipped, incompletely performed, or locally solved incorrectly."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/prove_predicate.rs",
+        "reason": "The failing step is proving the predicate that the final projected type implements `Unsatisfied`. If the type-op path for predicate proving mishandles canonicalization or prerequisite nested goals, it could surface exactly this incorrect E0277."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Well-formedness and elaboration of trait-related obligations for associated types can affect whether the compiler knows that `T::FooAssoc` satisfies `Super` before checking deeper projections. A defect here could manifest as missing intermediate obligations in generic contexts."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 149.758,
+    "stage_times_sec": {
+      "checkout": 2.697,
+      "load_bug_context": 0.105,
+      "test_behavior_analysis": 5.864,
+      "test_failure_analysis": 10.63,
+      "load_file_candidates": 6.565,
+      "search_suspicious_files": 123.897
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 406123,
+      "output_tokens": 6541,
+      "total_tokens": 412664,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.864,
+          "input_tokens": 359,
+          "output_tokens": 290,
+          "total_tokens": 649
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.63,
+          "input_tokens": 1135,
+          "output_tokens": 651,
+          "total_tokens": 1786
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.88,
+          "input_tokens": 26798,
+          "output_tokens": 372,
+          "total_tokens": 27170
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.885,
+          "input_tokens": 26673,
+          "output_tokens": 287,
+          "total_tokens": 26960
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.363,
+          "input_tokens": 26289,
+          "output_tokens": 299,
+          "total_tokens": 26588
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.799,
+          "input_tokens": 26462,
+          "output_tokens": 343,
+          "total_tokens": 26805
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.41,
+          "input_tokens": 26483,
+          "output_tokens": 371,
+          "total_tokens": 26854
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.014,
+          "input_tokens": 26874,
+          "output_tokens": 374,
+          "total_tokens": 27248
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.474,
+          "input_tokens": 26632,
+          "output_tokens": 294,
+          "total_tokens": 26926
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.072,
+          "input_tokens": 26617,
+          "output_tokens": 331,
+          "total_tokens": 26948
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.532,
+          "input_tokens": 26711,
+          "output_tokens": 332,
+          "total_tokens": 27043
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.162,
+          "input_tokens": 26543,
+          "output_tokens": 323,
+          "total_tokens": 26866
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.933,
+          "input_tokens": 26843,
+          "output_tokens": 306,
+          "total_tokens": 27149
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.959,
+          "input_tokens": 26678,
+          "output_tokens": 298,
+          "total_tokens": 26976
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.545,
+          "input_tokens": 26930,
+          "output_tokens": 309,
+          "total_tokens": 27239
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.858,
+          "input_tokens": 26629,
+          "output_tokens": 320,
+          "total_tokens": 26949
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.566,
+          "input_tokens": 18310,
+          "output_tokens": 353,
+          "total_tokens": 18663
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.411,
+          "input_tokens": 13157,
+          "output_tokens": 688,
+          "total_tokens": 13845
+        }
+      ]
+    }
+  }
+}

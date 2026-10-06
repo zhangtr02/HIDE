@@ -1,0 +1,256 @@
+{
+  "bug_id": "129285",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-08-19",
+    "resolved": "6de928dce9472b864f4e5d590dd7aa2075cb7551"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/coercion.rs",
+    "compiler/rustc_infer/src/infer/relate/higher_ranked.rs",
+    "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+    "compiler/rustc_type_ir/src/relate.rs",
+    "compiler/rustc_middle/src/ty/adjustment.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+    "compiler/rustc_middle/src/ty/erase_regions.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_type_ir/src/binder.rs",
+    "compiler/rustc_middle/src/ty/relate.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `higher_ranked` taking `&mut ()`, which desugars to a function item with an implicit lifetime parameter on the mutable reference.",
+        "Declares `as_unsafe<T>` expecting an `unsafe fn(T)` function pointer, introducing a generic parameter that must be inferred from the passed function.",
+        "Passes a safe function item to a parameter typed as an unsafe function pointer, exercising function item to function pointer coercion rules.",
+        "Uses a reference argument type, so the compiler must reason about late-bound or higher-ranked lifetimes when matching the function signature.",
+        "Tests whether `&mut ()` is treated like `for<'a> fn(&'a mut ())` during coercion and type inference.",
+        "Exercises variance and subtyping checks for mutable references while converting the function item to a callable pointer type.",
+        "Forces rustc to combine generic inference, safety qualification, and higher-ranked lifetime handling in one call-site type check.",
+        "The reproducer likely targets an internal compiler error or incorrect acceptance/rejection in signature matching for unsafe function pointers with implicit higher-ranked references."
+      ],
+      "summary": "The program defines a safe function taking a mutable reference, then passes it to a generic helper requiring an `unsafe fn(T)`. This makes rustc infer `T` from a function item whose argument contains an implicit lifetime, while also checking safe-to-unsafe function pointer coercion. The reproducer exercises higher-ranked lifetime treatment, function item/pointer coercions, mutable-reference typing, and signature matching in type checking."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on function item to function pointer coercion combined with implicit higher-ranked lifetimes on reference parameters. `higher_ranked` has type equivalent to `for<'a> fn(&'a mut ())` as a function item/signature, while `as_unsafe` expects an `unsafe fn(T)` and must infer `T` from the argument. The compiler reports a mismatch between `unsafe fn(&mut ())` and `unsafe for<'a> fn(&'a mut ())`, which suggests rustc is preserving or introducing a binder on the inferred function pointer type instead of normalizing/eliding the implicit lifetime appropriately during coercion/inference. The common theme is interaction between: (a) safe function item -> unsafe function pointer coercion, (b) HRTB/late-bound lifetime handling for reference arguments, and (c) generic type inference for `T`. A likely compiler defect is in the type checker/coercion logic that compares function signatures with bound regions, especially when converting a function item with erased/late-bound regions into a bare fn pointer under an `unsafe fn(T)` expectation. The rejection appears to come from treating `fn(&mut ())` and `for<'a> fn(&'a mut ())` as distinct at the wrong stage, or failing to instantiate/erase bound regions before equality/subtyping checks.",
+      "possible_causes": [
+        "Bug in function item to function pointer coercion logic where late-bound lifetimes on reference parameters are not properly instantiated or erased before matching against an expected bare `fn`/`unsafe fn` pointer type.",
+        "Defect in type inference for generic parameter `T` in `as_unsafe<T>(_: unsafe fn(T))`, causing rustc to infer `T = for<'a> fn(&'a mut ())` or otherwise retain a higher-ranked binder instead of reducing to the argument type `&mut ()`.",
+        "Incorrect signature comparison/subtyping check for `unsafe fn` pointer types with higher-ranked binders, especially in the presence of mutable reference arguments and invariance.",
+        "Region/binder handling bug in the compiler’s function signature normalization (`liberate_late_bound_regions`/bound-region instantiation path) that leaves one side as `for<'a>` while the other side is compared as an unbound `&mut ()`.",
+        "Possible omission in safe-to-unsafe fn pointer coercion code path: the safety qualifier conversion may bypass the normal higher-ranked lifetime normalization used for ordinary `fn` pointer coercions."
+      ],
+      "evidence": [
+        "Compiler error explicitly contrasts `expected fn pointer unsafe fn(&mut ())` with `found fn pointer unsafe for<'a> fn(&'a mut ())`, indicating a binder-mismatch rather than an ordinary safety-only mismatch.",
+        "The reproducer combines generic inference, safe->unsafe function pointer coercion, and implicit lifetime elision on `&mut ()`, so the bug is likely in the intersection of these compiler mechanisms.",
+        "`&mut ()` in a function signature naturally introduces an implicit lifetime, and the test behavior specifically targets whether rustc treats this as higher-ranked during coercion.",
+        "The mismatch involves mutable references, whose invariance makes subtyping/coercion logic more sensitive to incorrect handling of bound regions.",
+        "The reported error is E0308 type mismatch, which points to type checking/coercion/signature comparison code rather than parsing or borrow checking."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1830,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/coercion.rs",
+        "reason": "Most suspicious because the reproducer directly exercises HIR type-check coercions: function item -> fn pointer reification plus safe-to-unsafe fn pointer coercion, while preserving an implicit higher-ranked lifetime on `&mut ()`. The reported mismatch (`unsafe fn(&mut ())` vs `unsafe for<'a> fn(&'a mut ())`) strongly suggests this coercion path is failing to instantiate/erase late-bound regions before comparing signatures."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/higher_ranked.rs",
+        "reason": "The error specifically shows a binder mismatch involving `for<'a>`, pointing to higher-ranked instantiation/leak-check machinery. If coercion or subtyping compares the function signatures under binders incorrectly, this file is a prime place where placeholder instantiation or bound-region handling could go wrong."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+        "reason": "After coercion setup, rustc typically uses inference-time type relation/subtyping to compare expected and found function pointer types. This file is central for variance-aware relation of fn signatures and could be mishandling equality/subtyping when one side still has a higher-ranked binder and the other has an elided reference lifetime."
+      },
+      {
+        "path": "compiler/rustc_type_ir/src/relate.rs",
+        "reason": "This is the generic binder-aware relation framework underlying type comparison. Since the failure looks like rustc is treating `fn(&mut ())` and `for<'a> fn(&'a mut ())` as distinct at the wrong abstraction level, a bug in generic binder relation logic or variance handling here is plausible."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/adjustment.rs",
+        "reason": "This file defines the adjustment kinds for function item reification and safe-to-unsafe fn pointer coercion. While largely representational, the bug may stem from an omitted or incorrect adjustment combination for the specific safe->unsafe fn-pointer path with higher-ranked argument lifetimes."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "`FnCtxt` drives call checking, expected-type propagation, and recording adjustments during expression type checking. The reproducer uses generic inference through a call argument, so this file is a likely site where the expected `unsafe fn(T)` shape is imposed and where the coercion/comparison pipeline could preserve the wrong binder structure."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/erase_regions.rs",
+        "reason": "One likely root cause is failure to erase or normalize non-essential region structure before comparing function pointer signatures. The found type retaining `for<'a>` in the diagnostic suggests region erasure/anonymization may be missing or inconsistent along this path."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "The reproducer depends on how the implicit lifetime in `&mut ()` inside a function signature is classified as late-bound/higher-ranked. If bound-variable resolution marks or records that binder incorrectly for function items or fn pointers, later coercion could observe the wrong signature form."
+      },
+      {
+        "path": "compiler/rustc_type_ir/src/binder.rs",
+        "reason": "The bug signature revolves around `Binder` structure itself. If the wrapped fn signature is being preserved, compared, or stripped incorrectly, the binder representation/utilities are relevant, especially for distinguishing truly higher-ranked fn pointers from elided-lifetime forms."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/relate.rs",
+        "reason": "This file provides `Relate` impls for core middle-layer types and delegates binder-sensitive type comparison. Since the mismatch manifests as an E0308 during type checking rather than MIR/codegen, middle-layer relation glue for fn signatures and binders is a plausible contributor."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 149.182,
+    "stage_times_sec": {
+      "checkout": 0.383,
+      "load_bug_context": 0.042,
+      "test_behavior_analysis": 5.946,
+      "test_failure_analysis": 10.994,
+      "load_file_candidates": 0.111,
+      "search_suspicious_files": 131.706
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 422901,
+      "output_tokens": 7210,
+      "total_tokens": 430111,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.946,
+          "input_tokens": 334,
+          "output_tokens": 311,
+          "total_tokens": 645
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.994,
+          "input_tokens": 1088,
+          "output_tokens": 688,
+          "total_tokens": 1776
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.821,
+          "input_tokens": 26753,
+          "output_tokens": 362,
+          "total_tokens": 27115
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.815,
+          "input_tokens": 26769,
+          "output_tokens": 297,
+          "total_tokens": 27066
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.576,
+          "input_tokens": 26130,
+          "output_tokens": 309,
+          "total_tokens": 26439
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.907,
+          "input_tokens": 26553,
+          "output_tokens": 329,
+          "total_tokens": 26882
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.424,
+          "input_tokens": 26477,
+          "output_tokens": 357,
+          "total_tokens": 26834
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.028,
+          "input_tokens": 26833,
+          "output_tokens": 438,
+          "total_tokens": 27271
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.108,
+          "input_tokens": 26589,
+          "output_tokens": 381,
+          "total_tokens": 26970
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.211,
+          "input_tokens": 26625,
+          "output_tokens": 317,
+          "total_tokens": 26942
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.936,
+          "input_tokens": 26701,
+          "output_tokens": 333,
+          "total_tokens": 27034
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.843,
+          "input_tokens": 26562,
+          "output_tokens": 338,
+          "total_tokens": 26900
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.625,
+          "input_tokens": 26602,
+          "output_tokens": 340,
+          "total_tokens": 26942
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.123,
+          "input_tokens": 26691,
+          "output_tokens": 364,
+          "total_tokens": 27055
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.453,
+          "input_tokens": 26869,
+          "output_tokens": 278,
+          "total_tokens": 27147
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 5.205,
+          "input_tokens": 26775,
+          "output_tokens": 205,
+          "total_tokens": 26980
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.557,
+          "input_tokens": 26677,
+          "output_tokens": 394,
+          "total_tokens": 27071
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 7.118,
+          "input_tokens": 8075,
+          "output_tokens": 368,
+          "total_tokens": 8443
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.927,
+          "input_tokens": 13798,
+          "output_tokens": 801,
+          "total_tokens": 14599
+        }
+      ]
+    }
+  }
+}

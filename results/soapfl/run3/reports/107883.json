@@ -1,0 +1,243 @@
+{
+  "bug_id": "107883",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-02-09",
+    "resolved": "ef934d9b632b8ac00276558824664c104b92b5f0"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_borrowck/src/type_check/input_output.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly `impl_trait_in_fn_trait_return` to return closures whose `Fn` output is itself an opaque `impl Debug` type.",
+        "Enables `unboxed_closures` to write the `Fn` trait using explicit tuple-argument syntax: `Fn<(T,), Output = ...>`.",
+        "`f<T>` returns a closure literal as `impl Fn(T) -> impl Debug`, exercising nested opaque types inside a function-trait return.",
+        "`g<T>` replaces direct `Fn` syntax with a custom `MyFn` trait and associated type `Out = impl Debug`, testing whether opaque output works through trait indirection.",
+        "`MyFn` is implemented for any `F: Fn(T) -> U`, bridging normal closures to a user-defined trait with an associated output type.",
+        "`h<T>` uses explicit `Fn<(T,), Output = impl Debug>` notation, probing compiler handling of unboxed closure traits plus opaque output types.",
+        "`f_<T>` wraps the closure in `std::convert::identity`, and `f__<T>` stores it in a local before returning, checking whether minor inference/context changes avoid the failure.",
+        "`main` is empty; the reproducer is compile-time only, targeting type checking, opaque type capture, closure inference, and `Fn` trait desugaring behavior."
+      ],
+      "summary": "This reproducer compares several equivalent-looking ways to return a generic closure whose result is an opaque `impl Debug`. It contrasts direct `Fn` return syntax, explicit unboxed `Fn<(T,), Output=...>` form, and a custom trait wrapper. It also shows that adding `identity` or a local binding can change compilation, highlighting a compiler bug in nested `impl Trait` handling, closure inference, or `Fn` trait desugaring."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failing cases share a very specific pattern: they use a closure literal directly as the return expression of a function whose return type is `impl Fn...` and whose `Fn` output is itself another opaque type (`impl Debug`). Both surface syntaxes fail: sugar form `impl Fn(T) -> impl Debug` and explicit trait form `impl Fn<(T,), Output = impl Debug>`. The compiler reports that the closure expression itself is treated as a previous defining use of the inner opaque type, and then the closure body result `15` is treated as a conflicting concrete type for that same opaque, leading to `cannot resolve opaque type`. In contrast, semantically similar variants succeed when the `Fn` output is routed through a user-defined associated type (`MyFn`) or when the closure literal is first wrapped in `identity` or assigned to a local before being returned. This strongly suggests the bug is not in general opaque type inference, but in rustc’s handling of nested opaque types specifically during direct closure-literal checking against builtin `Fn` trait return syntax. The likely common mechanism is desugaring / type-checking of closure signatures and expected types: rustc appears to incorrectly create or reuse the defining use of the inner RPITIT-like opaque (`impl Debug`) from the closure expression node itself, then separately constrains the closure body output (`i32`), mistakenly considering them different defining uses. Since adding an intermediate expression changes the inference context and avoids the error, the defect is likely in expected-type propagation, closure signature instantiation, or opaque type key/defining-scope assignment for closure-return-position `impl Trait` nested under `Fn` trait syntax.",
+      "possible_causes": [
+        "Bug in type checking of closure literals returned directly under `impl Fn(...) -> impl Trait`, where rustc incorrectly treats the closure expression and the closure body result as separate defining uses of the same inner opaque type.",
+        "Incorrect desugaring or normalization of builtin `Fn` trait syntax (`Fn(T) -> U` and `Fn<(T,), Output = U>`) when `U` is an opaque type, causing wrong opaque-type identity/constraints during closure signature construction.",
+        "Defect in opaque type registration/keying for nested return-position `impl Trait` inside function-trait outputs, likely assigning the inner `impl Debug` to an invalid defining scope tied to the closure expression rather than the enclosing function item.",
+        "Problem in expected-type propagation into closure inference for direct return expressions: the expected `Fn` output opaque is prematurely fixed from the closure node, so later unification with the concrete body type `i32` is reported as a conflicting opaque definition.",
+        "Special-case bug in closure/Fn trait handling that does not occur for user-defined trait associated types (`MyFn::Out`), indicating the issue is in compiler logic for lang-item `Fn*` traits rather than generic associated-type opaque handling."
+      ],
+      "evidence": [
+        "Both failing functions (`f` and `h`) use direct builtin `Fn` trait return forms with nested `impl Debug`; both working control cases avoid that exact path (`g` uses a custom trait, `f_`/`f__` alter the closure expression context).",
+        "The error points to the same closure literal twice: note says the 'previous use' is the closure expression `|_x| 15`, while the conflicting concrete type is the body result `15`, implying rustc is misclassifying defining uses within one closure.",
+        "`g<T>() -> impl MyFn<(T,), Out = impl Debug>` compiles, showing that opaque output through an associated type can work; the failure is specific to builtin `Fn` trait syntax/desugaring.",
+        "`f_<T>` and `f__<T>` compile even though they still return a closure yielding `i32` for `impl Debug`; this sensitivity to `identity(...)` or a local binding indicates a context/inference bug rather than a fundamental type-system rejection.",
+        "The explicit unboxed-closure syntax `Fn<(T,), Output = impl Debug>` fails the same way as the sugared `Fn(T) -> impl Debug`, showing the shared faulty path is likely common `Fn` trait handling rather than just parser sugar.",
+        "Compiler diagnostics are `concrete type differs from previous defining opaque type use` and `E0720 cannot resolve opaque type`, which are characteristic of rustc assigning inconsistent defining uses/constraints to one opaque type rather than simply failing trait bound checking."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1589,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "Most suspicious because the failure is specific to direct closure literals checked against an expected builtin `Fn` signature whose output is a nested opaque `impl Debug`. This file derives closure signatures from context and adjusts opaque expectations for closure bodies, which matches the observed misclassification of the closure expression itself as a defining opaque use."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "`check_fn` handles function/closure body checking and explicitly replaces opaque return types with inference variables. Since the bug involves nested return-position `impl Trait` inside `impl Fn(...) -> impl Trait`, incorrect setup of the closure/body return coercion target or opaque replacement here could explain why direct closure returns fail while minor expression reshaping works."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "The diagnostics are classic opaque-type defining-use conflicts (`concrete type differs from previous defining opaque type use`, `E0720 cannot resolve opaque type`). This file owns inference-time tracking and registration of opaque hidden types, so a bug in keying or recording nested opaque uses for closure outputs is highly plausible."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "The failure depends on expression form: returning the closure literal directly fails, but wrapping it in `identity(...)` or binding it to a local succeeds. That strongly suggests an expected-type propagation or coercion issue in expression checking, for which this file is a prime candidate."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Nested RPIT under a builtin `Fn` output may require remapping the inner opaque type from the enclosing function's generics into the opaque's own key correctly. If the inner `impl Debug` is assigned the wrong defining scope or argument mapping when appearing in closure signatures, this machinery would be involved."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "Both `impl Fn(T) -> impl Debug` and explicit `impl Fn<(T,), Output = impl Debug>` fail, while a custom trait with associated type works. That points to special builtin `Fn` trait syntax/desugaring, which is handled during AST/HIR type conversion in this module."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The explicit `Fn<(T,), Output = impl Debug>` form relies on resolving the `Output` associated type of the lang-item `Fn` trait. Since the bug appears only for builtin `Fn`-family handling and not a user-defined associated type, projection/normalization of `Fn::Output` may be contributing."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/input_output.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 173.009,
+    "stage_times_sec": {
+      "checkout": 4.809,
+      "load_bug_context": 0.209,
+      "test_behavior_analysis": 6.304,
+      "test_failure_analysis": 16.136,
+      "load_file_candidates": 0.263,
+      "search_suspicious_files": 145.289
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 376313,
+      "output_tokens": 6760,
+      "total_tokens": 383073,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.304,
+          "input_tokens": 570,
+          "output_tokens": 373,
+          "total_tokens": 943
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 16.136,
+          "input_tokens": 1463,
+          "output_tokens": 909,
+          "total_tokens": 2372
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.521,
+          "input_tokens": 27135,
+          "output_tokens": 341,
+          "total_tokens": 27476
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.136,
+          "input_tokens": 27224,
+          "output_tokens": 334,
+          "total_tokens": 27558
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.748,
+          "input_tokens": 26715,
+          "output_tokens": 327,
+          "total_tokens": 27042
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.707,
+          "input_tokens": 27151,
+          "output_tokens": 352,
+          "total_tokens": 27503
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 11.537,
+          "input_tokens": 27098,
+          "output_tokens": 456,
+          "total_tokens": 27554
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 10.244,
+          "input_tokens": 27410,
+          "output_tokens": 370,
+          "total_tokens": 27780
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.674,
+          "input_tokens": 27264,
+          "output_tokens": 336,
+          "total_tokens": 27600
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 11.065,
+          "input_tokens": 27135,
+          "output_tokens": 436,
+          "total_tokens": 27571
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 10.494,
+          "input_tokens": 27307,
+          "output_tokens": 323,
+          "total_tokens": 27630
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.885,
+          "input_tokens": 26026,
+          "output_tokens": 387,
+          "total_tokens": 26413
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 10.579,
+          "input_tokens": 27118,
+          "output_tokens": 352,
+          "total_tokens": 27470
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.099,
+          "input_tokens": 27399,
+          "output_tokens": 148,
+          "total_tokens": 27547
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 12.303,
+          "input_tokens": 27297,
+          "output_tokens": 367,
+          "total_tokens": 27664
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.834,
+          "input_tokens": 8442,
+          "output_tokens": 378,
+          "total_tokens": 8820
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.435,
+          "input_tokens": 13559,
+          "output_tokens": 571,
+          "total_tokens": 14130
+        }
+      ]
+    }
+  }
+}

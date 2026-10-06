@@ -1,0 +1,243 @@
+{
+  "bug_id": "110933",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-04-27",
+    "resolved": "1c42cb4ef0544fbfaa500216e53382d6b079c001"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_ty_utils/src/consts.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_infer/src/infer/outlives/verify.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `associated_const_equality`, allowing trait bounds to constrain an associated const to a specific const expression value.",
+        "Defines a trait with an associated constant `ASSOC: usize`, creating a type-level constant requirement for implementors.",
+        "Uses a generic bound `T: Trait<ASSOC = ...>` to force equality between `T::ASSOC` and an inline const block result.",
+        "Places a block expression inside the associated-const equality, exercising const-evaluatable parsing and normalization in trait bounds.",
+        "Inside the const block, creates a local `usize` variable and a reference `&'_ usize` to it, testing temporary/local handling during const evaluation.",
+        "Dereferences the reference `*b` in the const block, exercising const-checking of references, borrows, and reads from locals.",
+        "Uses the placeholder lifetime `'_` in a const expression type annotation, probing lifetime inference and region handling in const contexts.",
+        "Defines `foo` but never instantiates it, so the compiler mainly exercises type checking, trait bound validation, and const processing rather than runtime code generation."
+      ],
+      "summary": "The reproducer targets nightly trait associated-const equality with an inline const block inside a generic bound. That const block uses locals, borrowing, placeholder lifetime inference, and dereferencing to compute a `usize`. The code stresses compiler parsing, type checking, region handling, and const-evaluation/normalization for associated-const equality constraints, even though the function is never called."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on an inline const block used inside an associated-const equality bound (`T: Trait<ASSOC = { ... }>`). The const block creates a local, borrows it, annotates the borrow as `&'_ usize`, and dereferences it. The compiler rejects this with E0597, specifically saying the type annotation requires `a` to be borrowed for `'static`. The common theme across the reproducer and diagnostics is incorrect lifetime/region handling in a const-generic/type-level context: the placeholder lifetime `'_` inside the const expression appears to be resolved or promoted as if the borrow must be `'static`, even though it is only a local borrow used within the same block. Because the function is never instantiated, the bug is likely in front-end analysis for consts in trait bounds—HIR/typeck/regionck/const-checking/normalization—rather than codegen. The most plausible compiler defect is that the compiler treats references appearing in associated-const equality const expressions as needing a global/static lifetime during type checking or const validation, instead of keeping the borrow local to the const body. This may stem from special handling of anonymous consts or unevaluated constants in generic predicates, where region inference, placeholder lifetime lowering, or const qualification erroneously imposes `'static` requirements.",
+      "possible_causes": [
+        "Bug in region inference for anonymous consts in associated-const equality bounds: `'_` inside the inline const is incorrectly resolved to a `'static`-like requirement.",
+        "Incorrect borrow-checking/const-checking interaction for unevaluated const expressions used in trait predicates, causing local borrows in the const body to be treated as escaping the block.",
+        "Defect in lowering/type-checking of inline const blocks in generic bounds, where references within the const are analyzed under the wrong region universe or owner, producing an artificial outlives requirement.",
+        "Const qualification or promotion logic may be incorrectly assuming that references appearing in type-level const expressions must be promotable/static, even when the borrow is purely local and immediately dereferenced.",
+        "Normalization/trait predicate machinery for `associated_const_equality` may mishandle the anonymous const's inferred regions, forcing the const expression to satisfy stronger lifetime constraints than ordinary block-local usage would require."
+      ],
+      "evidence": [
+        "The error is E0597 on `let b: &'_ usize = &a;`, with the compiler explicitly stating that the type annotation requires `a` to be borrowed for `'static`.",
+        "The problematic code is inside an inline const block embedded in `T: Trait<ASSOC = { ... }>` rather than in ordinary runtime code, pointing to const/type-level handling.",
+        "The borrow of `a` is immediately dereferenced within the same block (`*b`), so a local borrow should normally be sufficient; the reported `'static` need suggests an internal lifetime misclassification.",
+        "The reproducer uses nightly-only `associated_const_equality`, indicating the bug is likely in unstable compiler paths for trait predicate const processing.",
+        "`foo` is never called, so the failure arises during compilation phases such as parsing, lowering, type checking, trait-bound validation, region checking, or const analysis—not runtime behavior.",
+        "The placeholder lifetime `'_` in a const-expression type annotation is a key stressor, matching the observed symptom of incorrect inferred lifetime requirements."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1618,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "Most suspicious because the reproducer hinges on the placeholder lifetime `'_` inside an anonymous const used in an associated-const equality bound. This file is responsible for resolving lifetime references into bound/free/late-bound forms, and a bug here could easily cause `'_` in this special anonymous-const context to be treated as escaping or effectively `'static`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "This file computes types for anonymous consts and has explicit logic for `anon_const_type_of`. Since the failing code is an inline const embedded in a trait bound, incorrect parent-context handling here could assign the wrong typing context to the anon const and induce an artificial `'static` requirement on references within it."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "Associated-const equality in a trait bound flows through const-evaluatable checking. This file specifically handles anon consts, param-env matching, and unevaluated const processing under unstable const-generic features. A bug here could make the inline const be validated as if it must be globally evaluatable/static rather than locally typed."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This module builds and validates abstract constants for anonymous consts used by trait solving and generic const evaluation. The reproducer uses a block expression with locals, a borrow, dereference, and `'_`; if abstract-const construction mishandles such expressions or their region information, it could lead to the erroneous borrow escaping to `'static`."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "The error arises during type-level checking of a trait bound rather than runtime use, which makes well-formedness obligation generation highly relevant. If WF checking for constants in associated-const equality mishandles regions inside the anon const, it could impose stronger outlives requirements than intended."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "HIR-level well-formedness checking normalizes and registers obligations for item signatures and bounds. Since `foo` is never instantiated and the failure occurs while validating the generic bound, this is a plausible front-end location where the anonymous const in `Trait<ASSOC = {...}>` gets checked under the wrong lifetime assumptions."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "The diagnostic explicitly says the type annotation requires `a` to be borrowed for `'static`, suggesting an outlives obligation was generated incorrectly. This file lowers type-outlives obligations into region constraints, so it is a good candidate for where a local borrow inside an anonymous const could be turned into an erroneous `'static` requirement."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+        "reason": "If the bad `'static` requirement is not introduced during obligation generation, it may be introduced during verification of type-outlives conditions. This file decides what region evidence suffices for `T: 'a`-style constraints and could mishandle references occurring inside anonymous consts used in predicates."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "Associated-const equality involves normalization of const/type-level terms in trait predicates. If normalization of the anonymous const or its surrounding predicate loses the correct region context, this query path could indirectly force a static-like interpretation of the borrow."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "Although more indirect, associated-item equality constraints are processed through projection/trait machinery. Since the failing construct is `T: Trait<ASSOC = {...}>`, a bug in how this machinery represents or normalizes the associated const equality could contribute to the mistaken escaping-lifetime requirement."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 133.268,
+    "stage_times_sec": {
+      "checkout": 2.635,
+      "load_bug_context": 0.049,
+      "test_behavior_analysis": 5.901,
+      "test_failure_analysis": 12.031,
+      "load_file_candidates": 0.1,
+      "search_suspicious_files": 112.552
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 372723,
+      "output_tokens": 6962,
+      "total_tokens": 379685,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.901,
+          "input_tokens": 392,
+          "output_tokens": 306,
+          "total_tokens": 698
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.03,
+          "input_tokens": 1055,
+          "output_tokens": 679,
+          "total_tokens": 1734
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.368,
+          "input_tokens": 26484,
+          "output_tokens": 481,
+          "total_tokens": 26965
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.784,
+          "input_tokens": 26534,
+          "output_tokens": 409,
+          "total_tokens": 26943
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.337,
+          "input_tokens": 26152,
+          "output_tokens": 351,
+          "total_tokens": 26503
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.563,
+          "input_tokens": 26401,
+          "output_tokens": 351,
+          "total_tokens": 26752
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.76,
+          "input_tokens": 26347,
+          "output_tokens": 358,
+          "total_tokens": 26705
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.31,
+          "input_tokens": 26783,
+          "output_tokens": 413,
+          "total_tokens": 27196
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.394,
+          "input_tokens": 26641,
+          "output_tokens": 369,
+          "total_tokens": 27010
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.99,
+          "input_tokens": 26484,
+          "output_tokens": 341,
+          "total_tokens": 26825
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.392,
+          "input_tokens": 26662,
+          "output_tokens": 398,
+          "total_tokens": 27060
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.368,
+          "input_tokens": 26416,
+          "output_tokens": 364,
+          "total_tokens": 26780
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.833,
+          "input_tokens": 26725,
+          "output_tokens": 331,
+          "total_tokens": 27056
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.276,
+          "input_tokens": 26684,
+          "output_tokens": 382,
+          "total_tokens": 27066
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 5.587,
+          "input_tokens": 26694,
+          "output_tokens": 286,
+          "total_tokens": 26980
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 5.777,
+          "input_tokens": 13846,
+          "output_tokens": 324,
+          "total_tokens": 14170
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.784,
+          "input_tokens": 12423,
+          "output_tokens": 819,
+          "total_tokens": 13242
+        }
+      ]
+    }
+  }
+}

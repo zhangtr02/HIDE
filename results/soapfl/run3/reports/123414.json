@@ -1,0 +1,253 @@
+{
+  "bug_id": "123414",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-04-02",
+    "resolved": "1684a753dbca5d23b2e03568e6fbbb48eb72d0e6"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/diagnostics/mutability_errors.rs",
+    "compiler/rustc_borrowck/src/lib.rs",
+    "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+    "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+    "compiler/rustc_middle/src/ty/assoc.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_borrowck/src/nll.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with `extern \"C\"` associated functions, exercising ABI handling for trait methods instead of normal Rust-ABI methods.",
+        "Uses `&mut self` in `read_word`, requiring a mutable receiver method in the trait and method-call resolution on `self`.",
+        "Declares `read_dword(Self::Assoc<'_>) -> u16`, referencing an undeclared associated type/GAT-like projection, stressing trait item validation and name resolution.",
+        "Implements the trait for `ROM` but provides only `read_dword`, so trait-impl completeness checking should report missing required items.",
+        "The impl’s `read_dword(&'_ self)` uses `&self`, mismatching the trait declaration’s parameter form, testing signature compatibility diagnostics.",
+        "Calls `self.read_word()` twice inside `read_dword`, exercising method lookup and borrow checking across repeated receiver use.",
+        "Combines two `u8` reads into one `u16` with casts, shifting, and bitwise OR, modeling little-endian word assembly and integer operation typing.",
+        "Builds under nightly 2024-04-02, so parsing and error reporting may involve unstable/internal compiler paths for malformed trait method signatures."
+      ],
+      "summary": "The reproducer defines an invalid trait/impl pair for a memory interface. It mixes `extern \"C\"` trait methods, an undeclared associated projection `Self::Assoc<'_>`, and an impl whose `read_dword` signature does not match the trait while also omitting `read_word`. Inside the impl, it performs two method calls and integer bit assembly. This mainly exercises parsing, trait item validation, method signature matching, impl completeness checks, and diagnostics around malformed associated-type-like syntax."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE caused by rustc continuing into MIR borrow checking for an impl method that already has trait-definition/impl-signature errors. The reproducer combines several invalid trait-related constructs: `extern \"C\"` trait methods, an undeclared associated projection-like type `Self::Assoc<'_>` in the trait item, a missing required trait method in the impl, and a receiver/signature mismatch between trait and impl for `read_dword`. Compiler output confirms normal semantic errors (E0046, E0185), yet the query stack shows a panic in `mir_borrowck` on `<impl ...>::read_dword`. That strongly suggests erroneous recovery: after trait validation/signature checking produced `ErrorGuaranteed`, the compiler still built or analyzed MIR for the impl body. The body contains `self.read_word()` calls, which depend on trait method resolution and receiver mutability, so invalid or partially-resolved method/trait metadata likely reached borrowck in an inconsistent state. Commonality across the behavior and stack trace is malformed trait method metadata plus method-call analysis on an impl item that should likely have been suppressed after earlier errors.",
+      "possible_causes": [
+        "A defect in error recovery allows `mir_borrowck` to run on an impl method body even after trait item validation / impl-vs-trait signature checking has already emitted hard errors for that item.",
+        "Incorrect handling of invalid trait method signatures involving `extern \"C\"` plus an associated-type-like projection (`Self::Assoc<'_>`) may leave a malformed `FnSig`/trait item representation that later compiler passes assume is well-formed.",
+        "Impl completeness and trait-method compatibility checking may fail to fully mark the impl item as tainted/error, so later method resolution for `self.read_word()` inside the impl proceeds with inconsistent trait obligation data.",
+        "A bug in method-call lowering or borrow-check preparation for erroneous trait methods may mishandle receiver kind (`&mut self` required in trait vs `&self` in impl), causing borrowck to inspect invalid receiver adjustments or obligations instead of bailing out.",
+        "The compiler may be constructing MIR for an impl method whose associated trait item could not be properly resolved because of the undeclared `Self::Assoc<'_>` projection, leading to ICE when borrowck expects resolved types/regions.",
+        "There may be a missing `delay_span_bug`/early-return guard in analysis of trait impl items with `ErrorGuaranteed`, specifically on the path from typeck/MIR construction into borrow checking for invalid impl methods."
+      ],
+      "evidence": [
+        "Compiler output reports semantic errors `E0046` and `E0185`, indicating rustc already knew the trait impl was invalid before the panic.",
+        "Query stack shows the panic occurs in `#0 [mir_borrowck] borrow-checking <impl at src/main.rs:8:1: 8:24>::read_dword`, not during parsing; this implies later-phase analysis ran on erroneous code.",
+        "The trait declaration contains `read_dword(Self::Assoc<'_>) -> u16`, referencing an undeclared associated item/projection-like type, which is malformed and stresses recovery in trait item representation.",
+        "The impl defines only `read_dword` and omits `read_word`, matching the reported impl completeness error pattern (`E0046`).",
+        "The impl method signature uses `&'_ self`, while the trait method is declared without that matching receiver form and instead with an invalid parameter list, matching trait/impl signature mismatch behavior (`E0185`).",
+        "The body of `read_dword` calls `self.read_word()` twice, so method resolution and borrow checking rely on valid trait method metadata; if earlier recovery left that metadata inconsistent, borrowck can ICE.",
+        "`extern \"C\"` on trait methods is an uncommon combination that exercises ABI handling on trait items, increasing likelihood of an unguarded compiler path when combined with malformed signatures.",
+        "Despite prior errors, rustc progressed to analysis passes and borrow checking, which is consistent with a bug in post-error gating rather than a simple user-code mistake."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1765,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/diagnostics/mutability_errors.rs",
+        "reason": "Per the panic location and backtrace (`suggest_ampmut_self` at mutability_errors.rs:1366), the ICE happens inside this file. The message shows the snippet `Assoc<'_>` being sliced invalidly, which points to the mutability-suggestion span/snippet logic here assuming a well-formed receiver/parameter even after earlier parse/type recovery produced an unusual one."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/lib.rs",
+        "reason": "The query stack shows the ICE occurs directly in `mir_borrowck` while borrow-checking `<impl ...>::read_dword`. This file contains the borrowck query entry point and the logic that decides whether to skip checking error-tainted bodies. The reproducer strongly suggests a missing early-return/taint guard let an invalid impl method proceed into borrow checking after E0046/E0185 were already emitted."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+        "reason": "The code intentionally creates an impl/trait method mismatch, and compiler output includes E0185. This file performs impl-vs-trait method compatibility checking, including receiver/signature structure. If it fails to correctly mark the impl item as unusable after reporting errors, later MIR/borrowck could analyze an inconsistent method body and ICE."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+        "reason": "THIR/MIR construction should reject bodies already tainted by type-checking errors. The reproducer points to erroneous recovery where MIR for the invalid impl method still exists and reaches borrowck. This file is the main gate for building THIR bodies and explicitly handles bodies with prior typeck errors, making it a strong candidate for missing or insufficient error suppression in this scenario."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+        "reason": "The trait declaration contains malformed associated-type-like syntax `Self::Assoc<'_>` in a method parameter plus `extern \"C\"` on trait methods. This file lowers HIR type syntax into internal `ty` representations, so bad recovery here could leave a malformed signature/type structure that later impl checking and MIR analysis assume is well-formed."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/assoc.rs",
+        "reason": "The bug involves trait/impl associated method metadata, including linking an impl method to its trait item and tracking whether it has a self receiver. If malformed trait item information from this invalid declaration is represented inconsistently, downstream method-body analysis and borrow checking could observe broken associated-item metadata."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "Once borrowck starts, MIR type checking assumes earlier stages produced coherent MIR and often ICEs on impossible states. Because the impl body contains `self.read_word()` calls relying on invalid trait metadata, this file is a plausible crash site or near-crash component when erroneous MIR/type information leaks into borrow checking."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The undeclared projection-like `Self::Assoc<'_>` should be rejected during well-formedness and related signature validation. If WF checking around this malformed trait method signature does not fully poison subsequent analysis, later passes may continue with partially normalized or invalid types."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The reproducer stresses associated-type projection handling with an invalid `Self::Assoc<'_>` reference. Projection/recovery bugs here could leave unresolved or erroneous alias/projection terms in method signatures that later phases mishandle instead of bailing out cleanly."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/nll.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 152.295,
+    "stage_times_sec": {
+      "checkout": 0.268,
+      "load_bug_context": 0.051,
+      "test_behavior_analysis": 6.48,
+      "test_failure_analysis": 13.573,
+      "load_file_candidates": 0.108,
+      "search_suspicious_files": 131.816
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 428529,
+      "output_tokens": 6898,
+      "total_tokens": 435427,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.48,
+          "input_tokens": 418,
+          "output_tokens": 353,
+          "total_tokens": 771
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.573,
+          "input_tokens": 2250,
+          "output_tokens": 826,
+          "total_tokens": 3076
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.704,
+          "input_tokens": 28090,
+          "output_tokens": 347,
+          "total_tokens": 28437
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.744,
+          "input_tokens": 27957,
+          "output_tokens": 333,
+          "total_tokens": 28290
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.027,
+          "input_tokens": 27581,
+          "output_tokens": 290,
+          "total_tokens": 27871
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.876,
+          "input_tokens": 27750,
+          "output_tokens": 338,
+          "total_tokens": 28088
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.41,
+          "input_tokens": 27799,
+          "output_tokens": 328,
+          "total_tokens": 28127
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.286,
+          "input_tokens": 28130,
+          "output_tokens": 368,
+          "total_tokens": 28498
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.697,
+          "input_tokens": 27932,
+          "output_tokens": 376,
+          "total_tokens": 28308
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.483,
+          "input_tokens": 27920,
+          "output_tokens": 339,
+          "total_tokens": 28259
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.724,
+          "input_tokens": 27986,
+          "output_tokens": 377,
+          "total_tokens": 28363
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 10.537,
+          "input_tokens": 27843,
+          "output_tokens": 365,
+          "total_tokens": 28208
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.567,
+          "input_tokens": 28130,
+          "output_tokens": 344,
+          "total_tokens": 28474
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.634,
+          "input_tokens": 27966,
+          "output_tokens": 311,
+          "total_tokens": 28277
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.124,
+          "input_tokens": 28219,
+          "output_tokens": 296,
+          "total_tokens": 28515
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.194,
+          "input_tokens": 27958,
+          "output_tokens": 323,
+          "total_tokens": 28281
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.699,
+          "input_tokens": 20837,
+          "output_tokens": 312,
+          "total_tokens": 21149
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.079,
+          "input_tokens": 13763,
+          "output_tokens": 672,
+          "total_tokens": 14435
+        }
+      ]
+    }
+  }
+}

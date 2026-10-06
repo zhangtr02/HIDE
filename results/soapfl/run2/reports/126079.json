@@ -1,0 +1,252 @@
+{
+  "bug_id": "126079",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-06-07",
+    "resolved": "98489f2487465f3765e5dd28d7305ebfd40f0865"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/object_safety.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_hir_typeck/src/method/confirm.rs",
+    "compiler/rustc_trait_selection/src/traits/normalize.rs",
+    "compiler/rustc_infer/src/infer/projection.rs",
+    "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a generic `transmute<T, U>` that calls a trait-object method on `&dyn Foo<T, U>`, making the compiler relate input type `T` and output type `U` through trait solving.",
+        "Uses `PhantomData<T>` as the concrete implementer, with `Foo<T, U>` implemented even though the method body returns `T`, not syntactically `U`, stressing associated-type normalization.",
+        "`Foo` inherits `Super<ActuallySuper, Assoc = T>` and constrains `<Self as Mirror>::Assoc: Super<NotActuallySuper>`, exercising supertraits plus where-clauses involving projected associated types.",
+        "`Mirror` is blanket-implemented with `type Assoc = T`, so `<Self as Mirror>::Assoc` becomes `Self`; this tests recursive-looking normalization through identity-style associated types.",
+        "Implements `Dyn` for `dyn Foo<T, U>` with `Out = U`, then blanket-implements `Super<NotActuallySuper>` for any `S: Dyn<Out = U>`, letting the trait object claim `Assoc = U`.",
+        "At the same time, `PhantomData<T>` directly implements `Super<NotActuallySuper, Assoc = T>`, creating conflicting ways to determine the same associated type depending on trait-object versus concrete reasoning.",
+        "The call `transmute::<&str, &'static str>(x.as_str())` asks the compiler to accept converting a short-lived borrow into `'static`, probing unsound lifetime inference from trait projection/equality.",
+        "If accepted, dropping `x` before printing `s` produces a use-after-free scenario, so the reproducer checks whether rustc incorrectly type-checks an unsound program.",
+        "summary\":\"This reproducer targets trait-solver and projection unsoundness. It mixes trait objects, supertraits, blanket impls, and associated-type normalization so `dyn Foo<T, U>` appears to return `U` while the concrete implementation really returns `T`. The chosen instantiation tries to coerce `&str` into `&'static str`; if rustc accepts it, the program uses a dangling reference after `x` is dropped.\"}##END_JSON##`}"
+      ]
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer is accepted by the compiler even though it constructs an unsound conversion from `&str` tied to `x` into `&'static str`. The common pattern is that the program forces rustc to reason about the same associated type through two different views of the receiver: the concrete impl (`PhantomData<T>`) and the trait-object view (`dyn Foo<T, U>`). The trait hierarchy combines supertraits, blanket impls, projected associated types, and an identity-style projection through `Mirror`, so normalization can conclude inconsistent equalities: concretely, `transmute` returns `T`, but via the trait object path `dyn Foo<T, U>: Dyn<Out = U>` and `Super<NotActuallySuper, Assoc = U>`, making the method appear to return `U`. Because `Foo` also requires `Super<ActuallySuper, Assoc = T>` and `<Self as Mirror>::Assoc: Super<NotActuallySuper>`, the solver must propagate associated-type equalities across supertraits and projections. The acceptance of `transmute::<&str, &'static str>` strongly suggests a compiler soundness bug in trait solving / projection normalization for trait objects, where the compiler incorrectly unifies or normalizes `<Self as Super<NotActuallySuper>>::Assoc` under `dyn Foo<T, U>` without preserving the concrete implementation constraints, leading to lifetime unsoundness.",
+      "possible_causes": [
+        "Bug in trait solver handling of associated-type projection across trait objects and supertraits: `<dyn Foo<T, U> as Super<NotActuallySuper>>::Assoc` is likely normalized to `U` from the blanket `Dyn`-based impl even though the concrete vtable implementation comes from `PhantomData<T>` where the effective return type is `T`.",
+        "Incorrect projection/equality propagation through where-clause `<Self as Mirror>::Assoc: Super<NotActuallySuper>` combined with blanket `Mirror<Assoc = Self>`, causing recursive/identity normalization to lose distinction between concrete `Self` and erased `dyn Foo<T, U>` self type.",
+        "Unsound candidate selection or coherence interaction between direct impl `Super<NotActuallySuper> for PhantomData<T> { Assoc = T }` and blanket impl `Super<NotActuallySuper> for S where S: Dyn<Out = U> { Assoc = U }`, allowing the compiler to use different associated-type answers for the same method call path.",
+        "Defect in object safety / method-call lowering for trait objects with projected return types, where the method signature used for type checking is taken from normalized trait-object projections (`U`) rather than from the actual implementing method/vtable ABI (`T`).",
+        "Bug in lifetime checking caused by trait projection normalization: after erroneous equating of `T` and projected `Assoc = U`, the borrow checker/type checker fails to enforce that `&str` tied to `x` cannot be widened to `&'static str`.",
+        "Potential next-solver / projection-cache issue where obligations from supertraits and projected predicates are resolved in an inconsistent environment, yielding an unsound equality between unrelated generic parameters `T` and `U`."
+      ],
+      "evidence": [
+        "Compiler output shows successful compilation (`Finished dev profile`) for a program that should be rejected because it creates `&'static str` from `x.as_str()` and then drops `x` before using the reference.",
+        "The method body in `impl<T, U> Foo<T, U> for PhantomData<T>` returns `T`, not `U`, yet the trait-object path makes the return type appear as `<Self as Super<NotActuallySuper>>::Assoc`, which for `dyn Foo<T, U>` can be inferred as `U`.",
+        "`Dyn` is implemented specifically for `dyn Foo<T, U>` with `Out = U`, and `Super<NotActuallySuper>` is blanket-implemented for any `S: Dyn<Out = U>`, directly creating the trait-object-associated-type path to `U`.",
+        "`PhantomData<T>` also directly implements `Super<NotActuallySuper, Assoc = T>`, so there are two competing ways to compute the same associated type depending on whether reasoning is done on the concrete type or erased trait object.",
+        "`Mirror` has blanket `type Assoc = T`, so `<Self as Mirror>::Assoc` reduces to `Self`; this identity-like projection stresses normalization and can expose solver bugs that mishandle recursive/self projections.",
+        "`Foo` combines a supertrait equality `Super<ActuallySuper, Assoc = T>` with a where-clause on projected `Mirror::Assoc`, forcing the solver to connect multiple associated-type obligations across different traits and projections.",
+        "The failing behavior specifically depends on trait object dispatch `(&PhantomData::<T> as &dyn Foo<T, U>).transmute(t)`, indicating the bug is not in ordinary impl checking alone but in interaction between object coercion, vtable method typing, and associated-type normalization."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1787,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/object_safety.rs",
+        "reason": "Arguably `dyn Foo<T, U>` deserves rejection or special handling: the callable method's type hinges on supertrait-associated projections whose meaning shifts under erasure, and the trait further carries a normalized `Self`-dependent where-clause through `Mirror`. This file hosts the object-safety/vtable-safety checks that appear to miss exactly this instability."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "Most directly matches the failure mode: old-solver associated-type projection for trait objects, object bounds, supertraits, and impl-based candidates. This reproducer hinges on normalizing `<dyn Foo<T, U> as Super<NotActuallySuper>>::Assoc` inconsistently with the concrete `PhantomData<T>` impl, which is exactly the kind of logic handled here."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "Candidate confirmation is where a chosen trait/object candidate gets unified and nested obligations are produced. If the compiler confirms an object-based or impl-based candidate while propagating the wrong associated-type equality (`Assoc = U` instead of the concrete `T`), this file is a strong suspect."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+        "reason": "The bug may stem from assembling incompatible candidates for `Super<NotActuallySuper>` across the concrete type and the trait-object/Dyn blanket impl path. This reproducer creates exactly that ambiguity, so wrong candidate collection or prioritization is plausible here."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "Projection caching and inference-layer normalization can cause unsound reuse or inconsistent normalization results, especially with recursive/identity-like projections via `Mirror` and trait-object projections. If the wrong projection result is cached or reused, the program could be accepted unsoundly."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+        "reason": "The unsoundness is triggered specifically by method call typing on `&dyn Foo<T, U>`. This file rebuilds the method signature for the call and applies receiver adjustments; if it uses the trait-object projected return type without preserving the concrete implementation constraints, it could admit the invalid `&str -> &'static str` conversion."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/normalize.rs",
+        "reason": "Deep normalization on the old solver path threads projection normalization and obligations together. Since the reproducer depends on normalization through supertraits and `<Self as Mirror>::Assoc`, an error in this normalization pipeline is plausible."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/projection.rs",
+        "reason": "If projection cannot be normalized immediately, this code defers it via fresh inference variables and projection obligations. An unsound deferred projection/equality between `T` and `U` could arise here in the old-solver path used by this nightly."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+        "reason": "The accepted program ultimately requires relating the concrete returned `T` with the trait-object-visible projected associated type behaving like `U`. If type relation under obligations mishandles these aliases/projections, lifetime widening to `'static` can slip through."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "Well-formedness checking is less likely than projection/selection, but this reproducer relies on a subtle trait definition with supertraits plus projected where-clauses. A missed WF obligation around the trait object or projected `Mirror::Assoc` bound could contribute to the later unsound acceptance."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 161.108,
+    "stage_times_sec": {
+      "checkout": 1.113,
+      "load_bug_context": 1.296,
+      "test_behavior_analysis": 8.345,
+      "test_failure_analysis": 15.362,
+      "load_file_candidates": 0.112,
+      "search_suspicious_files": 134.881
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 420880,
+      "output_tokens": 7772,
+      "total_tokens": 428652,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 8.345,
+          "input_tokens": 684,
+          "output_tokens": 456,
+          "total_tokens": 1140
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.361,
+          "input_tokens": 1370,
+          "output_tokens": 1015,
+          "total_tokens": 2385
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.762,
+          "input_tokens": 27362,
+          "output_tokens": 407,
+          "total_tokens": 27769
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.582,
+          "input_tokens": 27281,
+          "output_tokens": 293,
+          "total_tokens": 27574
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.026,
+          "input_tokens": 26868,
+          "output_tokens": 385,
+          "total_tokens": 27253
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.63,
+          "input_tokens": 27163,
+          "output_tokens": 346,
+          "total_tokens": 27509
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.496,
+          "input_tokens": 27085,
+          "output_tokens": 335,
+          "total_tokens": 27420
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.887,
+          "input_tokens": 27415,
+          "output_tokens": 481,
+          "total_tokens": 27896
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.827,
+          "input_tokens": 27257,
+          "output_tokens": 399,
+          "total_tokens": 27656
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 10.478,
+          "input_tokens": 27201,
+          "output_tokens": 355,
+          "total_tokens": 27556
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 6.636,
+          "input_tokens": 27299,
+          "output_tokens": 346,
+          "total_tokens": 27645
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.329,
+          "input_tokens": 27052,
+          "output_tokens": 371,
+          "total_tokens": 27423
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.852,
+          "input_tokens": 27266,
+          "output_tokens": 340,
+          "total_tokens": 27606
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.805,
+          "input_tokens": 27262,
+          "output_tokens": 337,
+          "total_tokens": 27599
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.205,
+          "input_tokens": 27516,
+          "output_tokens": 253,
+          "total_tokens": 27769
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.123,
+          "input_tokens": 27337,
+          "output_tokens": 428,
+          "total_tokens": 27765
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 9.029,
+          "input_tokens": 24671,
+          "output_tokens": 480,
+          "total_tokens": 25151
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.184,
+          "input_tokens": 12791,
+          "output_tokens": 745,
+          "total_tokens": 13536
+        }
+      ]
+    }
+  }
+}

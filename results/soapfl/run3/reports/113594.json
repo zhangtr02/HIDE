@@ -1,0 +1,243 @@
+{
+  "bug_id": "113594",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-07-10",
+    "resolved": "1065d876cdbc34a872b9e17c78caaa59ea0c94d4"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+    "compiler/rustc_mir_dataflow/src/elaborate_drops.rs",
+    "compiler/rustc_mir_dataflow/src/move_paths/builder.rs",
+    "compiler/rustc_mir_build/src/build/matches/mod.rs",
+    "compiler/rustc_middle/src/mir/tcx.rs",
+    "compiler/rustc_mir_transform/src/reveal_all.rs",
+    "compiler/rustc_hir_typeck/src/pat.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly `type_alias_impl_trait`, defining `Tait = impl Sized` as an opaque type alias with hidden concrete type inferred from use sites.",
+        "Defines `Foo` containing `String`, ensuring the concrete hidden type has nontrivial drop glue and destructor-related MIR generation.",
+        "`ice_cold` takes parameter `beverage: Tait`, forcing the compiler to treat an opaque alias as a concrete argument type inside the defining scope.",
+        "Pattern destructuring `let Foo { field } = beverage;` requires the compiler to resolve the opaque `Tait` to `Foo` for field access.",
+        "Destructuring only one field moves `field` out, exercising partial-move analysis and drop elaboration for the remaining value state.",
+        "`_ = field;` consumes the moved `String`, ensuring ownership and destructor handling are actually used rather than optimized away immediately.",
+        "The reproducer stresses MIR/type-check interactions around opaque types, pattern matching, and drop glue computation on nightly.",
+        "An ICE likely appears when rustc combines TAIT hidden-type resolution with field-pattern destructuring of a drop type parameter.",
+        "summary\":\"This reproducer uses nightly `type_alias_impl_trait` to hide `Foo` behind an opaque alias, then passes that alias into a function and destructures it as `Foo`. Because `Foo` contains a `String`, the compiler must handle nontrivial drop glue, partial moves, and ownership during MIR/drop elaboration. The test primarily exercises rustc’s resolution of an opaque TAIT parameter to its hidden concrete struct type during pattern matching and destructor analysis, a combination that triggers the reported compiler failure.\"}"
+      ]
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on an opaque type alias (`type_alias_impl_trait`) whose hidden concrete type is a struct (`Foo`) with nontrivial drop glue (`String`). Inside the defining scope, the function parameter has type `Tait`, but the body destructures it as `Foo`, so the compiler must resolve the opaque type to its hidden type during MIR construction/analysis. The destructuring moves out only one field, which introduces partial-move semantics and requires precise drop elaboration for the remainder of the value. The query stack shows the panic occurs specifically in `mir_drops_elaborated_and_const_checked` while elaborating drops for `ice_cold`, indicating the bug is not ordinary type checking but MIR drop elaboration on a value whose type came from TAIT hidden-type resolution. The common thread is an interaction between opaque-type normalization, pattern destructuring to a concrete ADT, and drop elaboration for partially moved values.",
+      "possible_causes": [
+        "A defect in MIR drop elaboration when handling partially moved values whose local type is an opaque `type_alias_impl_trait` but whose pattern requires the hidden concrete ADT type.",
+        "Incorrect normalization/reveal of the TAIT hidden type during MIR building or drop elaboration, causing the drop pass to see inconsistent types for the same local (`Tait` vs `Foo`).",
+        "A bug in pattern-match lowering or place/projection construction for destructuring an opaque-type parameter as a struct, especially when field moves require drop-flag generation.",
+        "Missing or invalid support in partial-move analysis for opaque types with nontrivial drop glue, leading to an ICE when computing remaining fields to drop.",
+        "An invariant violation in compiler code that assumes only known ADTs, not unrevealed opaque aliases, reach the drop elaboration logic for field-sensitive destructor handling."
+      ],
+      "evidence": [
+        "The crate enables nightly `type_alias_impl_trait` and defines `pub type Tait = impl Sized;`, so opaque-type handling is essential to the failure.",
+        "`Foo` contains a `String`, guaranteeing nontrivial drop glue and forcing destructor-related MIR processing.",
+        "`ice_cold(beverage: Tait)` destructures `beverage` with `let Foo { field } = beverage;`, requiring the compiler to reconcile the opaque alias with the concrete struct for field access.",
+        "Only one field is moved out, which triggers partial-move/drop-flag logic rather than a trivial whole-value move.",
+        "The query stack pinpoints the ICE at `mir_drops_elaborated_and_const_checked` for `ice_cold`, directly implicating drop elaboration rather than parsing or basic type checking.",
+        "The test behavior explicitly stresses the combination of TAIT hidden-type resolution, struct pattern destructuring, and destructor analysis, matching the phase reported in the stack trace."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1640,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+        "reason": "Most suspicious because the ICE occurs in query `mir_drops_elaborated_and_const_checked` while elaborating drops for `ice_cold`. This pass drives drop elaboration using move data and initializedness, exactly the area stressed by partially moving `field` out of a `Foo` hidden behind a TAIT."
+      },
+      {
+        "path": "compiler/rustc_mir_dataflow/src/elaborate_drops.rs",
+        "reason": "Core drop elaboration logic lives here, including `DropStyle::Open` and field-sensitive handling for partially moved values. The reproducer specifically combines partial move, nontrivial drop glue, and a type that may still look opaque in MIR, which can easily violate assumptions in this file."
+      },
+      {
+        "path": "compiler/rustc_mir_dataflow/src/move_paths/builder.rs",
+        "reason": "Drop elaboration depends on accurate move-path construction. Destructuring `let Foo { field } = beverage;` from an opaque-typed parameter requires correct field path creation for a partially moved ADT; if the hidden type is not revealed consistently, move-path building can feed invalid data into drop elaboration."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/mod.rs",
+        "reason": "This is responsible for lowering destructuring patterns into MIR. The reproducer’s key operation is struct-pattern destructuring of a parameter typed as `Tait` but matched as `Foo`; a bug here could create inconsistent places/projections or opaque-cast handling that later crashes drop elaboration."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/tcx.rs",
+        "reason": "Place/type computation for MIR field projections is centralized here. If field access on a local whose declared type is an opaque alias is not normalized/revealed correctly to the hidden ADT, later passes like move analysis and drop elaboration can ICE on bad place types."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/reveal_all.rs",
+        "reason": "This pass strips `OpaqueCast` projections and reveals opaque types after analysis. Since the bug involves TAIT hidden-type resolution reaching MIR drop elaboration, incorrect or incomplete reveal behavior could leave MIR in a mixed opaque/concrete state that the drop pass cannot handle."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/pat.rs",
+        "reason": "Pattern type checking must reconcile destructuring as `Foo` with an input of opaque type `Tait` inside the defining scope. If it permits or records the pattern with the wrong adjusted type metadata, MIR lowering and later drop elaboration may see inconsistent types."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "TAIT hidden-type collection is central to this reproducer. If the hidden type for `Tait` is inferred or exposed incorrectly for the defining use in `ice_cold`, downstream MIR and drop logic may operate on mismatched `Tait` versus `Foo` views."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Opaque-type inference machinery determines how local opaque aliases are replaced and constrained during type inference. A flaw here could cause inconsistent normalization of `Tait` to `Foo`, especially in body-local contexts that later affect pattern lowering and MIR typing."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "This file handles remapping and representation details for opaque types at the `ty` level. Since the failure likely involves incorrect reveal/remapping of the hidden concrete type across body/item boundaries, it is a plausible source of a latent invariant violation exposed during drop elaboration."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 157.825,
+    "stage_times_sec": {
+      "checkout": 1.089,
+      "load_bug_context": 0.058,
+      "test_behavior_analysis": 6.755,
+      "test_failure_analysis": 11.634,
+      "load_file_candidates": 0.083,
+      "search_suspicious_files": 138.205
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 396696,
+      "output_tokens": 6705,
+      "total_tokens": 403401,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.755,
+          "input_tokens": 411,
+          "output_tokens": 337,
+          "total_tokens": 748
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.634,
+          "input_tokens": 2339,
+          "output_tokens": 568,
+          "total_tokens": 2907
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.328,
+          "input_tokens": 27656,
+          "output_tokens": 395,
+          "total_tokens": 28051
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.216,
+          "input_tokens": 27777,
+          "output_tokens": 363,
+          "total_tokens": 28140
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.542,
+          "input_tokens": 27346,
+          "output_tokens": 340,
+          "total_tokens": 27686
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.986,
+          "input_tokens": 27658,
+          "output_tokens": 372,
+          "total_tokens": 28030
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.111,
+          "input_tokens": 27592,
+          "output_tokens": 404,
+          "total_tokens": 27996
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.047,
+          "input_tokens": 27956,
+          "output_tokens": 400,
+          "total_tokens": 28356
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.115,
+          "input_tokens": 27785,
+          "output_tokens": 305,
+          "total_tokens": 28090
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.65,
+          "input_tokens": 27812,
+          "output_tokens": 367,
+          "total_tokens": 28179
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.349,
+          "input_tokens": 27786,
+          "output_tokens": 376,
+          "total_tokens": 28162
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.583,
+          "input_tokens": 27560,
+          "output_tokens": 374,
+          "total_tokens": 27934
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.8,
+          "input_tokens": 27831,
+          "output_tokens": 315,
+          "total_tokens": 28146
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.834,
+          "input_tokens": 27878,
+          "output_tokens": 234,
+          "total_tokens": 28112
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.027,
+          "input_tokens": 28021,
+          "output_tokens": 313,
+          "total_tokens": 28334
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.633,
+          "input_tokens": 19466,
+          "output_tokens": 483,
+          "total_tokens": 19949
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 21.952,
+          "input_tokens": 13822,
+          "output_tokens": 759,
+          "total_tokens": 14581
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,228 @@
+{
+  "bug_id": "96540",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-04-29",
+    "resolved": "e85edd9a844b523a02dbd89f3c02cd13e4c9fe46"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/astconv/mod.rs",
+    "compiler/rustc_resolve/src/late/lifetimes.rs",
+    "compiler/rustc_typeck/src/check/closure.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_middle/src/middle/resolve_lifetime.rs",
+    "compiler/rustc_infer/src/infer/error_reporting/nice_region_error/named_anon_conflict.rs",
+    "compiler/rustc_typeck/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_resolve/src/late/diagnostics.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `Foo<'a>` with `PhantomData<&'a ()>` to create a lifetime-carrying, zero-sized type.",
+        "Uses lifetime elision in `Foo` within `impl Fn(Foo)`, so the compiler must infer an elided lifetime in a function-trait argument.",
+        "Returns `impl Fn(Foo)` from `foo`, exercising opaque return types and hidden closure type inference.",
+        "The closure `|_| ()` accepts `Foo` by value, forcing rustc to check how anonymous closure signatures handle elided lifetimes.",
+        "Tests interaction between HRTB-like lifetime generalization and opaque `impl Trait` in return position.",
+        "Exercises compiler lowering of closure call traits (`Fn`) where the input tuple contains a type with an elided lifetime parameter.",
+        "Checks whether lifetime capture analysis correctly treats `Foo<'_>` as non-borrowing despite carrying a phantom reference.",
+        "Minimal `main` keeps runtime irrelevant, making this purely a type-checking and signature-normalization reproducer."
+      ],
+      "summary": "The reproducer creates a phantom-lifetime type and returns a closure as `impl Fn(Foo)`. Its purpose is to stress rustc’s handling of elided lifetimes inside function-trait arguments when combined with closure inference and opaque return types. Since `Foo` only carries a lifetime through `PhantomData`, the test isolates compiler type/lifetime normalization behavior rather than runtime semantics."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on an elided lifetime inside a function-trait argument embedded in an opaque return type: `fn foo() -> impl Fn(Foo)`. `Foo<'a>` is a by-value, zero-sized type whose lifetime exists only through `PhantomData<&'a ()>`, so the reproducer is specifically probing whether rustc can normalize or generalize `Foo` in the `Fn` input position when inferring the hidden closure type `|_| ()`. The compiler instead emits E0106 at the `Fn(Foo)` argument, treating the missing lifetime as if it required a concrete named lifetime sourced from the surrounding function signature. That suggests rustc is not applying the intended elided-lifetime handling/generalization for closure call signatures inside `impl Trait` return-position types, and is likely rejecting too early during type checking or AST/HIR lowering of the trait argument list. The common thread across the behavior items is the interaction of three mechanisms: lifetime elision for a type path with lifetime parameters, closure signature inference for `Fn` traits, and opaque return type (`impl Trait`) normalization. A likely compiler defect is that one of these stages fails to represent `Foo` as `Foo<'_>` or as a late-bound/higher-ranked lifetime in the `Fn` input tuple, causing the lifetime to be treated as needing explicit naming.",
+      "possible_causes": [
+        "Incorrect lifetime elision handling for type arguments appearing in `Fn` trait inputs, especially when the type is used by value (`Foo`) rather than as a reference, causing rustc to require an explicit lifetime instead of synthesizing `'_` or a bound region.",
+        "Bug in lowering/desugaring of parenthetical `Fn(Foo)` syntax to the underlying tupled call signature, where elided lifetimes inside the input types are not preserved or converted into an anonymous region.",
+        "Defect in opaque return type (`impl Trait`) type checking that fails to generalize closure argument lifetimes for the hidden closure type, leading to premature E0106 instead of accepting a higher-ranked or anonymous lifetime.",
+        "Region/lifetime resolution bug in closure signature inference: the closure `|_| ()` should permit an argument type with an anonymous lifetime, but rustc may be trying to tie that lifetime to the enclosing function return type environment and thus reports no source lifetime exists.",
+        "Improper treatment of `PhantomData<&'a ()>` during lifetime analysis, where the compiler treats `Foo<'a>` as if it contains an actual borrowed value requiring explicit provenance, instead of allowing anonymous lifetime normalization in this purely type-level context."
+      ],
+      "evidence": [
+        "The diagnostic is issued exactly at `impl Fn(Foo)`, showing the failure is in handling the `Fn` argument type rather than in the closure body.",
+        "`Foo<'a>` contains only `PhantomData<&'a ()>`, so runtime borrowing is irrelevant; the issue is purely in compiler type/lifetime representation.",
+        "The closure `|_| ()` is trivial and non-capturing, minimizing other inference variables and isolating closure signature + opaque return type handling.",
+        "The error message says the return type contains a borrowed value with no source to borrow from, which is suspicious here because `Foo` is passed by value and only carries a phantom lifetime.",
+        "The reproducer specifically combines elided lifetime in a generic type path, parenthetical `Fn` trait syntax, closure inference, and return-position `impl Trait`, matching known compiler-sensitive areas around HRTB/anonymous-region lowering and normalization."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1417,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/astconv/mod.rs",
+        "reason": "Most suspicious because the error is emitted directly on the parenthesized `Fn(Foo)` type syntax, before closure body analysis matters. This file performs AST/HIR-to-type conversion for type syntax, including `Fn`-trait parenthetical notation and lifetime handling in type paths. A bug here could incorrectly reject elided lifetime arguments inside `Fn` inputs instead of constructing `Foo<'_>` or an appropriate bound region."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late/lifetimes.rs",
+        "reason": "This pass is responsible for late lifetime resolution, including anonymous/elided lifetime classification and diagnostics for missing lifetimes. Since `Foo` appears without an explicit lifetime inside a `Fn` trait argument, an error in lifetime resolution could fail to synthesize or permit the anonymous lifetime in this specific binder/context and trigger E0106 too early."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/closure.rs",
+        "reason": "The reproducer hinges on returning a closure as `impl Fn(Foo)`. This file drives closure signature inference from expected callable types. If the expected `Fn` signature coming from `impl Trait` is mishandled, closure argument lifetimes may fail to be generalized, causing the compiler to treat `Foo` as requiring a concrete named lifetime rather than an anonymous or higher-ranked one."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "`impl Trait` in return position is a central part of the reproducer. This module remaps and validates hidden types for opaque types, including region handling. A defect here could make the hidden closure type fail lifetime capture/generalization for the `Fn` input, surfacing as an erroneous missing lifetime requirement."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Another plausible location because opaque return types with lifetimes are normalized and resolved here after region inference. Even though the observed error appears early, this area is directly responsible for region treatment of `impl Trait` hidden types, and a mismatch in how anonymous regions are represented for closure signatures could contribute to the bug."
+      },
+      {
+        "path": "compiler/rustc_middle/src/middle/resolve_lifetime.rs",
+        "reason": "This file stores the resolved lifetime mapping used by later stages. If anonymous lifetime uses in this syntactic position are represented incorrectly or classified too strictly, downstream type conversion/type checking could report E0106 for `Fn(Foo)` despite the intended anonymous-lifetime behavior."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/error_reporting/nice_region_error/named_anon_conflict.rs",
+        "reason": "Less likely to be the root cause, but the diagnostic wording strongly resembles logic around named-vs-anonymous lifetime conflicts. If the compiler is misclassifying the situation, this file could be involved in converting an internal region mismatch into the misleading explicit-lifetime error seen by the user."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "Well-formedness checking of item signatures is a plausible place for rejecting `impl Fn(Foo)` too aggressively. If WF checking treats the phantom lifetime in `Foo<'a>` as requiring an explicit source lifetime in the function return type, it could emit the observed missing lifetime error instead of allowing anonymous/generalized treatment."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "WF obligation generation is relevant because the issue may stem from how `Foo<'a>` inside the callable input of an opaque return type is judged well formed. Incorrect region obligations for this by-value phantom-lifetime type could force an explicit lifetime unnecessarily."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late/diagnostics.rs",
+        "reason": "Primarily diagnostic support, but still a candidate because the compiler specifically emits a missing lifetime diagnostic at this syntax location. If the underlying resolution accepted the form but diagnostics incorrectly interpreted it as a missing-lifetime case, this file could be involved."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 124.672,
+    "stage_times_sec": {
+      "checkout": 0.908,
+      "load_bug_context": 0.038,
+      "test_behavior_analysis": 6.309,
+      "test_failure_analysis": 12.392,
+      "load_file_candidates": 0.098,
+      "search_suspicious_files": 104.927
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 324131,
+      "output_tokens": 6189,
+      "total_tokens": 330320,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.309,
+          "input_tokens": 364,
+          "output_tokens": 292,
+          "total_tokens": 656
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.392,
+          "input_tokens": 1012,
+          "output_tokens": 718,
+          "total_tokens": 1730
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.803,
+          "input_tokens": 26740,
+          "output_tokens": 438,
+          "total_tokens": 27178
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.176,
+          "input_tokens": 26333,
+          "output_tokens": 342,
+          "total_tokens": 26675
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.005,
+          "input_tokens": 26493,
+          "output_tokens": 301,
+          "total_tokens": 26794
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.759,
+          "input_tokens": 26507,
+          "output_tokens": 355,
+          "total_tokens": 26862
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.183,
+          "input_tokens": 26556,
+          "output_tokens": 384,
+          "total_tokens": 26940
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.691,
+          "input_tokens": 26518,
+          "output_tokens": 345,
+          "total_tokens": 26863
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.391,
+          "input_tokens": 26594,
+          "output_tokens": 432,
+          "total_tokens": 27026
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.286,
+          "input_tokens": 26225,
+          "output_tokens": 425,
+          "total_tokens": 26650
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.318,
+          "input_tokens": 25858,
+          "output_tokens": 322,
+          "total_tokens": 26180
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.61,
+          "input_tokens": 26355,
+          "output_tokens": 254,
+          "total_tokens": 26609
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.617,
+          "input_tokens": 26167,
+          "output_tokens": 361,
+          "total_tokens": 26528
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.189,
+          "input_tokens": 21979,
+          "output_tokens": 389,
+          "total_tokens": 22368
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.874,
+          "input_tokens": 10430,
+          "output_tokens": 831,
+          "total_tokens": 11261
+        }
+      ]
+    }
+  }
+}

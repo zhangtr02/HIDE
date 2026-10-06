@@ -1,0 +1,247 @@
+{
+  "bug_id": "98543",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-06-25",
+    "resolved": "fdca237d5194bf8a1c9b437ebd2114d1c2ba6195"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/type_check/free_region_relations.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_borrowck/src/type_check/free_region_relations.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+        "rank": 1
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/98543.json",
+    "graph_cache_hit": false,
+    "graph_cache_build_mode": "skeleton",
+    "graph_cache_bug_id": "98543",
+    "graph_cache_checkout_commit": "fdca237d5194bf8a1c9b437ebd2114d1c2ba6195",
+    "initial_graph_node_count": 46116,
+    "initial_graph_edge_count": 46115,
+    "graph_node_count": 46116,
+    "graph_edge_count": 52766,
+    "lazy_loaded_edge_count": 6651,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"add_implied_bounds\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/type_check/free_region_relations.rs\", \"content\": \"fn add_implied_bounds(&mut self, ty: Ty<'tcx>) -> Option<Rc<QueryRegionConstraints<'tcx>>> {\\n        let TypeOpOutput { output: bounds, constraints, .. } = self\\n            .param_env\\n            .and(type_op::implied_outlives_bounds::ImpliedOutlivesBounds { ty })\\n            .fully_perform(self.infcx)\\n            .unwrap_or_else(|_| bug!(\\\"failed to compute implied bounds {:?}\\\", ty));\\n        self.add_outlives_bounds(bounds);\\n        constraints\\n    }\"}",
+      "{\"type\": \"CLASS\", \"name\": \"add_implied_bounds\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_typeck/src/check/regionck.rs\", \"content\": \"\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"create\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/type_check/free_region_relations.rs\", \"content\": \"pub(crate) fn create(mut self) -> CreateResult<'tcx> {\\n        let unnormalized_input_output_tys = self\\n            .universal_regions\\n            .unnormalized_input_tys\\n            .iter()\\n            .cloned()\\n            .chain(Some(self.universal_regions.unnormalized_output_ty));\\n\\n        // For each of the input/output types:\\n        // - Normalize the type. This will create some region\\n        //   constraints, which we buffer up because we are\\n        //   not ready to process them yet.\\n        // - Then compute the implied bounds. This will adjust\\n        //   the `region_bound_pairs` and so forth.\\n        // - After this is done, we'll process the constraints, once\\n        //   the `relations` is built.\\n        let mut normalized_inputs_and_output =\\n            Vec::with_capacity(self.universal_regions.unnormalized_input_tys.len() + 1);\\n        let constraint_sets: Vec<_> = unnormalized_input_output_tys\\n            .flat_map(|ty| {\\n                debug!(\\\"build: input_or_output={:?}\\\", ty);\\n                // We only add implied bounds for the normalized type as the unnormalized\\n                // type may not actually get checked by the caller.\\n                //\\n                // Can otherwise be unsound, see #91068.\\n                let TypeOpOutput { output: norm_ty, constraints: constraints1, .. } = self\\n                    .param_env\\n                    .and(type_op::normalize::Normalize::new(ty))\\n                    .fully_perform(self.infcx)\\n                    .unwrap_or_else(|_| {\\n                        self.infcx\\n                            .tcx\\n                            .sess\\n                            .delay_span_bug(DUMMY_SP, &format!(\\\"failed to normalize {:?}\\\", ty));\\n                        TypeOpOutput {\\n                            output: self.infcx.tcx.ty_error(),\\n                            constraints: None,\\n                            error_info: None,\\n                        }\\n                    });\\n                // Note: we need this in examples like\\n                // ```\\n                // trait Foo {\\n                //   type Bar;\\n                //   fn foo(&self) -> &Self::Bar;\\n                // }\\n                // impl Foo for () {\\n                //   type Bar = ();\\n                //   fn foo(&self) ->&() {}\\n                // }\\n                // ```\\n                // Both &Self::Bar and &() are WF\\n                let constraints_implied = self.add_implied_bounds(norm_ty);\\n                normalized_inputs_and_output.push(norm_ty);\\n                constraints1.into_iter().chain(constraints_implied)\\n            })\\n            .collect();\\n\\n        // Insert the facts we know from the predicates. Why? Why not.\\n        let param_env = self.param_env;\\n        self.add_outlives_bounds(outlives::explicit_outlives_bounds(param_env));\\n\\n        // Finally:\\n        // - outlives is reflexive, so `'r: 'r` for every region `'r`\\n        // - `'static: 'r` for every region `'r`\\n        // - `'r: 'fn_body` for every (other) universally quantified\\n        //   region `'r`, all of which are provided by our caller\\n        let fr_static = self.universal_regions.fr_static;\\n        let fr_fn_body = self.universal_regions.fr_fn_body;\\n        for fr in self.universal_regions.universal_regions() {\\n            debug!(\\\"build: relating free region {:?} to itself and to 'static\\\", fr);\\n            self.relations.relate_universal_regions(fr, fr);\\n            self.relations.relate_universal_regions(fr_static, fr);\\n            self.relations.relate_universal_regions(fr, fr_fn_body);\\n        }\\n\\n        for data in &constraint_sets {\\n            constraint_conversion::ConstraintConversion::new(\\n                self.infcx,\\n                &self.universal_regions,\\n                &self.region_bound_pairs,\\n                self.implicit_region_bound,\\n                self.param_env,\\n                Locations::All(DUMMY_SP),\\n                DUMMY_SP,\\n                ConstraintCategory::Internal,\\n                &mut self.constraints,\\n            )\\n            .convert_all(data);\\n        }\\n\\n        CreateResult {\\n            universal_region_relations: Frozen::freeze(self.relations),\\n            region_bound_pairs: self.region_bound_pairs,\\n            normalized_inputs_and_output,\\n        }\\n    }\"}",
+      "{\"type\": \"CLASS\", \"name\": \"add_implied_bounds\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/type_check/free_region_relations.rs\", \"content\": \"\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"add_implied_bounds\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_typeck/src/check/regionck.rs\", \"content\": \"fn add_implied_bounds<'a>(\\n        &mut self,\\n        infcx: &InferCtxt<'a, 'tcx>,\\n        fn_sig_tys: FxHashSet<Ty<'tcx>>,\\n        body_id: hir::HirId,\\n        span: Span,\\n    ) {\\n        for ty in fn_sig_tys {\\n            let ty = infcx.resolve_vars_if_possible(ty);\\n            let implied_bounds = infcx.implied_outlives_bounds(self.param_env, body_id, ty, span);\\n            self.add_outlives_bounds(Some(infcx), implied_bounds)\\n        }\\n    }\"}",
+      "{\"type\": \"FILE\", \"name\": \"free_region_relations.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/type_check/free_region_relations.rs\", \"content\": \"free_region_relations.rs\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"create\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/type_check/free_region_relations.rs\", \"content\": \"pub(crate) fn create<'tcx>(\\n    infcx: &InferCtxt<'_, 'tcx>,\\n    param_env: ty::ParamEnv<'tcx>,\\n    implicit_region_bound: Option<ty::Region<'tcx>>,\\n    universal_regions: &Rc<UniversalRegions<'tcx>>,\\n    constraints: &mut MirTypeckRegionConstraints<'tcx>,\\n) -> CreateResult<'tcx> {\\n    UniversalRegionRelationsBuilder {\\n        infcx,\\n        param_env,\\n        implicit_region_bound,\\n        constraints,\\n        universal_regions: universal_regions.clone(),\\n        region_bound_pairs: Vec::new(),\\n        relations: UniversalRegionRelations {\\n            universal_regions: universal_regions.clone(),\\n            outlives: Default::default(),\\n            inverse_outlives: Default::default(),\\n        },\\n    }\\n    .create()\\n}\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_borrowck/src/type_check/free_region_relations.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Implied bounds are derived only from the normalized type seen during borrowchecking, not from projections that may later normalize at call sites",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "create",
+              "file": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+              "content": "pub(crate) fn create(mut self) -> CreateResult<'tcx> {\n        let unnormalized_input_output_tys = self\n            .universal_regions\n            .unnormalized_input_tys\n            .iter()\n            .cloned()\n            .chain(Some(self.universal_regions.unnormalized_output_ty));\n\n        // For each of the input/output types:\n        // - Normalize the type. This will create some region\n        //   constraints, which we buffer up because we are\n        //   not ready to process them yet.\n        // - Then compute the implied bounds. This will adjust\n        //   the `region_bound_pairs` and so forth.\n        // - After this is done, we'll process the constraints, once\n        //   the `relations` is built.\n        let mut normalized_inputs_and_output =\n            Vec::with_capacity(self.universal_regions.unnormalized_input_tys.len() + 1);\n        let constraint_sets: Vec<_> = unnormalized_input_output_tys\n            .flat_map(|ty| {\n                debug!(\"build: input_or_output={:?}\", ty);\n                // We only add implied bounds for the normalized type as the unnormalized\n                // type may not actually get checked by the caller.\n                //\n                // Can otherwise be unsound, see #91068.\n                let TypeOpOutput { output: norm_ty, constraints: constraints1, .. } = self\n                    .param_env\n                    .and(type_op::normalize::Normalize::new(ty))\n                    .fully_perform(self.infcx)\n                    .unwrap_or_else(|_| {\n                        self.infcx\n                            .tcx\n                            .sess\n                            .delay_span_bug(DUMMY_SP, &format!(\"failed to normalize {:?}\", ty));\n                        TypeOpOutput {\n                            output: self.infcx.tcx.ty_error(),\n                            constraints: None,\n                            error_info: None,\n                        }\n                    });\n                // Note: we need this in examples like\n                // ```\n                // trait Foo {\n                //   type Bar;\n                //   fn foo(&self) -> &Self::Bar;\n                // }\n                // impl Foo for () {\n                //   type Bar = ();\n                //   fn foo(&self) ->&() {}\n                // }\n                // ```\n                // Both &Self::Bar and &() are WF\n                let constraints_implied = self.add_implied_bounds(norm_ty);\n                normalized_inputs_and_output.push(norm_ty);\n                constraints1.into_iter().chain(constraints_implied)\n            })\n            .collect();\n\n        // Insert the facts we know from the predicates. Why? Why not.\n        let param_env = self.param_env;\n        self.add_outlives_bounds(outlives::explicit_outlives_bounds(param_env));\n\n        // Finally:\n        // - outlives is reflexive, so `'r: 'r` for every region `'r`\n        // - `'static: 'r` for every region `'r`\n        // - `'r: 'fn_body` for every (other) universally quantified\n        //   region `'r`, all of which are provided by our caller\n        let fr_static = self.universal_regions.fr_static;\n        let fr_fn_body = self.universal_regions.fr_fn_body;\n        for fr in self.universal_regions.universal_regions() {\n            debug!(\"build: relating free region {:?} to itself and to 'static\", fr);\n            self.relations.relate_universal_regions(fr, fr);\n            self.relations.relate_universal_regions(fr_static, fr);\n            self.relations.relate_universal_regions(fr, fr_fn_body);\n        }\n\n        for data in &constraint_sets {\n            constraint_conversion::ConstraintConversion::new(\n                self.infcx,\n                &self.universal_regions,\n                &self.region_bound_pairs,\n                self.implicit_region_bound,\n                self.param_env,\n                Locations::All(DUMMY_SP),\n                DUMMY_SP,\n                ConstraintCategory::Internal,\n                &mut self.constraints,\n            )\n            .convert_all(data);\n        }\n\n        CreateResult {\n            universal_region_relations: Frozen::freeze(self.relations),\n            region_bound_pairs: self.region_bound_pairs,\n            normalized_inputs_and_output,\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Projection normalization depends on the current param_env; borrowchecking prefers param candidates and can avoid normalization, while callers may normalize using impl candidates",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "create",
+              "file": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+              "content": "pub(crate) fn create(mut self) -> CreateResult<'tcx> {\n        let unnormalized_input_output_tys = self\n            .universal_regions\n            .unnormalized_input_tys\n            .iter()\n            .cloned()\n            .chain(Some(self.universal_regions.unnormalized_output_ty));\n\n        // For each of the input/output types:\n        // - Normalize the type. This will create some region\n        //   constraints, which we buffer up because we are\n        //   not ready to process them yet.\n        // - Then compute the implied bounds. This will adjust\n        //   the `region_bound_pairs` and so forth.\n        // - After this is done, we'll process the constraints, once\n        //   the `relations` is built.\n        let mut normalized_inputs_and_output =\n            Vec::with_capacity(self.universal_regions.unnormalized_input_tys.len() + 1);\n        let constraint_sets: Vec<_> = unnormalized_input_output_tys\n            .flat_map(|ty| {\n                debug!(\"build: input_or_output={:?}\", ty);\n                // We only add implied bounds for the normalized type as the unnormalized\n                // type may not actually get checked by the caller.\n                //\n                // Can otherwise be unsound, see #91068.\n                let TypeOpOutput { output: norm_ty, constraints: constraints1, .. } = self\n                    .param_env\n                    .and(type_op::normalize::Normalize::new(ty))\n                    .fully_perform(self.infcx)\n                    .unwrap_or_else(|_| {\n                        self.infcx\n                            .tcx\n                            .sess\n                            .delay_span_bug(DUMMY_SP, &format!(\"failed to normalize {:?}\", ty));\n                        TypeOpOutput {\n                            output: self.infcx.tcx.ty_error(),\n                            constraints: None,\n                            error_info: None,\n                        }\n                    });\n                // Note: we need this in examples like\n                // ```\n                // trait Foo {\n                //   type Bar;\n                //   fn foo(&self) -> &Self::Bar;\n                // }\n                // impl Foo for () {\n                //   type Bar = ();\n                //   fn foo(&self) ->&() {}\n                // }\n                // ```\n                // Both &Self::Bar and &() are WF\n                let constraints_implied = self.add_implied_bounds(norm_ty);\n                normalized_inputs_and_output.push(norm_ty);\n                constraints1.into_iter().chain(constraints_implied)\n            })\n            .collect();\n\n        // Insert the facts we know from the predicates. Why? Why not.\n        let param_env = self.param_env;\n        self.add_outlives_bounds(outlives::explicit_outlives_bounds(param_env));\n\n        // Finally:\n        // - outlives is reflexive, so `'r: 'r` for every region `'r`\n        // - `'static: 'r` for every region `'r`\n        // - `'r: 'fn_body` for every (other) universally quantified\n        //   region `'r`, all of which are provided by our caller\n        let fr_static = self.universal_regions.fr_static;\n        let fr_fn_body = self.universal_regions.fr_fn_body;\n        for fr in self.universal_regions.universal_regions() {\n            debug!(\"build: relating free region {:?} to itself and to 'static\", fr);\n            self.relations.relate_universal_regions(fr, fr);\n            self.relations.relate_universal_regions(fr_static, fr);\n            self.relations.relate_universal_regions(fr, fr_fn_body);\n        }\n\n        for data in &constraint_sets {\n            constraint_conversion::ConstraintConversion::new(\n                self.infcx,\n                &self.universal_regions,\n                &self.region_bound_pairs,\n                self.implicit_region_bound,\n                self.param_env,\n                Locations::All(DUMMY_SP),\n                DUMMY_SP,\n                ConstraintCategory::Internal,\n                &mut self.constraints,\n            )\n            .convert_all(data);\n        }\n\n        CreateResult {\n            universal_region_relations: Frozen::freeze(self.relations),\n            region_bound_pairs: self.region_bound_pairs,\n            normalized_inputs_and_output,\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Caller is not required to prove the well-formedness/trait obligation for the projected associated type base when the projection later normalizes",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "add_implied_bounds",
+              "file": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+              "content": "fn add_implied_bounds(&mut self, ty: Ty<'tcx>) -> Option<Rc<QueryRegionConstraints<'tcx>>> {\n        let TypeOpOutput { output: bounds, constraints, .. } = self\n            .param_env\n            .and(type_op::implied_outlives_bounds::ImpliedOutlivesBounds { ty })\n            .fully_perform(self.infcx)\n            .unwrap_or_else(|_| bug!(\"failed to compute implied bounds {:?}\", ty));\n        self.add_outlives_bounds(bounds);\n        constraints\n    }"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Implied outlives bounds are computed under the local param_env, so added where-bounds can mask normalization and produce incomplete implied bounds",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "add_implied_bounds",
+              "file": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+              "content": "fn add_implied_bounds(&mut self, ty: Ty<'tcx>) -> Option<Rc<QueryRegionConstraints<'tcx>>> {\n        let TypeOpOutput { output: bounds, constraints, .. } = self\n            .param_env\n            .and(type_op::implied_outlives_bounds::ImpliedOutlivesBounds { ty })\n            .fully_perform(self.infcx)\n            .unwrap_or_else(|_| bug!(\"failed to compute implied bounds {:?}\", ty));\n        self.add_outlives_bounds(bounds);\n        constraints\n    }"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.98
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.99
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.93
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.97
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 129.507,
+    "stage_times_sec": {
+      "load_bug_context": 0.013,
+      "checkout": 0.641,
+      "load_or_build_graph": 28.079,
+      "symptom_vertices_locating": 81.285,
+      "dynamic_cig_discovering": 17.875,
+      "convert_results": 0.048
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 12,
+      "input_tokens": 72705,
+      "output_tokens": 1341,
+      "total_tokens": 74046,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 2.361,
+          "input_tokens": 1670,
+          "output_tokens": 94,
+          "total_tokens": 1764
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.553,
+          "input_tokens": 1024,
+          "output_tokens": 18,
+          "total_tokens": 1042
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.089,
+          "input_tokens": 1847,
+          "output_tokens": 73,
+          "total_tokens": 1920
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 1.737,
+          "input_tokens": 1934,
+          "output_tokens": 66,
+          "total_tokens": 2000
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 1.715,
+          "input_tokens": 2014,
+          "output_tokens": 40,
+          "total_tokens": 2054
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.589,
+          "input_tokens": 2349,
+          "output_tokens": 20,
+          "total_tokens": 2369
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.258,
+          "input_tokens": 3291,
+          "output_tokens": 61,
+          "total_tokens": 3352
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 3.692,
+          "input_tokens": 2736,
+          "output_tokens": 194,
+          "total_tokens": 2930
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 4.031,
+          "input_tokens": 22492,
+          "output_tokens": 193,
+          "total_tokens": 22685
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 4.112,
+          "input_tokens": 22493,
+          "output_tokens": 192,
+          "total_tokens": 22685
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.08,
+          "input_tokens": 5427,
+          "output_tokens": 195,
+          "total_tokens": 5622
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 2.9,
+          "input_tokens": 5428,
+          "output_tokens": 195,
+          "total_tokens": 5623
+        }
+      ]
+    }
+  }
+}

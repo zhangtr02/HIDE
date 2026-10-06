@@ -1,0 +1,260 @@
+{
+  "bug_id": "125432",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-05-22",
+    "resolved": "791adf759cc065316f054961875052d5bc03e16c"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/method/confirm.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_hir_typeck/src/method/confirm.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+        "rank": 1
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/125432.json",
+    "graph_cache_hit": true,
+    "graph_cache_build_mode": "bug_cache",
+    "graph_cache_bug_id": "125432",
+    "graph_cache_checkout_commit": "791adf759cc065316f054961875052d5bc03e16c",
+    "initial_graph_node_count": 56004,
+    "initial_graph_edge_count": 56003,
+    "graph_node_count": 56004,
+    "graph_edge_count": 62578,
+    "lazy_loaded_edge_count": 6575,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FILE\", \"name\": \"confirm.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_typeck/src/method/confirm.rs\", \"content\": \"confirm.rs\"}",
+      "{\"type\": \"STRUCTURE\", \"name\": \"ConfirmContext\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_typeck/src/method/confirm.rs\", \"content\": \"struct ConfirmContext<'a, 'tcx> {\\n    fcx: &'a FnCtxt<'a, 'tcx>,\\n    span: Span,\\n    self_expr: &'tcx hir::Expr<'tcx>,\\n    call_expr: &'tcx hir::Expr<'tcx>,\\n    skip_record_for_diagnostics: bool,\\n}\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"confirm\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_typeck/src/method/confirm.rs\", \"content\": \"fn confirm(\\n        &mut self,\\n        unadjusted_self_ty: Ty<'tcx>,\\n        pick: &probe::Pick<'tcx>,\\n        segment: &hir::PathSegment<'tcx>,\\n    ) -> ConfirmResult<'tcx> {\\n        // Adjust the self expression the user provided and obtain the adjusted type.\\n        let self_ty = self.adjust_self_ty(unadjusted_self_ty, pick);\\n\\n        // Create generic args for the method's type parameters.\\n        let rcvr_args = self.fresh_receiver_args(self_ty, pick);\\n        let all_args = self.instantiate_method_args(pick, segment, rcvr_args);\\n\\n        debug!(\\\"rcvr_args={rcvr_args:?}, all_args={all_args:?}\\\");\\n\\n        // Create the final signature for the method, replacing late-bound regions.\\n        let (method_sig, method_predicates) = self.instantiate_method_sig(pick, all_args);\\n\\n        // If there is a `Self: Sized` bound and `Self` is a trait object, it is possible that\\n        // something which derefs to `Self` actually implements the trait and the caller\\n        // wanted to make a static dispatch on it but forgot to import the trait.\\n        // See test `tests/ui/issue-35976.rs`.\\n        //\\n        // In that case, we'll error anyway, but we'll also re-run the search with all traits\\n        // in scope, and if we find another method which can be used, we'll output an\\n        // appropriate hint suggesting to import the trait.\\n        let filler_args = rcvr_args\\n            .extend_to(self.tcx, pick.item.def_id, |def, _| self.tcx.mk_param_from_def(def));\\n        let illegal_sized_bound = self.predicates_require_illegal_sized_bound(\\n            self.tcx.predicates_of(pick.item.def_id).instantiate(self.tcx, filler_args),\\n        );\\n\\n        // Unify the (adjusted) self type with what the method expects.\\n        //\\n        // SUBTLE: if we want good error messages, because of \\\"guessing\\\" while matching\\n        // traits, no trait system method can be called before this point because they\\n        // could alter our Self-type, except for normalizing the receiver from the\\n        // signature (which is also done during probing).\\n        let method_sig_rcvr = self.normalize(self.span, method_sig.inputs()[0]);\\n        debug!(\\n            \\\"confirm: self_ty={:?} method_sig_rcvr={:?} method_sig={:?} method_predicates={:?}\\\",\\n            self_ty, method_sig_rcvr, method_sig, method_predicates\\n        );\\n        self.unify_receivers(self_ty, method_sig_rcvr, pick, all_args);\\n\\n        let (method_sig, method_predicates) =\\n            self.normalize(self.span, (method_sig, method_predicates));\\n        let method_sig = ty::Binder::dummy(method_sig);\\n\\n        // Make sure nobody calls `drop()` explicitly.\\n        self.enforce_illegal_method_limitations(pick);\\n\\n        // Add any trait/regions obligations specified on the method's type parameters.\\n        // We won't add these if we encountered an illegal sized bound, so that we can use\\n        // a custom error in that case.\\n        if illegal_sized_bound.is_none() {\\n            self.add_obligations(\\n                Ty::new_fn_ptr(self.tcx, method_sig),\\n                all_args,\\n                method_predicates,\\n                pick.item.def_id,\\n            );\\n        }\\n\\n        // Create the final `MethodCallee`.\\n        let callee = MethodCallee {\\n            def_id: pick.item.def_id,\\n            args: all_args,\\n            sig: method_sig.skip_binder(),\\n        };\\n        ConfirmResult { callee, illegal_sized_bound }\\n    }\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_hir_typeck/src/method/confirm.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Unchecked None assumption in method confirmation unwrap path",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "confirm",
+              "file": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+              "content": "fn confirm(\n        &mut self,\n        unadjusted_self_ty: Ty<'tcx>,\n        pick: &probe::Pick<'tcx>,\n        segment: &hir::PathSegment<'tcx>,\n    ) -> ConfirmResult<'tcx> {\n        // Adjust the self expression the user provided and obtain the adjusted type.\n        let self_ty = self.adjust_self_ty(unadjusted_self_ty, pick);\n\n        // Create generic args for the method's type parameters.\n        let rcvr_args = self.fresh_receiver_args(self_ty, pick);\n        let all_args = self.instantiate_method_args(pick, segment, rcvr_args);\n\n        debug!(\"rcvr_args={rcvr_args:?}, all_args={all_args:?}\");\n\n        // Create the final signature for the method, replacing late-bound regions.\n        let (method_sig, method_predicates) = self.instantiate_method_sig(pick, all_args);\n\n        // If there is a `Self: Sized` bound and `Self` is a trait object, it is possible that\n        // something which derefs to `Self` actually implements the trait and the caller\n        // wanted to make a static dispatch on it but forgot to import the trait.\n        // See test `tests/ui/issue-35976.rs`.\n        //\n        // In that case, we'll error anyway, but we'll also re-run the search with all traits\n        // in scope, and if we find another method which can be used, we'll output an\n        // appropriate hint suggesting to import the trait.\n        let filler_args = rcvr_args\n            .extend_to(self.tcx, pick.item.def_id, |def, _| self.tcx.mk_param_from_def(def));\n        let illegal_sized_bound = self.predicates_require_illegal_sized_bound(\n            self.tcx.predicates_of(pick.item.def_id).instantiate(self.tcx, filler_args),\n        );\n\n        // Unify the (adjusted) self type with what the method expects.\n        //\n        // SUBTLE: if we want good error messages, because of \"guessing\" while matching\n        // traits, no trait system method can be called before this point because they\n        // could alter our Self-type, except for normalizing the receiver from the\n        // signature (which is also done during probing).\n        let method_sig_rcvr = self.normalize(self.span, method_sig.inputs()[0]);\n        debug!(\n            \"confirm: self_ty={:?} method_sig_rcvr={:?} method_sig={:?} method_predicates={:?}\",\n            self_ty, method_sig_rcvr, method_sig, method_predicates\n        );\n        self.unify_receivers(self_ty, method_sig_rcvr, pick, all_args);\n\n        let (method_sig, method_predicates) =\n            self.normalize(self.span, (method_sig, method_predicates));\n        let method_sig = ty::Binder::dummy(method_sig);\n\n        // Make sure nobody calls `drop()` explicitly.\n        self.enforce_illegal_method_limitations(pick);\n\n        // Add any trait/regions obligations specified on the method's type parameters.\n        // We won't add these if we encountered an illegal sized bound, so that we can use\n        // a custom error in that case.\n        if illegal_sized_bound.is_none() {\n            self.add_obligations(\n                Ty::new_fn_ptr(self.tcx, method_sig),\n                all_args,\n                method_predicates,\n                pick.item.def_id,\n            );\n        }\n\n        // Create the final `MethodCallee`.\n        let callee = MethodCallee {\n            def_id: pick.item.def_id,\n            args: all_args,\n            sig: method_sig.skip_binder(),\n        };\n        ConfirmResult { callee, illegal_sized_bound }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Receiver type inconsistency after self-type adjustment/unification",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "confirm",
+              "file": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+              "content": "fn confirm(\n        &mut self,\n        unadjusted_self_ty: Ty<'tcx>,\n        pick: &probe::Pick<'tcx>,\n        segment: &hir::PathSegment<'tcx>,\n    ) -> ConfirmResult<'tcx> {\n        // Adjust the self expression the user provided and obtain the adjusted type.\n        let self_ty = self.adjust_self_ty(unadjusted_self_ty, pick);\n\n        // Create generic args for the method's type parameters.\n        let rcvr_args = self.fresh_receiver_args(self_ty, pick);\n        let all_args = self.instantiate_method_args(pick, segment, rcvr_args);\n\n        debug!(\"rcvr_args={rcvr_args:?}, all_args={all_args:?}\");\n\n        // Create the final signature for the method, replacing late-bound regions.\n        let (method_sig, method_predicates) = self.instantiate_method_sig(pick, all_args);\n\n        // If there is a `Self: Sized` bound and `Self` is a trait object, it is possible that\n        // something which derefs to `Self` actually implements the trait and the caller\n        // wanted to make a static dispatch on it but forgot to import the trait.\n        // See test `tests/ui/issue-35976.rs`.\n        //\n        // In that case, we'll error anyway, but we'll also re-run the search with all traits\n        // in scope, and if we find another method which can be used, we'll output an\n        // appropriate hint suggesting to import the trait.\n        let filler_args = rcvr_args\n            .extend_to(self.tcx, pick.item.def_id, |def, _| self.tcx.mk_param_from_def(def));\n        let illegal_sized_bound = self.predicates_require_illegal_sized_bound(\n            self.tcx.predicates_of(pick.item.def_id).instantiate(self.tcx, filler_args),\n        );\n\n        // Unify the (adjusted) self type with what the method expects.\n        //\n        // SUBTLE: if we want good error messages, because of \"guessing\" while matching\n        // traits, no trait system method can be called before this point because they\n        // could alter our Self-type, except for normalizing the receiver from the\n        // signature (which is also done during probing).\n        let method_sig_rcvr = self.normalize(self.span, method_sig.inputs()[0]);\n        debug!(\n            \"confirm: self_ty={:?} method_sig_rcvr={:?} method_sig={:?} method_predicates={:?}\",\n            self_ty, method_sig_rcvr, method_sig, method_predicates\n        );\n        self.unify_receivers(self_ty, method_sig_rcvr, pick, all_args);\n\n        let (method_sig, method_predicates) =\n            self.normalize(self.span, (method_sig, method_predicates));\n        let method_sig = ty::Binder::dummy(method_sig);\n\n        // Make sure nobody calls `drop()` explicitly.\n        self.enforce_illegal_method_limitations(pick);\n\n        // Add any trait/regions obligations specified on the method's type parameters.\n        // We won't add these if we encountered an illegal sized bound, so that we can use\n        // a custom error in that case.\n        if illegal_sized_bound.is_none() {\n            self.add_obligations(\n                Ty::new_fn_ptr(self.tcx, method_sig),\n                all_args,\n                method_predicates,\n                pick.item.def_id,\n            );\n        }\n\n        // Create the final `MethodCallee`.\n        let callee = MethodCallee {\n            def_id: pick.item.def_id,\n            args: all_args,\n            sig: method_sig.skip_binder(),\n        };\n        ConfirmResult { callee, illegal_sized_bound }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Autoderef / method-probing ambiguity handled incorrectly in confirmation flow",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "confirm.rs",
+              "file": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+              "content": "confirm.rs"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Delayed bug state allowed confirmation to proceed to panic instead of graceful error reporting",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "confirm",
+              "file": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+              "content": "fn confirm(\n        &mut self,\n        unadjusted_self_ty: Ty<'tcx>,\n        pick: &probe::Pick<'tcx>,\n        segment: &hir::PathSegment<'tcx>,\n    ) -> ConfirmResult<'tcx> {\n        // Adjust the self expression the user provided and obtain the adjusted type.\n        let self_ty = self.adjust_self_ty(unadjusted_self_ty, pick);\n\n        // Create generic args for the method's type parameters.\n        let rcvr_args = self.fresh_receiver_args(self_ty, pick);\n        let all_args = self.instantiate_method_args(pick, segment, rcvr_args);\n\n        debug!(\"rcvr_args={rcvr_args:?}, all_args={all_args:?}\");\n\n        // Create the final signature for the method, replacing late-bound regions.\n        let (method_sig, method_predicates) = self.instantiate_method_sig(pick, all_args);\n\n        // If there is a `Self: Sized` bound and `Self` is a trait object, it is possible that\n        // something which derefs to `Self` actually implements the trait and the caller\n        // wanted to make a static dispatch on it but forgot to import the trait.\n        // See test `tests/ui/issue-35976.rs`.\n        //\n        // In that case, we'll error anyway, but we'll also re-run the search with all traits\n        // in scope, and if we find another method which can be used, we'll output an\n        // appropriate hint suggesting to import the trait.\n        let filler_args = rcvr_args\n            .extend_to(self.tcx, pick.item.def_id, |def, _| self.tcx.mk_param_from_def(def));\n        let illegal_sized_bound = self.predicates_require_illegal_sized_bound(\n            self.tcx.predicates_of(pick.item.def_id).instantiate(self.tcx, filler_args),\n        );\n\n        // Unify the (adjusted) self type with what the method expects.\n        //\n        // SUBTLE: if we want good error messages, because of \"guessing\" while matching\n        // traits, no trait system method can be called before this point because they\n        // could alter our Self-type, except for normalizing the receiver from the\n        // signature (which is also done during probing).\n        let method_sig_rcvr = self.normalize(self.span, method_sig.inputs()[0]);\n        debug!(\n            \"confirm: self_ty={:?} method_sig_rcvr={:?} method_sig={:?} method_predicates={:?}\",\n            self_ty, method_sig_rcvr, method_sig, method_predicates\n        );\n        self.unify_receivers(self_ty, method_sig_rcvr, pick, all_args);\n\n        let (method_sig, method_predicates) =\n            self.normalize(self.span, (method_sig, method_predicates));\n        let method_sig = ty::Binder::dummy(method_sig);\n\n        // Make sure nobody calls `drop()` explicitly.\n        self.enforce_illegal_method_limitations(pick);\n\n        // Add any trait/regions obligations specified on the method's type parameters.\n        // We won't add these if we encountered an illegal sized bound, so that we can use\n        // a custom error in that case.\n        if illegal_sized_bound.is_none() {\n            self.add_obligations(\n                Ty::new_fn_ptr(self.tcx, method_sig),\n                all_args,\n                method_predicates,\n                pick.item.def_id,\n            );\n        }\n\n        // Create the final `MethodCallee`.\n        let callee = MethodCallee {\n            def_id: pick.item.def_id,\n            args: all_args,\n            sig: method_sig.skip_binder(),\n        };\n        ConfirmResult { callee, illegal_sized_bound }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "E",
+          "name": "Shared confirm.rs logic for method suggestion and builtin call confirmation exposes edge-case interaction",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "confirm.rs",
+              "file": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+              "content": "confirm.rs"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.99
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.98
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.95
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.95
+        },
+        {
+          "source": "E",
+          "target": "I",
+          "weight": 0.84
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 191.93,
+    "stage_times_sec": {
+      "load_bug_context": 0.053,
+      "checkout": 1.644,
+      "load_or_build_graph": 35.349,
+      "symptom_vertices_locating": 129.532,
+      "dynamic_cig_discovering": 23.538,
+      "convert_results": 0.003
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 12,
+      "input_tokens": 94263,
+      "output_tokens": 1274,
+      "total_tokens": 95537,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.246,
+          "input_tokens": 5002,
+          "output_tokens": 98,
+          "total_tokens": 5100
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.117,
+          "input_tokens": 4356,
+          "output_tokens": 17,
+          "total_tokens": 4373
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.33,
+          "input_tokens": 5176,
+          "output_tokens": 26,
+          "total_tokens": 5202
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.436,
+          "input_tokens": 5356,
+          "output_tokens": 48,
+          "total_tokens": 5404
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.245,
+          "input_tokens": 5418,
+          "output_tokens": 48,
+          "total_tokens": 5466
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 1.961,
+          "input_tokens": 5480,
+          "output_tokens": 24,
+          "total_tokens": 5504
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 4.742,
+          "input_tokens": 5321,
+          "output_tokens": 169,
+          "total_tokens": 5490
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 3.861,
+          "input_tokens": 14026,
+          "output_tokens": 169,
+          "total_tokens": 14195
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 3.943,
+          "input_tokens": 14028,
+          "output_tokens": 168,
+          "total_tokens": 14196
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.557,
+          "input_tokens": 8033,
+          "output_tokens": 169,
+          "total_tokens": 8202
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 4.299,
+          "input_tokens": 14032,
+          "output_tokens": 169,
+          "total_tokens": 14201
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 3.122,
+          "input_tokens": 8035,
+          "output_tokens": 169,
+          "total_tokens": 8204
+        }
+      ]
+    }
+  }
+}

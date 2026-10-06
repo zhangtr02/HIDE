@@ -1,0 +1,226 @@
+{
+  "bug_id": "127746",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-07-13",
+    "resolved": "c6727fc9b5c64cefa7263486497ee95e529bd0f8"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_trait_selection/src/traits/project.rs",
+      "compiler/rustc_hir_analysis/src/check/wfcheck.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "rank": 2
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/127746.json",
+    "graph_cache_hit": true,
+    "graph_cache_build_mode": "bug_cache",
+    "graph_cache_bug_id": "127746",
+    "graph_cache_checkout_commit": "c6727fc9b5c64cefa7263486497ee95e529bd0f8",
+    "initial_graph_node_count": 56830,
+    "initial_graph_edge_count": 56829,
+    "graph_node_count": 56830,
+    "graph_edge_count": 76259,
+    "lazy_loaded_edge_count": 19430,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"opt_normalize_projection_term\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/project.rs\", \"content\": \"pub(super) fn opt_normalize_projection_term<'a, 'b, 'tcx>(\\n    selcx: &'a mut SelectionContext<'b, 'tcx>,\\n    param_env: ty::ParamEnv<'tcx>,\\n    projection_term: ty::AliasTerm<'tcx>,\\n    cause: ObligationCause<'tcx>,\\n    depth: usize,\\n    obligations: &mut Vec<PredicateObligation<'tcx>>,\\n) -> Result<Option<Term<'tcx>>, InProgress> {\\n    let infcx = selcx.infcx;\\n    debug_assert!(!selcx.infcx.next_trait_solver());\\n    // Don't use the projection cache in intercrate mode -\\n    // the `infcx` may be re-used between intercrate in non-intercrate\\n    // mode, which could lead to using incorrect cache results.\\n    let use_cache = !selcx.is_intercrate();\\n\\n    let projection_term = infcx.resolve_vars_if_possible(projection_term);\\n    let cache_key = ProjectionCacheKey::new(projection_term, param_env);\\n\\n    // FIXME(#20304) For now, I am caching here, which is good, but it\\n    // means we don't capture the type variables that are created in\\n    // the case of ambiguity. Which means we may create a large stream\\n    // of such variables. OTOH, if we move the caching up a level, we\\n    // would not benefit from caching when proving `T: Trait<U=Foo>`\\n    // bounds. It might be the case that we want two distinct caches,\\n    // or else another kind of cache entry.\\n\\n    let cache_result = if use_cache {\\n        infcx.inner.borrow_mut().projection_cache().try_start(cache_key)\\n    } else {\\n        Ok(())\\n    };\\n    match cache_result {\\n        Ok(()) => debug!(\\\"no cache\\\"),\\n        Err(ProjectionCacheEntry::Ambiguous) => {\\n            // If we found ambiguity the last time, that means we will continue\\n            // to do so until some type in the key changes (and we know it\\n            // hasn't, because we just fully resolved it).\\n            debug!(\\\"found cache entry: ambiguous\\\");\\n            return Ok(None);\\n        }\\n        Err(ProjectionCacheEntry::InProgress) => {\\n            // Under lazy normalization, this can arise when\\n            // bootstrapping. That is, imagine an environment with a\\n            // where-clause like `A::B == u32`. Now, if we are asked\\n            // to normalize `A::B`, we will want to check the\\n            // where-clauses in scope. So we will try to unify `A::B`\\n            // with `A::B`, which can trigger a recursive\\n            // normalization.\\n\\n            debug!(\\\"found cache entry: in-progress\\\");\\n\\n            // Cache that normalizing this projection resulted in a cycle. This\\n            // should ensure that, unless this happens within a snapshot that's\\n            // rolled back, fulfillment or evaluation will notice the cycle.\\n\\n            if use_cache {\\n                infcx.inner.borrow_mut().projection_cache().recur(cache_key);\\n            }\\n            return Err(InProgress);\\n        }\\n        Err(ProjectionCacheEntry::Recur) => {\\n            debug!(\\\"recur cache\\\");\\n            return Err(InProgress);\\n        }\\n        Err(ProjectionCacheEntry::NormalizedTerm { ty, complete: _ }) => {\\n            // This is the hottest path in this function.\\n            //\\n            // If we find the value in the cache, then return it along\\n            // with the obligations that went along with it. Note\\n            // that, when using a fulfillment context, these\\n            // obligations could in principle be ignored: they have\\n            // already been registered when the cache entry was\\n            // created (and hence the new ones will quickly be\\n            // discarded as duplicated). But when doing trait\\n            // evaluation this is not the case, and dropping the trait\\n            // evaluations can causes ICEs (e.g., #43132).\\n            debug!(?ty, \\\"found normalized ty\\\");\\n            obligations.extend(ty.obligations);\\n            return Ok(Some(ty.value));\\n        }\\n        Err(ProjectionCacheEntry::Error) => {\\n            debug!(\\\"opt_normalize_projection_type: found error\\\");\\n            let result = normalize_to_error(selcx, param_env, projection_term, cause, depth);\\n            obligations.extend(result.obligations);\\n            return Ok(Some(result.value.into()));\\n        }\\n    }\\n\\n    let obligation =\\n        Obligation::with_depth(selcx.tcx(), cause.clone(), depth, param_env, projection_term);\\n\\n    match project(selcx, &obligation) {\\n        Ok(Projected::Progress(Progress {\\n            term: projected_term,\\n            obligations: mut projected_obligations,\\n        })) => {\\n            // if projection succeeded, then what we get out of this\\n            // is also non-normalized (consider: it was derived from\\n            // an impl, where-clause etc) and hence we must\\n            // re-normalize it\\n\\n            let projected_term = selcx.infcx.resolve_vars_if_possible(projected_term);\\n\\n            let mut result = if projected_term.has_aliases() {\\n                let normalized_ty = normalize_with_depth_to(\\n                    selcx,\\n                    param_env,\\n                    cause,\\n                    depth + 1,\\n                    projected_term,\\n                    &mut projected_obligations,\\n                );\\n\\n                Normalized { value: normalized_ty, obligations: projected_obligations }\\n            } else {\\n                Normalized { value: projected_term, obligations: projected_obligations }\\n            };\\n\\n            let mut deduped = SsoHashSet::with_capacity(result.obligations.len());\\n            result.obligations.retain(|obligation| deduped.insert(obligation.clone()));\\n\\n            if use_cache {\\n                infcx.inner.borrow_mut().projection_cache().insert_term(cache_key, result.clone());\\n            }\\n            obligations.extend(result.obligations);\\n            Ok(Some(result.value))\\n        }\\n        Ok(Projected::NoProgress(projected_ty)) => {\\n            let result = Normalized { value: projected_ty, obligations: vec![] };\\n            if use_cache {\\n                infcx.inner.borrow_mut().projection_cache().insert_term(cache_key, result.clone());\\n            }\\n            // No need to extend `obligations`.\\n            Ok(Some(result.value))\\n        }\\n        Err(ProjectionError::TooManyCandidates) => {\\n            debug!(\\\"opt_normalize_projection_type: too many candidates\\\");\\n            if use_cache {\\n                infcx.inner.borrow_mut().projection_cache().ambiguous(cache_key);\\n            }\\n            Ok(None)\\n        }\\n        Err(ProjectionError::TraitSelectionError(_)) => {\\n            debug!(\\\"opt_normalize_projection_type: ERROR\\\");\\n            // if we got an error processing the `T as Trait` part,\\n            // just return `ty::err` but add the obligation `T :\\n            // Trait`, which when processed will cause the error to be\\n            // reported later\\n\\n            if use_cache {\\n                infcx.inner.borrow_mut().projection_cache().error(cache_key);\\n            }\\n            let result = normalize_to_error(selcx, param_env, projection_term, cause, depth);\\n            obligations.extend(result.obligations);\\n            Ok(Some(result.value.into()))\\n        }\\n    }\\n}\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"check_well_formed\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/check/wfcheck.rs\", \"content\": \"fn check_well_formed(tcx: TyCtxt<'_>, def_id: hir::OwnerId) -> Result<(), ErrorGuaranteed> {\\n    let node = tcx.hir_owner_node(def_id);\\n    let mut res = match node {\\n        hir::OwnerNode::Crate(_) => bug!(\\\"check_well_formed cannot be applied to the crate root\\\"),\\n        hir::OwnerNode::Item(item) => check_item(tcx, item),\\n        hir::OwnerNode::TraitItem(item) => check_trait_item(tcx, item),\\n        hir::OwnerNode::ImplItem(item) => check_impl_item(tcx, item),\\n        hir::OwnerNode::ForeignItem(item) => check_foreign_item(tcx, item),\\n        hir::OwnerNode::Synthetic => unreachable!(),\\n    };\\n\\n    if let Some(generics) = node.generics() {\\n        for param in generics.params {\\n            res = res.and(check_param_wf(tcx, param));\\n        }\\n    }\\n    res\\n}\"}",
+      "{\"type\": \"FILE\", \"name\": \"project.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/project.rs\", \"content\": \"project.rs\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_trait_selection/src/traits/project.rs",
+      "compiler/rustc_hir_analysis/src/check/wfcheck.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Unexpected projection normalization on builtin/auto trait with associated type",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "opt_normalize_projection_term",
+              "file": "compiler/rustc_trait_selection/src/traits/project.rs",
+              "content": "pub(super) fn opt_normalize_projection_term<'a, 'b, 'tcx>(\n    selcx: &'a mut SelectionContext<'b, 'tcx>,\n    param_env: ty::ParamEnv<'tcx>,\n    projection_term: ty::AliasTerm<'tcx>,\n    cause: ObligationCause<'tcx>,\n    depth: usize,\n    obligations: &mut Vec<PredicateObligation<'tcx>>,\n) -> Result<Option<Term<'tcx>>, InProgress> {\n    let infcx = selcx.infcx;\n    debug_assert!(!selcx.infcx.next_trait_solver());\n    // Don't use the projection cache in intercrate mode -\n    // the `infcx` may be re-used between intercrate in non-intercrate\n    // mode, which could lead to using incorrect cache results.\n    let use_cache = !selcx.is_intercrate();\n\n    let projection_term = infcx.resolve_vars_if_possible(projection_term);\n    let cache_key = ProjectionCacheKey::new(projection_term, param_env);\n\n    // FIXME(#20304) For now, I am caching here, which is good, but it\n    // means we don't capture the type variables that are created in\n    // the case of ambiguity. Which means we may create a large stream\n    // of such variables. OTOH, if we move the caching up a level, we\n    // would not benefit from caching when proving `T: Trait<U=Foo>`\n    // bounds. It might be the case that we want two distinct caches,\n    // or else another kind of cache entry.\n\n    let cache_result = if use_cache {\n        infcx.inner.borrow_mut().projection_cache().try_start(cache_key)\n    } else {\n        Ok(())\n    };\n    match cache_result {\n        Ok(()) => debug!(\"no cache\"),\n        Err(ProjectionCacheEntry::Ambiguous) => {\n            // If we found ambiguity the last time, that means we will continue\n            // to do so until some type in the key changes (and we know it\n            // hasn't, because we just fully resolved it).\n            debug!(\"found cache entry: ambiguous\");\n            return Ok(None);\n        }\n        Err(ProjectionCacheEntry::InProgress) => {\n            // Under lazy normalization, this can arise when\n            // bootstrapping. That is, imagine an environment with a\n            // where-clause like `A::B == u32`. Now, if we are asked\n            // to normalize `A::B`, we will want to check the\n            // where-clauses in scope. So we will try to unify `A::B`\n            // with `A::B`, which can trigger a recursive\n            // normalization.\n\n            debug!(\"found cache entry: in-progress\");\n\n            // Cache that normalizing this projection resulted in a cycle. This\n            // should ensure that, unless this happens within a snapshot that's\n            // rolled back, fulfillment or evaluation will notice the cycle.\n\n            if use_cache {\n                infcx.inner.borrow_mut().projection_cache().recur(cache_key);\n            }\n            return Err(InProgress);\n        }\n        Err(ProjectionCacheEntry::Recur) => {\n            debug!(\"recur cache\");\n            return Err(InProgress);\n        }\n        Err(ProjectionCacheEntry::NormalizedTerm { ty, complete: _ }) => {\n            // This is the hottest path in this function.\n            //\n            // If we find the value in the cache, then return it along\n            // with the obligations that went along with it. Note\n            // that, when using a fulfillment context, these\n            // obligations could in principle be ignored: they have\n            // already been registered when the cache entry was\n            // created (and hence the new ones will quickly be\n            // discarded as duplicated). But when doing trait\n            // evaluation this is not the case, and dropping the trait\n            // evaluations can causes ICEs (e.g., #43132).\n            debug!(?ty, \"found normalized ty\");\n            obligations.extend(ty.obligations);\n            return Ok(Some(ty.value));\n        }\n        Err(ProjectionCacheEntry::Error) => {\n            debug!(\"opt_normalize_projection_type: found error\");\n            let result = normalize_to_error(selcx, param_env, projection_term, cause, depth);\n            obligations.extend(result.obligations);\n            return Ok(Some(result.value.into()));\n        }\n    }\n\n    let obligation =\n        Obligation::with_depth(selcx.tcx(), cause.clone(), depth, param_env, projection_term);\n\n    match project(selcx, &obligation) {\n        Ok(Projected::Progress(Progress {\n            term: projected_term,\n            obligations: mut projected_obligations,\n        })) => {\n            // if projection succeeded, then what we get out of this\n            // is also non-normalized (consider: it was derived from\n            // an impl, where-clause etc) and hence we must\n            // re-normalize it\n\n            let projected_term = selcx.infcx.resolve_vars_if_possible(projected_term);\n\n            let mut result = if projected_term.has_aliases() {\n                let normalized_ty = normalize_with_depth_to(\n                    selcx,\n                    param_env,\n                    cause,\n                    depth + 1,\n                    projected_term,\n                    &mut projected_obligations,\n                );\n\n                Normalized { value: normalized_ty, obligations: projected_obligations }\n            } else {\n                Normalized { value: projected_term, obligations: projected_obligations }\n            };\n\n            let mut deduped = SsoHashSet::with_capacity(result.obligations.len());\n            result.obligations.retain(|obligation| deduped.insert(obligation.clone()));\n\n            if use_cache {\n                infcx.inner.borrow_mut().projection_cache().insert_term(cache_key, result.clone());\n            }\n            obligations.extend(result.obligations);\n            Ok(Some(result.value))\n        }\n        Ok(Projected::NoProgress(projected_ty)) => {\n            let result = Normalized { value: projected_ty, obligations: vec![] };\n            if use_cache {\n                infcx.inner.borrow_mut().projection_cache().insert_term(cache_key, result.clone());\n            }\n            // No need to extend `obligations`.\n            Ok(Some(result.value))\n        }\n        Err(ProjectionError::TooManyCandidates) => {\n            debug!(\"opt_normalize_projection_type: too many candidates\");\n            if use_cache {\n                infcx.inner.borrow_mut().projection_cache().ambiguous(cache_key);\n            }\n            Ok(None)\n        }\n        Err(ProjectionError::TraitSelectionError(_)) => {\n            debug!(\"opt_normalize_projection_type: ERROR\");\n            // if we got an error processing the `T as Trait` part,\n            // just return `ty::err` but add the obligation `T :\n            // Trait`, which when processed will cause the error to be\n            // reported later\n\n            if use_cache {\n                infcx.inner.borrow_mut().projection_cache().error(cache_key);\n            }\n            let result = normalize_to_error(selcx, param_env, projection_term, cause, depth);\n            obligations.extend(result.obligations);\n            Ok(Some(result.value.into()))\n        }\n    }\n}"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Missing guard against invalid auto trait definitions reaching projection logic after prior errors",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "check_well_formed",
+              "file": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+              "content": "fn check_well_formed(tcx: TyCtxt<'_>, def_id: hir::OwnerId) -> Result<(), ErrorGuaranteed> {\n    let node = tcx.hir_owner_node(def_id);\n    let mut res = match node {\n        hir::OwnerNode::Crate(_) => bug!(\"check_well_formed cannot be applied to the crate root\"),\n        hir::OwnerNode::Item(item) => check_item(tcx, item),\n        hir::OwnerNode::TraitItem(item) => check_trait_item(tcx, item),\n        hir::OwnerNode::ImplItem(item) => check_impl_item(tcx, item),\n        hir::OwnerNode::ForeignItem(item) => check_foreign_item(tcx, item),\n        hir::OwnerNode::Synthetic => unreachable!(),\n    };\n\n    if let Some(generics) = node.generics() {\n        for param in generics.params {\n            res = res.and(check_param_wf(tcx, param));\n        }\n    }\n    res\n}"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Assumption in trait projection code that builtin traits cannot legitimately carry associated types, leading to bug! panic instead of graceful error handling",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "project.rs",
+              "file": "compiler/rustc_trait_selection/src/traits/project.rs",
+              "content": "project.rs"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.97
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.9
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.97
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 421.909,
+    "stage_times_sec": {
+      "load_bug_context": 0.009,
+      "checkout": 1.999,
+      "load_or_build_graph": 33.43,
+      "symptom_vertices_locating": 365.643,
+      "dynamic_cig_discovering": 18.886,
+      "convert_results": 0.005
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 11,
+      "input_tokens": 113686,
+      "output_tokens": 804,
+      "total_tokens": 114490,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 2.93,
+          "input_tokens": 7381,
+          "output_tokens": 96,
+          "total_tokens": 7477
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.189,
+          "input_tokens": 6730,
+          "output_tokens": 18,
+          "total_tokens": 6748
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.252,
+          "input_tokens": 7550,
+          "output_tokens": 28,
+          "total_tokens": 7578
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.737,
+          "input_tokens": 8654,
+          "output_tokens": 55,
+          "total_tokens": 8709
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.741,
+          "input_tokens": 8723,
+          "output_tokens": 26,
+          "total_tokens": 8749
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.072,
+          "input_tokens": 6726,
+          "output_tokens": 18,
+          "total_tokens": 6744
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.314,
+          "input_tokens": 8763,
+          "output_tokens": 28,
+          "total_tokens": 8791
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 4.969,
+          "input_tokens": 8005,
+          "output_tokens": 176,
+          "total_tokens": 8181
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 5.304,
+          "input_tokens": 22946,
+          "output_tokens": 120,
+          "total_tokens": 23066
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 4.875,
+          "input_tokens": 13259,
+          "output_tokens": 120,
+          "total_tokens": 13379
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.726,
+          "input_tokens": 14949,
+          "output_tokens": 119,
+          "total_tokens": 15068
+        }
+      ]
+    }
+  }
+}

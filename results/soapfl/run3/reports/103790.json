@@ -1,0 +1,235 @@
+{
+  "bug_id": "103790",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-10-27",
+    "resolved": "1898c34e923bad763e723c68dd9f23a09f9eb0fc"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_middle/src/ty/generics.rs",
+    "compiler/rustc_ast_lowering/src/item.rs",
+    "compiler/rustc_hir_analysis/src/collect.rs",
+    "compiler/rustc_middle/src/values.rs",
+    "compiler/rustc_query_system/src/error.rs",
+    "compiler/rustc_resolve/src/ident.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `generic_const_exprs`, allowing more complex constant expressions in generic parameters.",
+        "Suppresses incomplete-feature diagnostics with `#![allow(incomplete_features)]`, so the test targets deeper compiler handling instead of feature gating.",
+        "Declares a struct with two const generic parameters, exercising const generics parsing and type checking.",
+        "Uses the identifier `S` for the struct, a const parameter, another const parameter, and a type position, stressing name resolution and namespace separation.",
+        "Defines the second const parameter’s type as `S`, forcing the compiler to resolve whether `S` refers to the struct/type or a const parameter.",
+        "Gives the second const parameter a default value `{S}`, exercising const-parameter defaults and block-expression constants.",
+        "Uses `()` as the first const parameter’s type, probing unusual const generic types and validation of allowed const parameter kinds.",
+        "Contains no runtime logic; compilation alone is the reproducer, targeting frontend resolution/type-checking behavior that may ICE or emit incorrect diagnostics."
+      ],
+      "summary": "The reproducer is a compile-only test for nightly const generics. It combines `generic_const_exprs`, defaulted const parameters, and deliberately colliding names (`S`) across type and const namespaces. The key stress point is resolving `S` correctly in both the second parameter’s type and its default constant expression."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on frontend handling of const-generic parameter collection and type computation, not runtime codegen. The reproducer intentionally creates extreme name collisions: the item name `S`, the first const parameter name `S`, the second const parameter name `S`, and a type reference `S` inside the parameter list. This stresses namespace separation between type/value/generic-parameter scopes while also using a default const argument `{S}` under `generic_const_exprs`. The query stack shows the ICE occurs during `type_of` for `S::S`, then `type_of` for `S`, which strongly suggests the compiler is trying to compute the type of the second generic parameter/default in an invalid or cyclic environment after earlier diagnostics (E0107/E0391/E0403). The common pattern is that erroneous generic parameter name resolution is not being cleanly rejected before later query-based type collection runs, causing a cycle or invalid assumption in item type construction. In particular, resolving `S` in `const S: S = {S}` appears ambiguous between the enclosing struct type and the prior const parameter, and the compiler likely mishandles this shadowing/conflict during HIR lowering, name resolution, or `collect`/`type_of` for generic parameters with defaults.",
+      "possible_causes": [
+        "Bug in generic parameter collection/type computation for const generics: `rustc_typeck`/`rustc_hir_analysis::collect` may continue computing `type_of` for a const parameter after name-resolution errors, leading to an ICE instead of graceful error propagation.",
+        "Incorrect namespace/shadowing resolution in the generic parameter list: the compiler may misresolve `S` in `const S: S = {S}` between the item type `S` and const parameters named `S`, especially when duplicate generic names are already present.",
+        "Cycle handling defect when computing types of generic parameters with defaults: the second const parameter's type/default may be recorded in a way that introduces a self-reference or invalid dependency (`type_of(S::S)` -> `type_of(S)`), producing E0391-like cyclic behavior and panic.",
+        "HIR lowering or early resolution bug for defaulted const parameters using block expressions under `generic_const_exprs`, where `{S}` is evaluated in the wrong scope or before duplicate-name recovery is complete.",
+        "Insufficient validation/recovery for invalid const parameter declarations (`const S: ()`, then `const S: S = {S}`): after emitting user-facing errors such as duplicate parameter names and bad generic usage, later compiler phases assume well-formed generics and panic on malformed metadata."
+      ],
+      "evidence": [
+        "Query stack during panic: `#0 [type_of] computing type of 'S::S'`, `#1 [type_of] computing type of 'S'` indicates the crash happens in item/generic type collection rather than code generation.",
+        "The reproducer has heavy identifier collisions across namespaces: struct `S`, first const param `S`, second const param `S`, type annotation `S`, and default expression `{S}`.",
+        "Compiler emitted semantic errors E0107, E0391, E0403 before panicking, showing rustc detected invalid generic/name/cycle conditions but failed to stop later queries safely.",
+        "The issue is compile-only and triggered by `generic_const_exprs` plus default const parameters, pointing to frontend const-generic handling.",
+        "The syntax `const S: S = {S}` specifically forces resolution of `S` in both type and value contexts inside the generic parameter list, matching the observed `type_of`/cycle failure mode."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1518,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Most suspicious because the ICE happens directly in the `type_of` query, with the stack explicitly showing `computing type of S::S` and then `S`. This file computes declared types for HIR-owned defs, including const parameters/defaults, and is a likely place where erroneous generic-parameter state or name-resolution recovery is mishandled, leading to a cycle/panic instead of graceful error propagation."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "The reproducer stresses duplicate/shadowing const generic parameter names and defaults inside a generic parameter list. `generics_of` builds the canonical generic parameter metadata and parent/index relationships, so a bug here could incorrectly register the second `S`, confuse scopes, or create malformed generic metadata later consumed by `type_of`."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The key ambiguity is resolving `S` in `const S: S = {S}` across type/value/generic namespaces during the generic parameter list. Late resolution handles names in types and anon consts/bodies, so an error in scope handling or recovery for colliding generic parameter names could feed invalid resolution results into HIR analysis."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "This module lowers HIR type syntax into internal `ty` representations. The problematic `const S: S` type annotation likely passes through AST/HIR type conversion, and ambiguous or erroneous resolution between the struct `S` and const params could be mishandled here, especially under recovery after earlier diagnostics."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/generics.rs",
+        "reason": "Const parameter defaults are represented through generic-parameter metadata in `ty::Generics`, and this file includes logic for retrieving const defaults. If malformed duplicate const params are not robustly represented or recovered from, later `type_of`/default lookup could encounter invalid assumptions and ICE."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "Lowering of item generics and const parameter defaults into HIR happens here. Since the reproducer depends on unusual generic-parameter syntax, duplicate names, and a block-expression default `{S}`, incorrect lowering or owner/def creation for the second const param could produce the bad HIR that later crashes collection."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect.rs",
+        "reason": "This file wires and orchestrates collection queries such as `type_of` and `generics_of`. While less likely than the concrete implementations, the failure mode is in collect-time query interaction, so provider/recovery behavior here remains somewhat suspicious."
+      },
+      {
+        "path": "compiler/rustc_middle/src/values.rs",
+        "reason": "The compiler emits E0391-like cycle diagnostics before panicking. This file defines query cycle fallback values and recovery behavior for type-related queries, so insufficient recovery for this specific `type_of` cycle could contribute to the ICE after diagnostics are already emitted."
+      },
+      {
+        "path": "compiler/rustc_query_system/src/error.rs",
+        "reason": "The error output references query-cycle reporting. Although this is more diagnostic infrastructure than root cause, incorrect handling of cycle reporting or continuation after a cycle in this path can turn a recoverable error into an ICE, making it a lower-probability candidate."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/ident.rs",
+        "reason": "Identifier lookup across namespaces is central to the reproducer’s collision pattern. If generic-parameter shadowing rules or namespace-separated lookup for `S` are wrong here, the later `type_of` cycle could be a downstream symptom of an incorrect binding chosen during identifier resolution."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 135.965,
+    "stage_times_sec": {
+      "checkout": 1.586,
+      "load_bug_context": 0.112,
+      "test_behavior_analysis": 5.284,
+      "test_failure_analysis": 12.445,
+      "load_file_candidates": 0.103,
+      "search_suspicious_files": 116.435
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 362640,
+      "output_tokens": 6143,
+      "total_tokens": 368783,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.284,
+          "input_tokens": 356,
+          "output_tokens": 277,
+          "total_tokens": 633
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.445,
+          "input_tokens": 2149,
+          "output_tokens": 733,
+          "total_tokens": 2882
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.884,
+          "input_tokens": 27921,
+          "output_tokens": 364,
+          "total_tokens": 28285
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.563,
+          "input_tokens": 27452,
+          "output_tokens": 249,
+          "total_tokens": 27701
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.829,
+          "input_tokens": 27501,
+          "output_tokens": 321,
+          "total_tokens": 27822
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.349,
+          "input_tokens": 27692,
+          "output_tokens": 386,
+          "total_tokens": 28078
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.492,
+          "input_tokens": 27767,
+          "output_tokens": 405,
+          "total_tokens": 28172
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.857,
+          "input_tokens": 27847,
+          "output_tokens": 384,
+          "total_tokens": 28231
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.339,
+          "input_tokens": 27812,
+          "output_tokens": 344,
+          "total_tokens": 28156
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.81,
+          "input_tokens": 27744,
+          "output_tokens": 318,
+          "total_tokens": 28062
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.328,
+          "input_tokens": 27410,
+          "output_tokens": 392,
+          "total_tokens": 27802
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.457,
+          "input_tokens": 26452,
+          "output_tokens": 374,
+          "total_tokens": 26826
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.453,
+          "input_tokens": 27477,
+          "output_tokens": 272,
+          "total_tokens": 27749
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.071,
+          "input_tokens": 27888,
+          "output_tokens": 204,
+          "total_tokens": 28092
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.463,
+          "input_tokens": 18625,
+          "output_tokens": 341,
+          "total_tokens": 18966
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.515,
+          "input_tokens": 10547,
+          "output_tokens": 779,
+          "total_tokens": 11326
+        }
+      ]
+    }
+  }
+}

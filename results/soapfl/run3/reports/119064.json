@@ -1,0 +1,252 @@
+{
+  "bug_id": "119064",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-12-10",
+    "resolved": "06e02d5b259c1e88cbf0c74366d9e0a4c7cfd6d9"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/inline.rs",
+    "compiler/rustc_mir_transform/src/coroutine.rs",
+    "compiler/rustc_middle/src/mir/query.rs",
+    "compiler/rustc_mir_transform/src/add_subtyping_projections.rs",
+    "compiler/rustc_middle/src/ty/erase_regions.rs",
+    "compiler/rustc_monomorphize/src/collector.rs",
+    "compiler/rustc_middle/src/mir/tcx.rs",
+    "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_mir_transform/src/lib.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Creates a Tokio Mutex, acquires its lock with `.lock().await`, and stores the resulting `MutexGuard` inside a custom `ActionPermit<'a, T>` wrapper.",
+        "Uses async/await and an `async move` block so the guard and mutex borrow are captured across suspension points.",
+        "Defines `perform_async_boxed` as an async method consuming `self` and awaiting a callback-generated boxed future over `&mut T`.",
+        "Exercises higher-ranked trait bounds: `F: for<'lock> FnOnce(&'lock mut T) -> BoxFuture<'lock, R>` ties the boxed future lifetime to the mutable borrow.",
+        "Uses `FutureExt::boxed()` to erase the concrete async block type into `futures_core::future::BoxFuture`.",
+        "Calls the boxed-future method through `cancel_perform_async_boxed`, testing borrow checking and lifetime propagation across generic async function boundaries.",
+        "Wraps the returned future in `tokio::select!` with a single branch, forcing compiler handling of polling, cancellation semantics, and temporary future storage.",
+        "Runs the async program with `futures_lite::future::block_on`, mixing futures ecosystem crates with Tokio synchronization primitives and macros."
+      ],
+      "summary": "The reproducer builds a boxed async callback over a Tokio `MutexGuard` wrapped in `ActionPermit`, then awaits it inside `tokio::select!`. It stresses async lowering, HRTB lifetimes, boxed futures, mutable borrows tied to guard lifetimes, and compiler handling of cancellation/polling across generic async method calls and mixed async runtime libraries."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an internal compiler error during MIR optimization/codegen rather than a user-facing type-checking or borrow-checking error. The reproducer combines several stressors in the same path: an async method consuming `self`, a `MutexGuard` field borrowed mutably across `.await`, a higher-ranked callback `for<'lock> FnOnce(&'lock mut T) -> BoxFuture<'lock, R>`, type erasure via `.boxed()`, and wrapping the resulting future in `tokio::select!`. The query stack shows the panic while optimizing MIR for `cancel_perform_async_boxed::{closure#0}::{closure#1}`, which is consistent with the generator/async closure created around the `select!` branch and the boxed callback future. This suggests the compiler successfully accepted the program semantically, but later mishandled region/lifetime information or generator state during MIR transformation/monomorphization. The common pattern is late-stage compilation failure on async/generator MIR involving HRTB-returning boxed futures whose lifetime is tied to a reborrow of data stored inside `self`. The presence of `-Z inline-mir` and aggressive MIR inlining thresholds likely exposes a bug in MIR inlining/optimization for async state machines with erased future types and higher-ranked lifetimes.",
+      "possible_causes": [
+        "Bug in MIR optimization/inlining of async/generator bodies when an async method awaits a higher-ranked boxed future (`for<'a> ... -> BoxFuture<'a, _>`) borrowing from a field of `self`.",
+        "Incorrect region/lifetime remapping during async lowering or generator transform for reborrows like `&mut *self.guard` whose borrow lifetime is abstracted through HRTB and then erased behind `BoxFuture`.",
+        "Defect in MIR borrow/liveness handling for generator state containing `MutexGuard`/self fields captured across suspension points and then polled through `tokio::select!`.",
+        "Monomorphization or normalization bug for `FnOnce` returning `BoxFuture<'lock, R>` from an async method, especially when the returned future is created from `.boxed()` on an async block and then inlined.",
+        "Compiler bug in optimization of the desugared `tokio::select!` future causing invalid assumptions about temporary storage/drop order/cancellation for a future borrowing from a guard through a boxed trait object.",
+        "Interaction bug between opaque async types, trait-object-like boxed futures (`Pin<Box<dyn Future + 'a>>`), and higher-ranked lifetimes during `optimized_mir` for nested async closures."
+      ],
+      "evidence": [
+        "ICE occurs in query `optimized_mir` for `cancel_perform_async_boxed::{closure#0}::{closure#1}`, indicating a late MIR optimization problem in async-generated closure/generator code, not a frontend rejection.",
+        "The reproducer's core signature `F: for<'lock> FnOnce(&'lock mut T) -> BoxFuture<'lock, R>` explicitly ties the future lifetime to a reborrow of `self.guard`, a known-complex region pattern.",
+        "Inside `perform_async_boxed`, the compiler must lower `action(&mut *self.guard).await`, combining self-field projection, mutable reborrow, HRTB instantiation, and await suspension in one MIR path.",
+        "The future is erased with `FutureExt::boxed()`, introducing a heap-allocated boxed future with hidden concrete type and lifetime-dependent trait object, increasing normalization/region complexity.",
+        "The returned future is awaited through `tokio::select!`, which desugars into additional nested futures/closures and cancellation/drop logic, matching the nested closure names in the query stack.",
+        "Compiler flags include `-Z inline-mir` and very aggressive inline thresholds, making MIR inlining a strong suspect for exposing an optimizer defect in this async/HRTB/boxed-future combination.",
+        "No type error or borrow-check diagnostic is reported before the ICE, so the compiler likely accepted the lifetime relationships initially and then corrupted or mishandled them in a later transformation."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1719,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_transform/src/inline.rs",
+        "reason": "Most suspicious because the ICE happens during `optimized_mir`, the compiler was invoked with `-Z inline-mir` and extremely aggressive inlining thresholds, and the reproducer centers on nested async closures/generators plus `BoxFuture` HRTB lifetimes—exactly the kind of MIR inlining scenario that can mis-remap regions or generator state."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "reason": "Async/await and `tokio::select!` lower to coroutine/generator MIR. The failing body is a nested async closure, and the code reborrows `&mut *self.guard` across `.await` with HRTB-returning boxed futures, making coroutine state layout and saved-local rewriting a prime suspect."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/query.rs",
+        "reason": "The bug pattern involves locals captured across suspension points in an async state machine. If the ICE stems from invalid saved-local/coroutine-layout metadata consumed during MIR optimization or monomorphization, this query-layer coroutine layout modeling is a plausible source."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/add_subtyping_projections.rs",
+        "reason": "The reproducer stresses subtype/lifetime relationships after region erasure: `for<'lock> FnOnce(&'lock mut T) -> BoxFuture<'lock, R>` plus boxed async futures and reborrows. This pass explicitly rewrites assignments when destination and rvalue types differ after erasure, so it is a strong candidate for mishandling hidden lifetime-sensitive async/boxed-future types."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/erase_regions.rs",
+        "reason": "The failure description strongly suggests a late-stage bug after semantic acceptance, potentially from treating distinct lifetime-tied future types as equivalent after region erasure. Since the reproducer relies on boxed futures whose lifetime is tied to a mutable reborrow, region erasure logic is directly relevant."
+      },
+      {
+        "path": "compiler/rustc_monomorphize/src/collector.rs",
+        "reason": "The query stack includes `collect_and_partition_mono_items` beneath the MIR optimization query. While likely downstream of the real issue, monomorphization collection for nested async closures and boxed future shims could expose or trip over malformed optimized MIR."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/tcx.rs",
+        "reason": "MIR place/type computation is exercised by `&mut *self.guard` projections, field accesses through `self`, and generator-transformed locals. If a projection type is computed incorrectly in the transformed async MIR, later optimization could ICE."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+        "reason": "The core signature uses higher-ranked lifetimes tied to a boxed future returned from a callback over `&mut T`. If the compiler accepted unsound or malformed relations here, later MIR optimization could crash on invalid assumptions about subtyping/equality of these lifetime-sensitive types."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "The reproducer’s essential complexity is HRTB instantiation (`for<'lock> ... -> BoxFuture<'lock, R>`). A bug in higher-ranked placeholder/fresh-var instantiation could leave incorrect lifetime structure that only manifests later in async MIR optimization."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/lib.rs",
+        "reason": "Less specific than the others, but still plausible because this crate schedules the MIR optimization pipeline. If the ICE is due to an unexpected pass ordering or a problematic interaction between coroutine lowering, subtype projection insertion, simplification, and inlining under `optimized_mir`, the pipeline definition here could be involved."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 161.357,
+    "stage_times_sec": {
+      "checkout": 2.24,
+      "load_bug_context": 0.047,
+      "test_behavior_analysis": 6.495,
+      "test_failure_analysis": 14.629,
+      "load_file_candidates": 0.109,
+      "search_suspicious_files": 137.837
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 422579,
+      "output_tokens": 7338,
+      "total_tokens": 429917,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.494,
+          "input_tokens": 646,
+          "output_tokens": 335,
+          "total_tokens": 981
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.629,
+          "input_tokens": 2533,
+          "output_tokens": 834,
+          "total_tokens": 3367
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.175,
+          "input_tokens": 28326,
+          "output_tokens": 380,
+          "total_tokens": 28706
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.297,
+          "input_tokens": 28301,
+          "output_tokens": 373,
+          "total_tokens": 28674
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.727,
+          "input_tokens": 27829,
+          "output_tokens": 325,
+          "total_tokens": 28154
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.36,
+          "input_tokens": 28073,
+          "output_tokens": 349,
+          "total_tokens": 28422
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.622,
+          "input_tokens": 28031,
+          "output_tokens": 349,
+          "total_tokens": 28380
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.923,
+          "input_tokens": 28448,
+          "output_tokens": 334,
+          "total_tokens": 28782
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.959,
+          "input_tokens": 28265,
+          "output_tokens": 408,
+          "total_tokens": 28673
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.998,
+          "input_tokens": 28217,
+          "output_tokens": 366,
+          "total_tokens": 28583
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.2,
+          "input_tokens": 28292,
+          "output_tokens": 355,
+          "total_tokens": 28647
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.241,
+          "input_tokens": 28070,
+          "output_tokens": 358,
+          "total_tokens": 28428
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.774,
+          "input_tokens": 28444,
+          "output_tokens": 329,
+          "total_tokens": 28773
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.608,
+          "input_tokens": 28370,
+          "output_tokens": 336,
+          "total_tokens": 28706
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.417,
+          "input_tokens": 28434,
+          "output_tokens": 373,
+          "total_tokens": 28807
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.544,
+          "input_tokens": 28209,
+          "output_tokens": 398,
+          "total_tokens": 28607
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.511,
+          "input_tokens": 11557,
+          "output_tokens": 358,
+          "total_tokens": 11915
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.455,
+          "input_tokens": 12534,
+          "output_tokens": 778,
+          "total_tokens": 13312
+        }
+      ]
+    }
+  }
+}

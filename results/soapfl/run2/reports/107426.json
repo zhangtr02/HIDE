@@ -1,0 +1,237 @@
+{
+  "bug_id": "107426",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-09-26",
+    "resolved": "f5193a9fcc73dc09e41a90c5a2c97fc9acc16032"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/region_infer/mod.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_infer/src/infer/outlives/verify.rs",
+    "compiler/rustc_infer/src/infer/nll_relate/mod.rs",
+    "compiler/rustc_typeck/src/check/closure.rs",
+    "compiler/rustc_typeck/src/check/upvar.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `Scope<'a>` using nested `PhantomData<&'a mut &'a ()>` to create an invariant lifetime-carrying token without storing real data.",
+        "Deriving `Clone, Copy` on `Scope` lets the same lifetime token be duplicated and reused across closures and function calls.",
+        "`event<'a, F: FnMut() + 'a>` requires a callback whose captured environment is valid for the same lifetime as `Scope<'a>`.",
+        "`make_fn<'a>` returns `impl Fn() + Copy + 'a`, exercising opaque return types tied to an input lifetime.",
+        "The returned closure `|| {}` is zero-capture, but its opaque type is still constrained by the declared `+ 'a` lifetime bound.",
+        "`foo(cx: Scope)` uses lifetime elision, so the parameter is really `Scope<'_>`, testing inferred lifetime propagation through local bindings.",
+        "`let open_toggle = make_fn(cx);` creates an opaque closure value, then another closure captures both `cx` and `open_toggle`.",
+        "`|| event(cx, open_toggle);` checks closure trait inference (`Fn` calling `FnMut` parameter), capture copying, and borrow-checking around nested closures with lifetime-bound opaque types."
+      ],
+      "summary": "The reproducer builds a lifetime-token `Scope`, returns an opaque closure type tied to that lifetime, then creates a nested closure that copies both the token and the returned closure into a call to `event`. It exercises lifetime elision, opaque `impl Trait` return types, closure capture and trait inference, `Copy` semantics, and borrow-checker/type-checker handling of nested closures constrained by the same lifetime."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on lifetime handling for an opaque `impl Fn() + Copy + 'a` returned from `make_fn` and then captured inside another closure that also captures the same lifetime-carrying `Scope<'a>`. All important ingredients point to a compiler issue in region/lifetime reasoning rather than a user-code violation: `Scope<'a>` is a copyable phantom lifetime token, `make_fn` returns a zero-capture closure, and that closure is explicitly bounded by `+ 'a`. In `foo`, both `cx` and `open_toggle` are copied into a nested closure, and `event(cx, open_toggle)` only requires the callback type to satisfy `FnMut() + 'a`. Since the returned closure captures nothing, and the opaque type is declared to outlive `'a`, rejecting it with `make_fn::{opaque#0}<'_> does not live long enough` strongly suggests the compiler is losing or mis-propagating the outlives relation of the opaque type when it is captured by another closure. The common pattern is the interaction of RPIT/opaque types with closure capture analysis and borrow checking under an inferred/elided lifetime tied to an invariant phantom token. This suggests a defect in compiler code handling opaque type lifetime bounds or closure environment region requirements, likely around type checking, region inference, or borrow-check lowering for nested closures.",
+      "possible_causes": [
+        "Incorrect propagation of the declared `+ 'a` outlives bound for a return-position opaque type (`impl Fn() + Copy + 'a`) when the opaque value is stored in a local and then captured by another closure.",
+        "Bug in borrow checker or region inference causing the opaque closure type `make_fn::{opaque#0}` to be treated as shorter-lived than the input lifetime carried by `Scope<'a>`, despite the function signature guaranteeing `'a`.",
+        "Fault in closure capture/type-check logic for nested closures, especially when a closure captures both an invariant lifetime token (`Scope<'a>`) and an opaque type parameterized by the same lifetime.",
+        "Improper normalization or hidden-type handling for RPIT in the presence of closure traits (`Fn`/`FnMut`), leading the compiler to fail to recognize that a zero-capture closure implementing `Fn` also satisfies the required `FnMut() + 'a`.",
+        "Region constraints for elided lifetime `Scope<'_>` in `foo` may be incorrectly instantiated or related, causing the opaque type's lifetime parameter to be inferred too narrowly during nested closure checking.",
+        "Possible defect in outlives checking for hidden types of opaque return types when the hidden type itself is `'static`/zero-capture but the opaque wrapper is still parameterized by `'a`, leading to a spurious 'does not live long enough' diagnostic."
+      ],
+      "evidence": [
+        "Compiler error specifically names the opaque type `make_fn::{opaque#0}<'_>` as not living long enough, indicating the issue is in opaque type lifetime handling rather than in the concrete closure body.",
+        "`make_fn<'a>(_: Scope<'a>) -> impl Fn() + Copy + 'a` explicitly promises the returned value is valid for `'a`; the hidden closure `|| {}` captures nothing, so a lifetime failure is unexpected.",
+        "`Scope<'a>` is `Copy` and contains only `PhantomData`, so copying `cx` into both `make_fn(cx)` and the outer closure should not create a real borrow conflict; this points away from user-level aliasing and toward compiler lifetime modeling.",
+        "`event<'a, F: FnMut() + 'a>(_: Scope<'a>, _: F)` accepts any callback valid for the same lifetime token, and an `Fn` closure should coerce to `FnMut`; the rejection therefore likely comes before/within borrow checking of captured environment lifetimes.",
+        "The reproducer combines nested closures, RPIT, lifetime elision, and an invariant phantom lifetime token—exactly the sort of edge-case interaction where rustc may mishandle region constraints or closure environment requirements.",
+        "The failing site is the nested closure expression `|| event(cx, open_toggle);`, showing that the error arises only after the opaque return value is captured by another closure, not when it is first created."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1502,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "The diagnostic explicitly points at the RPIT opaque type `make_fn::{opaque#0}<'_>` not living long enough. This file is the borrowck-side logic that resolves opaque types after NLL and rewrites their regions, so a bug here could easily lose or mis-translate the promised `+ 'a` outlives bound when the opaque value is later captured by another closure."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "The reproducer centers on inference and tracking of a return-position opaque type tied to an input lifetime. This file manages opaque type instantiation/replacement during inference, making it a prime place for incorrectly associating the hidden zero-capture closure type with too-short lifetime information."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/mod.rs",
+        "reason": "The failure looks like a spurious region-solving result: the opaque closure should satisfy the required lifetime, but borrowck concludes it does not. The main NLL region solver lives here, including propagation of outlives constraints and closure-related region requirements, so an incorrect constraint solution could produce exactly this error."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Opaque types commonly introduce member constraints for hidden-type region inference. Since this bug involves an opaque type parameterized by `'a` being treated as insufficiently long-lived, incorrect storage or selection among member constraints is a plausible root cause."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+        "reason": "If the right outlives constraints for `impl Fn() + Copy + 'a` are not generated when type-checking MIR for the nested closure, borrowck will later report a false lifetime failure. This file is exactly where type/region obligations are lowered into borrowck constraints."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "The reproducer depends on correctly lowering `T: 'a`-style obligations for the opaque return type and closure environment. A bug in decomposing or emitting those obligations could make the opaque type appear shorter-lived than its signature guarantees."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+        "reason": "This file handles verification of type outlives requirements against available region evidence. Since the hidden type is a zero-capture closure but the opaque wrapper carries `'a`, faulty verification logic could reject a valid `impl Fn() + 'a` when nested closure capture is involved."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/nll_relate/mod.rs",
+        "reason": "Nested closure checking and RPIT lifetime handling rely on relating types and regions under NLL assumptions. If the relation engine mishandles the opaque type or closure trait/object outlives relation, it could generate the wrong region constraints leading to this error."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/closure.rs",
+        "reason": "The failure only manifests once `open_toggle` is captured inside another closure and passed to `event`. This file is responsible for closure expression type checking and signature inference, so it is a likely location for mishandling lifetime requirements of captured opaque values in nested closures."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/upvar.rs",
+        "reason": "The reproducer stresses closure capture analysis by copying both the invariant lifetime token `cx` and the opaque closure `open_toggle` into a nested closure. If capture analysis computes the wrong borrow/capture kind or lifetime requirements for the upvar holding the opaque type, it could trigger the spurious borrowck error."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 152.52,
+    "stage_times_sec": {
+      "checkout": 7.678,
+      "load_bug_context": 0.083,
+      "test_behavior_analysis": 7.525,
+      "test_failure_analysis": 18.114,
+      "load_file_candidates": 0.103,
+      "search_suspicious_files": 119.016
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 347856,
+      "output_tokens": 6611,
+      "total_tokens": 354467,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.525,
+          "input_tokens": 440,
+          "output_tokens": 348,
+          "total_tokens": 788
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 18.114,
+          "input_tokens": 1060,
+          "output_tokens": 868,
+          "total_tokens": 1928
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.181,
+          "input_tokens": 26966,
+          "output_tokens": 395,
+          "total_tokens": 27361
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 10.029,
+          "input_tokens": 26488,
+          "output_tokens": 423,
+          "total_tokens": 26911
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.731,
+          "input_tokens": 26526,
+          "output_tokens": 368,
+          "total_tokens": 26894
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.722,
+          "input_tokens": 26767,
+          "output_tokens": 403,
+          "total_tokens": 27170
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.341,
+          "input_tokens": 26663,
+          "output_tokens": 346,
+          "total_tokens": 27009
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.115,
+          "input_tokens": 26800,
+          "output_tokens": 356,
+          "total_tokens": 27156
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.76,
+          "input_tokens": 26697,
+          "output_tokens": 373,
+          "total_tokens": 27070
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.485,
+          "input_tokens": 26858,
+          "output_tokens": 340,
+          "total_tokens": 27198
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.001,
+          "input_tokens": 25209,
+          "output_tokens": 330,
+          "total_tokens": 25539
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.869,
+          "input_tokens": 26720,
+          "output_tokens": 269,
+          "total_tokens": 26989
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.065,
+          "input_tokens": 26868,
+          "output_tokens": 310,
+          "total_tokens": 27178
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.389,
+          "input_tokens": 26220,
+          "output_tokens": 365,
+          "total_tokens": 26585
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.994,
+          "input_tokens": 14870,
+          "output_tokens": 343,
+          "total_tokens": 15213
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.305,
+          "input_tokens": 12704,
+          "output_tokens": 774,
+          "total_tokens": 13478
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,237 @@
+{
+  "bug_id": "105498",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-12-09",
+    "resolved": "7632db0e87d8adccc9a83a47795c9411b1455855"
+  },
+  "final_top10": [
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_infer/src/infer/opaque_types/table.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_infer/src/infer/outlives/verify.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_middle/src/error.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly `type_alias_impl_trait`, testing opaque type aliases whose hidden concrete type is inferred from defining uses.",
+        "Defines trait `Cap<'a>` with a blanket impl for all types, giving a lifetime-parameterized bound without restricting implementors.",
+        "case1 declares `type MyStr<'x> = impl Sized + Cap<'x>` and assigns `&'s str` inside an unused closure, probing opaque type inference from closure-contained defining uses.",
+        "case1 expects `unconstrained opaque type`, exercising compiler checks that an opaque alias must have a valid, constraining defining use.",
+        "case2 adds `+ 'x` to the opaque alias, then gives two defining uses for `MyStr<'s>`: one inferred as `&'s str`, another closure return inferred as `&'static str`.",
+        "case2 expects `concrete type differs from previous defining opaque type use`, testing consistency enforcement that all defining uses of one opaque alias resolve to the same hidden type.",
+        "case3 uses a closure parameter `s: &'s str` to define `MyStr<'s>`, exercising lifetime capture analysis for opaque aliases inside closures.",
+        "case3 expects `captures lifetime that does not appear in bounds`, checking that hidden types cannot capture lifetimes in ways not permitted by the opaque alias bounds."
+      ],
+      "summary": "The reproducer stresses nightly opaque type aliases (`type_alias_impl_trait`) with lifetime parameters, especially inside closures. It checks three compiler behaviors: rejecting unconstrained opaque aliases, detecting inconsistent hidden type inference across multiple defining uses, and enforcing lifetime-capture rules when closures introduce borrowed values. The blanket trait bound is mainly a vehicle for lifetime-dependent alias bounds."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on `type_alias_impl_trait` opaque type aliases with lifetime parameters whose hidden type is inferred from local/closure-based defining uses. All three cases exercise the compiler’s opaque-type defining-use analysis rather than normal trait checking: (1) recognizing whether a use inside a closure actually constrains the opaque alias, (2) unifying multiple defining uses of the same opaque alias across different contexts and lifetimes, and (3) validating lifetime capture of the inferred hidden type against the alias bounds. The commonality is that the hidden type is `&str`-like, lifetime-sensitive, and inferred through closure bodies/signatures, so the likely defect area is rustc logic that collects/registers defining uses of opaque aliases, maps generic/lifetime parameters for those uses, and checks hidden-type compatibility/capture. A single bug here could mis-handle closure-associated regions or parameter substitution when inferring the hidden type for a type alias `impl Trait`.",
+      "possible_causes": [
+        "Bug in opaque type defining-use collection for `type_alias_impl_trait`, especially uses occurring inside closures/closure signatures, causing incorrect classification of a use as constraining vs unconstraining.",
+        "Defect in hidden-type inference/unification for opaque aliases with lifetime parameters, where region substitution or generic argument remapping across defining uses is mishandled, leading to mismatches such as `&'s str` versus `&'static str`.",
+        "Bug in lifetime capture validation for opaque hidden types inferred in closure contexts, likely in code checking whether captured regions appear in the opaque alias bounds (`E0700` path).",
+        "Incorrect interaction between closure inference and opaque type registration in HIR/typeck, where closure-local borrows are recorded as hidden types without properly normalizing/relating late-bound or local lifetimes to the alias’s declared lifetime parameters.",
+        "Possible defect in production compiler code handling region obligations for alias bounds like `impl Sized + Cap<'x> + 'x`, where the `'x` bound or trait-bound-only lifetime is not consistently enforced during opaque type definition."
+      ],
+      "evidence": [
+        "All reported diagnostics concern opaque alias semantics: `unconstrained opaque type`, `concrete type differs from previous defining opaque type use`, and `hidden type captures lifetime that does not appear in bounds`.",
+        "Each case uses `type MyStr<'x> = impl ...` with lifetime-parameterized bounds, so the stressed subsystem is lifetime-aware opaque type alias inference/checking.",
+        "The defining uses occur inside closures or involve closure return types/parameters, indicating closure context is a key trigger.",
+        "The concrete hidden types differ only by lifetime instantiation (`&'s str` vs `&'static str`), pointing to region mapping/substitution logic rather than unrelated trait resolution.",
+        "The trait bound `Cap<'a>` has a blanket impl for all `T`, so trait implementation availability is not the source; the interesting behavior comes from opaque-type constraint and lifetime capture analysis.",
+        "`case2` shows the compiler tracks a previous defining use and compares hidden types across uses, which suggests the relevant code path is the hidden-type registration/unification machinery for opaque aliases.",
+        "`case3` explicitly reports lifetime capture from closure parameter `s: &'s str`, directly implicating compiler logic that determines which lifetimes are permitted in an opaque alias hidden type."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1554,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Most directly responsible for inference-time tracking and reconciliation of opaque type hidden types. The reproducer stresses TAIT defining uses inside closures, hidden-type consistency across multiple uses, and lifetime-sensitive inference, all of which flow through opaque type registration and comparison logic here."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "This file handles remapping generics and regions between the enclosing function/closure context and the opaque type’s own generics. The bug pattern strongly suggests incorrect lifetime/generic argument remapping for closure-contained defining uses, especially for `'s` versus `'static` and capture of lifetimes in bounds."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Implements post-region-inference resolution of opaque hidden types, including rewriting inferred regions into stable named regions. Since the diagnostics involve lifetime capture and closure-induced region differences, a bug in this region rewriting/canonicalization path is highly plausible."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "Closures are the trigger in all three cases. This file derives closure signatures and body-local region setup, so an interaction bug between closure type checking and opaque-type defining-use inference could cause uses inside closures to be classified or instantiated incorrectly."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "Drives body and closure checking and is where opaque return types are replaced with inference variables during type checking. Because the reproducer relies on defining uses inside function/closure bodies, this is a plausible site for incorrect registration of TAIT defining uses."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types/table.rs",
+        "reason": "If the single bug is in how multiple defining uses are stored or updated, this transactional opaque-type table is a strong candidate. The case2 mismatch behavior depends on correctly remembering and comparing prior hidden types for the same opaque key."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "The E0700-style lifetime-capture failure can stem from incorrect lowering of type-outlives obligations for the inferred hidden type of a TAIT. Since the reproducer is lifetime-heavy and closure-sensitive, this obligation-lowering path is relevant."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+        "reason": "Related to verification of type outlives conditions after inference. If hidden types inferred in closures are being checked against opaque bounds incorrectly, especially around which lifetimes are permitted to appear, the bug may surface here."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Opaque hidden types with lifetime parameters often generate member constraints tying inferred regions to allowed candidates. A mishandling of those constraints could explain erroneous acceptance/rejection differences involving closure lifetimes and `'static`."
+      },
+      {
+        "path": "compiler/rustc_middle/src/error.rs",
+        "reason": "Least suspicious semantically, but the reproducer’s core behavior includes the specific opaque hidden type mismatch diagnostic. If the failure is partly due to wrong classification/reporting of the mismatch path, this diagnostic layer may be involved, though it is less likely than the inference and region-mapping files."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 141.733,
+    "stage_times_sec": {
+      "checkout": 3.943,
+      "load_bug_context": 0.236,
+      "test_behavior_analysis": 6.176,
+      "test_failure_analysis": 9.652,
+      "load_file_candidates": 0.103,
+      "search_suspicious_files": 121.624
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 361502,
+      "output_tokens": 6225,
+      "total_tokens": 367727,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.175,
+          "input_tokens": 595,
+          "output_tokens": 353,
+          "total_tokens": 948
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 9.652,
+          "input_tokens": 1487,
+          "output_tokens": 676,
+          "total_tokens": 2163
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.258,
+          "input_tokens": 26902,
+          "output_tokens": 389,
+          "total_tokens": 27291
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 10.096,
+          "input_tokens": 26845,
+          "output_tokens": 308,
+          "total_tokens": 27153
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.757,
+          "input_tokens": 26730,
+          "output_tokens": 288,
+          "total_tokens": 27018
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 10.304,
+          "input_tokens": 26967,
+          "output_tokens": 449,
+          "total_tokens": 27416
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.938,
+          "input_tokens": 27004,
+          "output_tokens": 368,
+          "total_tokens": 27372
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.789,
+          "input_tokens": 27157,
+          "output_tokens": 337,
+          "total_tokens": 27494
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.994,
+          "input_tokens": 27038,
+          "output_tokens": 335,
+          "total_tokens": 27373
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.399,
+          "input_tokens": 26961,
+          "output_tokens": 287,
+          "total_tokens": 27248
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.273,
+          "input_tokens": 27103,
+          "output_tokens": 381,
+          "total_tokens": 27484
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 12.967,
+          "input_tokens": 25631,
+          "output_tokens": 383,
+          "total_tokens": 26014
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.738,
+          "input_tokens": 27167,
+          "output_tokens": 331,
+          "total_tokens": 27498
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.838,
+          "input_tokens": 27200,
+          "output_tokens": 371,
+          "total_tokens": 27571
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.351,
+          "input_tokens": 25485,
+          "output_tokens": 280,
+          "total_tokens": 25765
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.893,
+          "input_tokens": 11230,
+          "output_tokens": 689,
+          "total_tokens": 11919
+        }
+      ]
+    }
+  }
+}

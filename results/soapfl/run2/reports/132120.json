@@ -1,0 +1,258 @@
+{
+  "bug_id": "132120",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-10-15",
+    "resolved": "9322d183f45e0fd5a509820874cc5ff27744a479"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+    "compiler/rustc_mir_build/src/build/expr/as_constant.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_hir_typeck/src/fallback.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_middle/src/thir.rs",
+    "compiler/rustc_const_eval/src/check_consts/check.rs",
+    "compiler/rustc_mir_build/src/build/mod.rs",
+    "compiler/rustc_ty_utils/src/consts.rs",
+    "compiler/rustc_middle/src/mir/interpret/queries.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Declares `const I = 0` without an explicit type, exercising integer literal fallback and const item type inference.",
+        "Uses an inline const block `const { I }` as a function argument, testing inline-const lowering and constant propagation.",
+        "Calls `std::arch::x86_64::_mm_shuffle_ps`, an x86 SIMD intrinsic requiring a compile-time immediate control operand.",
+        "Exercises checking that the intrinsic’s third argument is accepted only as a constant expression usable as an immediate.",
+        "Passes `todo!()` for the vector operands, so type checking must still infer the expected SIMD argument types from the intrinsic signature.",
+        "Targets architecture-specific `std::arch::x86_64` APIs, invoking platform/intrinsic gating and backend-specific validation paths.",
+        "Combines inferred const item type with inline const in an intrinsic call, stressing const-evaluation and argument validation interactions.",
+        "Tests compiler handling on nightly 2024-10-15, where MIR/HIR const representation and intrinsic checking may expose the bug."
+      ],
+      "summary": "The reproducer creates an untyped integer const, wraps it in an inline const block, and passes it as the immediate control argument to the x86 `_mm_shuffle_ps` intrinsic. The other operands are `todo!()`, forcing the compiler to infer types from the intrinsic signature while still validating the const-immediate requirement. This stresses const inference, inline-const lowering, intrinsic argument checking, and x86-specific SIMD validation."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in the compiler’s handling of a constant immediate argument for an x86 SIMD intrinsic when that argument is provided through an inline const block referring to a separately declared untyped const item. The query stack shows the crash occurs while building/checking THIR and MIR for `main::{constant#0}`, i.e. the inline const body `const { I }`, not during normal type-checking of the call itself. The reproducer combines several stressors: integer literal fallback for `const I = 0`, inline-const lowering, and validation of `_mm_shuffle_ps`’s required compile-time immediate operand. This suggests the compiler incorrectly represents or type-resolves the inline const expression before/while performing const qualification or intrinsic immediate checking. Because the intrinsic expects a specific constant integer shape, the compiler likely assumes the inline const has already been normalized to a concrete scalar integer constant, but instead encounters an unresolved/inferred const type or an unexpected THIR/MIR form and panics during analysis.",
+      "possible_causes": [
+        "Bug in inline-const lowering/THIR construction for `const { I }` when `I` is a separately declared const with inferred integer type, causing the THIR/MIR builder to see an unexpected node or missing concrete type.",
+        "Missing normalization/type-resolution step for inline const expressions used as intrinsic immediate operands, so `_mm_shuffle_ps` immediate validation receives an unevaluated or inference-dependent const instead of a concrete integer constant.",
+        "Compiler defect in const qualification/promotion for inline const bodies referencing outer const items, especially when integer fallback has not been fully applied before MIR const checks.",
+        "x86 intrinsic argument checking for immediate operands may assume only literal/fully-evaluated constants and fail on inline-const-backed constants, leading to an ICE instead of emitting a diagnostic.",
+        "Improper interaction between integer literal fallback (`const I = 0`) and const-eval/typeck for intrinsic immediates, where the inferred type of `I` is not stabilized before THIR/MIR analysis of the inline const.",
+        "Potential bug in handling `DefKind::InlineConst`/anonymous const bodies during borrowck or MIR promotion when the body is just a path to another const item, exposing an unhandled compiler-internal case."
+      ],
+      "evidence": [
+        "Query stack identifies the crashing item as `main::{constant#0}`, which corresponds to the inline const block `const { I }` rather than the whole function body.",
+        "Crash occurs in THIR/MIR-related queries (`thir_body`, `check_match`, `mir_built`, `mir_const_qualif`, `mir_promoted`, `mir_borrowck`), indicating a compiler-internal issue in const body lowering/analysis rather than a frontend parse error.",
+        "The reproducer specifically uses `_mm_shuffle_ps`, an intrinsic whose third argument must be a compile-time immediate, so the compiler must inspect and validate the const expression specially.",
+        "`const I = 0` omits a type, forcing integer inference/fallback; that inferred const is then rewrapped as `const { I }`, creating a nontrivial const-expression form for immediate checking.",
+        "The vector arguments are `todo!()`, meaning the compiler must infer expected argument types from the intrinsic signature while also validating the const immediate, increasing the chance of ordering/resolution bugs.",
+        "An ICE is reported instead of a normal user-facing error, so the likely defect is an unhandled internal compiler case in intrinsic immediate validation or inline-const analysis."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1848,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "Most suspicious because the ICE starts at `thir_body` for `main::{constant#0}`, which is the inline-const body `const { I }`. This file lowers HIR expressions into THIR, including inline const expressions and paths to const items, so a bad THIR form or missing resolved type for the inferred `const I = 0` could originate here."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/as_constant.rs",
+        "reason": "The reproducer uses an intrinsic immediate operand that must be recognized as a compile-time constant, and the problematic expression is an inline const referencing another const item. This file is specifically responsible for turning THIR constant expressions, including const blocks, into MIR `ConstOperand`s, making it a prime place for mishandling `const { I }` or assuming a fully concrete integer constant too early."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Anonymous/inline consts need a computed `type_of`, and the reproducer stresses type inference via `const I = 0` with omitted type. This file contains `anon_const_type_of`, so it is a strong candidate if inline const bodies in intrinsic argument position get the wrong type or an incompletely resolved integer type."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fallback.rs",
+        "reason": "The reproducer explicitly depends on integer literal fallback for `const I = 0`. If fallback is not applied before the inline const body is analyzed or converted for intrinsic immediate validation, later THIR/MIR code may observe an unresolved integer inference variable and ICE instead of diagnosing cleanly."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "This file type-checks expressions and call arguments, including expected-type-driven inference from `_mm_shuffle_ps`. Since the vector operands are `todo!()` and the third operand is `const { I }`, incorrect ordering between call checking, intrinsic-specific expectations, and inline-const typing could leave the anonymous const in an invalid state consumed by THIR."
+      },
+      {
+        "path": "compiler/rustc_middle/src/thir.rs",
+        "reason": "If the crash is caused by an unexpected THIR shape for inline const or a missing invariant around constant expression nodes, the core THIR data model may be involved. It is less likely than the lowering/building code, but still plausible given the panic occurs while building/checking THIR for the anonymous const body."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/check_consts/check.rs",
+        "reason": "The query stack continues through `mir_const_qualif` and const checking for the anonymous const body. If the inline const lowering succeeds but const checking assumes a normalized concrete scalar and instead encounters a path to an inferred const item, this visitor could be the first place to hit an unhandled case."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/mod.rs",
+        "reason": "This is the main MIR construction entry that retrieves THIR and dispatches const-body construction. Because the failing query chain includes THIR, MIR build, promotion, and borrowck for `main::{constant#0}`, a bug in the const-body construction path or its setup for inline consts could be responsible."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This file works with THIR expressions for consts and anonymous consts and builds abstract constant representations. Given the reproducer is centered on an anonymous inline const that is just a path to another const with inferred integer type, an unhandled THIR const form here is plausible, especially if intrinsic-related const validation reuses this machinery indirectly."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/interpret/queries.rs",
+        "reason": "Lower probability, but still relevant because the bug may stem from trying to evaluate or classify the intrinsic immediate operand before inference/type normalization is complete. This file explicitly rejects unsupported inference-containing constants and forwards evaluation queries, so a missing guard or wrong assumption about inline const evaluability could contribute."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 156.266,
+    "stage_times_sec": {
+      "checkout": 2.329,
+      "load_bug_context": 0.529,
+      "test_behavior_analysis": 5.69,
+      "test_failure_analysis": 12.209,
+      "load_file_candidates": 0.097,
+      "search_suspicious_files": 135.412
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 448520,
+      "output_tokens": 7708,
+      "total_tokens": 456228,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.69,
+          "input_tokens": 334,
+          "output_tokens": 302,
+          "total_tokens": 636
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.208,
+          "input_tokens": 2200,
+          "output_tokens": 713,
+          "total_tokens": 2913
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.559,
+          "input_tokens": 27904,
+          "output_tokens": 345,
+          "total_tokens": 28249
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.999,
+          "input_tokens": 27903,
+          "output_tokens": 356,
+          "total_tokens": 28259
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.772,
+          "input_tokens": 27253,
+          "output_tokens": 326,
+          "total_tokens": 27579
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.159,
+          "input_tokens": 27699,
+          "output_tokens": 330,
+          "total_tokens": 28029
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.673,
+          "input_tokens": 27639,
+          "output_tokens": 352,
+          "total_tokens": 27991
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.331,
+          "input_tokens": 27945,
+          "output_tokens": 378,
+          "total_tokens": 28323
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.314,
+          "input_tokens": 27838,
+          "output_tokens": 362,
+          "total_tokens": 28200
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.55,
+          "input_tokens": 27735,
+          "output_tokens": 342,
+          "total_tokens": 28077
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.955,
+          "input_tokens": 27835,
+          "output_tokens": 397,
+          "total_tokens": 28232
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.996,
+          "input_tokens": 27696,
+          "output_tokens": 361,
+          "total_tokens": 28057
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.204,
+          "input_tokens": 27734,
+          "output_tokens": 353,
+          "total_tokens": 28087
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.237,
+          "input_tokens": 27836,
+          "output_tokens": 384,
+          "total_tokens": 28220
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.608,
+          "input_tokens": 28018,
+          "output_tokens": 352,
+          "total_tokens": 28370
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.366,
+          "input_tokens": 28017,
+          "output_tokens": 372,
+          "total_tokens": 28389
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.406,
+          "input_tokens": 27806,
+          "output_tokens": 408,
+          "total_tokens": 28214
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 9.038,
+          "input_tokens": 12951,
+          "output_tokens": 425,
+          "total_tokens": 13376
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.214,
+          "input_tokens": 16177,
+          "output_tokens": 850,
+          "total_tokens": 17027
+        }
+      ]
+    }
+  }
+}

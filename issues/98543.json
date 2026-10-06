@@ -1,0 +1,12 @@
+{
+  "title": "implied bounds from associated types may not actually get implied pt 2.",
+  "labels": [
+    "A-associated-items",
+    "P-high",
+    "I-unsound",
+    "C-bug",
+    "T-types",
+    "A-implied-bounds"
+  ],
+  "body": "revives #91068 which has been fixed by only considering implied bounds from projections if they don't normalize **while typechecking the function itself**\r\n\r\n\r\nhttps://github.com/rust-lang/rust/blob/7125846d17a549866aa1ed0ea28778537378fca8/compiler/rustc_borrowck/src/type_check/free_region_relations.rs#L256-L289\r\n\r\nThis does **not** mean that the projection won't normalize when getting called:\r\n```rust\r\ntrait Trait {\r\n    type Type;\r\n}\r\n\r\nimpl<T> Trait for T {\r\n    type Type = ();\r\n}\r\n\r\nfn f<'a, 'b>(s: &'b str, _: <&'a &'b () as Trait>::Type) -> &'a str\r\nwhere\r\n    &'a &'b (): Trait, // <- adding this bound is the change from #91068 \r\n{\r\n    s\r\n}\r\n\r\nfn main() {\r\n    let x = String::from(\"Hello World!\");\r\n    let y = f(&x, ());\r\n    drop(x);\r\n    println!(\"{}\", y);\r\n}\r\n```\r\nThe added bound prevents `<&'a &'b () as Trait>::Type` from getting normalized while borrowchecking `f`, as we prefer param candidates over impl candidates. When calling `f`, we don't have the `&'a &'b (): Trait` in our `param_env`, so we can now freely use the impl candidate to normalize the projection. The caller therefore doesn't have to prove that  `&'a &'b ()` is well formed, causing unsoundness.\r\n\r\nI am a bit surprised that the caller doesn't have to prove that the `&'a &'b (): Trait` obligation is well formed, which would cause this example to not be unsound. It doesn't remove the general unsoundness here though. Here's an alternative test where that isn't enough:\r\n```rust\r\ntrait Trait {\r\n    type Type;\r\n}\r\n\r\nimpl<T> Trait for T {\r\n    type Type = ();\r\n}\r\n\r\nfn f<'a, 'b>(s: &'b str, _: <&'a &'b () as Trait>::Type) -> &'a str\r\nwhere\r\n    for<'what, 'ever> &'what &'ever (): Trait,\r\n{\r\n    s\r\n}\r\n\r\nfn main() {\r\n    let x = String::from(\"Hello World!\");\r\n    let y = f(&x, ());\r\n    drop(x);\r\n    println!(\"{}\", y);\r\n}\r\n```"
+}

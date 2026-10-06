@@ -1,0 +1,243 @@
+{
+  "bug_id": "105787",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-12-16",
+    "resolved": "ec56537c4325ce5b798fc3628cbdd48ba4949ae5"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/coherence.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/projection.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+    "compiler/rustc_infer/src/infer/canonical/canonicalizer.rs",
+    "compiler/rustc_middle/src/ty/fast_reject.rs",
+    "compiler/rustc_type_ir/src/ty_info.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines trait `ToUnit<'a>` with an associated type, then implements it for raw pointers using both a specific type `*const LocalTy` and a blanket `*const T` impl.",
+        "Uses raw pointers, lifetimes, `?Sized`, and `Copy` bounds to exercise trait impl selection and potential overlap handling for associated type projections.",
+        "Introduces trait `Overlap<T>` with associated type `Assoc`, making later function typing depend on trait resolution and associated type normalization.",
+        "Creates type alias `Assoc<'a, T> = <*const T as ToUnit<'a>>::Unit`, exercising projection of associated types through a lifetime-parameterized alias.",
+        "Provides a blanket impl `impl<T> Overlap<T> for T` with `Assoc = usize`, forming one candidate for `foo`’s return and argument type.",
+        "Adds a second `Overlap` impl keyed on a higher-ranked function type `for<'a> fn(&'a (), Assoc<'a, T>)`, with `Assoc = Box<usize>`, stressing HRTB-based overlap checking.",
+        "The higher-ranked projection in the second impl is a hack to prevent rustc from replacing the projection with an inference variable during trait solving.",
+        "`main` calls `foo` with explicit higher-ranked function types but passes `3usize`, forcing rustc to choose the `usize` associated type and validate impl overlap/coherence correctly."
+      ],
+      "summary": "The reproducer stresses trait coherence and trait solving around overlapping impls, higher-ranked trait bounds, and associated type projections. It combines lifetime-parameterized projection aliases, raw-pointer trait impls, and explicit HRTB function types so rustc must normalize projections without incorrectly generalizing them. The `foo` call forces selection of the `usize`-producing impl, exposing bugs in overlap checking or projection handling."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer centers on trait coherence/selection with two potentially overlapping `Overlap` impls, where the distinguishing parameter contains a higher-ranked function type and an associated-type projection alias `Assoc<'a, T> = <*const T as ToUnit<'a>>::Unit`. The key pattern is that the second impl uses an HRTB projection specifically to stop rustc from simplifying the projection into an inference variable, so the test is probing whether the compiler incorrectly normalizes, erases binders, or otherwise mishandles higher-ranked projections during overlap checking and trait solving. The build succeeds, which suggests the compiler accepted code that should have been rejected or should have resolved differently. Since `main` passes `3usize`, rustc selected the blanket `impl<T> Overlap<T> for T` path (`Assoc = usize`), meaning the compiler likely failed to recognize that the HRTB-based impl can overlap or unify with the same instantiated function type. The common thread across the code and behavior is unsound reasoning around projection normalization under binders (`for<'a>`), especially in coherence/overlap detection for impls involving associated types.",
+      "possible_causes": [
+        "Bug in coherence overlap checking for trait impls involving higher-ranked trait bounds, where binders in `for<'a>` function types are not correctly instantiated/canonicalized before comparing impl headers.",
+        "Incorrect normalization of associated-type projections under higher-ranked binders, causing `<*const T as ToUnit<'a>>::Unit` to be treated too opaquely or too eagerly and leading overlap detection to miss a conflicting impl.",
+        "Compiler defect in trait solver candidate comparison/selection for impls with projected types, where the projection alias inside an HRTB is replaced with an inference variable or otherwise generalized unsafely.",
+        "Fault in placeholder/lifetime handling during relation or unification of higher-ranked function signatures, causing the coherence checker to treat two actually-overlapping impl patterns as disjoint.",
+        "Issue in the old trait solver's handling of projection equality combined with raw-pointer blanket impls (`*const T`) and specific impls, which may produce unsound assumptions when checking impl specialization/overlap boundaries."
+      ],
+      "evidence": [
+        "The reproducer explicitly says the higher-ranked projection is used as a hack to prevent replacement of the projection with an inference variable, directly pointing to a projection/HRTB handling weakness in rustc.",
+        "There are two `Overlap` impls: a blanket `impl<T> Overlap<T> for T` and another keyed by `for<'a> fn(&'a (), Assoc<'a, T>)`; this is exactly the kind of shape that stresses coherence overlap logic.",
+        "`Assoc<'a, T>` is a lifetime-parameterized projection alias `<*const T as ToUnit<'a>>::Unit`, so overlap checking must normalize projected associated types while respecting binders.",
+        "The `ToUnit` trait has both a specific impl for `*const LocalTy` and a blanket impl for `*const T`, increasing pressure on trait resolution and projection normalization for raw pointer types.",
+        "`main` instantiates `foo::<for<'a> fn(&'a (), ()), for<'a> fn(&'a (), ())>(3usize)`, which forces rustc to accept the `usize`-typed `Assoc` from one impl even though the HRTB-based impl is relevant to the same function-type shape.",
+        "Compiler output shows successful compilation (`Return code: 0`), indicating rustc accepted the program instead of flagging an overlap/coherence/type-resolution issue, which is consistent with a missed-overlap or unsound trait-solving bug rather than a reproducer error."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1566,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+        "reason": "Most directly responsible for detecting overlap between trait impls. This reproducer is centered on missed coherence overlap with HRTB function types and associated type projections under binders, which is exactly what `overlapping_impls` and its inference/universe handling do."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The impl header contains a projected associated type alias `Assoc<'a, T> = <*const T as ToUnit<'a>>::Unit` inside `for<'a>`. If projection normalization under binders is mishandled, coherence can incorrectly conclude the impls are disjoint."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/projection.rs",
+        "reason": "The reproducer explicitly mentions preventing rustc from replacing a projection with an inference variable. This file implements that deferred-projection behavior in inference, so an unsound projection-to-infer-var step here is highly suspicious."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "Higher-ranked instantiation and comparison of `for<'a>` binders is central to this bug. If placeholder or fresh-var instantiation of bound regions/types is wrong, overlap checking can miss that the impl headers unify."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Classic trait selection/evaluation participates in proving the where-clause `for<'a> *const T: ToUnit<'a>` and in candidate comparison around projected types. A solver bug here could let coherence or obligation evaluation treat the second impl as non-overlapping."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "This is the inference-layer projection/normalization engine and cache. Bugs in cached or rollback-aware projection results for aliases under binders could make overlap checking see the projection as too opaque or normalize it inconsistently."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+        "reason": "Coherence overlap results are consumed while inserting impls into the specialization graph. If sibling insertion or overlap classification around blanket impls with HRTB/projection-rich headers is wrong, conflicting impls can be accepted."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/canonical/canonicalizer.rs",
+        "reason": "Coherence and trait solving canonicalize obligations and impl headers. Mishandling canonicalization of bound regions, placeholders, or projected types could erase distinctions needed to detect overlap or produce unsound cache hits."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/fast_reject.rs",
+        "reason": "`overlapping_impls` first uses fast reject on impl headers. A too-aggressive fast rejection for higher-ranked fn types or projected arguments could incorrectly skip the expensive overlap check entirely."
+      },
+      {
+        "path": "compiler/rustc_type_ir/src/ty_info.rs",
+        "reason": "The reproducer depends on respecting binders in projected types within HRTBs. This file stores cached `outer_exclusive_binder` metadata; if binder-depth/type-info caching is wrong, later overlap/projection logic may compare binder-rich types incorrectly."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 148.244,
+    "stage_times_sec": {
+      "checkout": 1.665,
+      "load_bug_context": 0.028,
+      "test_behavior_analysis": 7.237,
+      "test_failure_analysis": 13.226,
+      "load_file_candidates": 0.312,
+      "search_suspicious_files": 125.776
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 362336,
+      "output_tokens": 5999,
+      "total_tokens": 368335,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.236,
+          "input_tokens": 600,
+          "output_tokens": 380,
+          "total_tokens": 980
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.226,
+          "input_tokens": 1209,
+          "output_tokens": 746,
+          "total_tokens": 1955
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 11.742,
+          "input_tokens": 26693,
+          "output_tokens": 340,
+          "total_tokens": 27033
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.686,
+          "input_tokens": 26836,
+          "output_tokens": 251,
+          "total_tokens": 27087
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.486,
+          "input_tokens": 26224,
+          "output_tokens": 326,
+          "total_tokens": 26550
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.829,
+          "input_tokens": 26798,
+          "output_tokens": 256,
+          "total_tokens": 27054
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.523,
+          "input_tokens": 26786,
+          "output_tokens": 304,
+          "total_tokens": 27090
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.158,
+          "input_tokens": 26953,
+          "output_tokens": 357,
+          "total_tokens": 27310
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.168,
+          "input_tokens": 26862,
+          "output_tokens": 388,
+          "total_tokens": 27250
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.24,
+          "input_tokens": 26771,
+          "output_tokens": 287,
+          "total_tokens": 27058
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 6.632,
+          "input_tokens": 26826,
+          "output_tokens": 246,
+          "total_tokens": 27072
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.116,
+          "input_tokens": 25413,
+          "output_tokens": 336,
+          "total_tokens": 25749
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.809,
+          "input_tokens": 26996,
+          "output_tokens": 327,
+          "total_tokens": 27323
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.821,
+          "input_tokens": 26964,
+          "output_tokens": 143,
+          "total_tokens": 27107
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.36,
+          "input_tokens": 26675,
+          "output_tokens": 287,
+          "total_tokens": 26962
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.763,
+          "input_tokens": 3231,
+          "output_tokens": 362,
+          "total_tokens": 3593
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.414,
+          "input_tokens": 10499,
+          "output_tokens": 663,
+          "total_tokens": 11162
+        }
+      ]
+    }
+  }
+}

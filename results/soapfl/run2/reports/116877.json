@@ -1,0 +1,349 @@
+{
+  "bug_id": "116877",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-10-17",
+    "resolved": "49691b1f70d71dd7b8349c332b7f277ee527bf08"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/equate.rs",
+    "compiler/rustc_infer/src/infer/combine.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/structural_normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/eq.rs",
+    "compiler/rustc_hir_analysis/src/check/check.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Uses conditional compilation to define `rpit` with different return-position `impl Trait` bounds: `impl Sized` or `impl Clone`.",
+        "Exercises RPIT opaque return types, where each function’s hidden concrete return type is compiler-inferred and identity-sensitive.",
+        "Defines `same_output<Out>` to require two function items whose return types unify to the same concrete `Out`.",
+        "In `foo`, passing `rpit` and `foo` to `same_output` forces rustc to compare the opaque outputs of two different RPIT functions.",
+        "The symmetric calls `same_output(rpit, foo)` and `same_output(foo, rpit)` test whether argument order affects opaque type inference or normalization.",
+        "`foo` itself returns `impl Sized`, creating another opaque type whose hidden type must remain consistent with the returned `rpit()` value.",
+        "When `rpit` is compiled as `impl Clone`, the code probes whether rustc still incorrectly treats its opaque output as matching `foo`’s `impl Sized` output.",
+        "Targets compiler behavior around trait-bound-based opaque type compatibility, function item coercion, and cross-function RPIT equality checking."
+      ],
+      "summary": "The reproducer creates two functions returning opaque `impl Trait` types and then uses a generic helper to force rustc to decide whether their hidden return types are the same. By switching `rpit` between `impl Sized` and `impl Clone` and checking both argument orders, it stresses RPIT identity, normalization, and equality/unification logic in nightly rustc."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on return-position `impl Trait` (RPIT) opaque types being compared across distinct functions through generic function argument unification. `same_output<Out>` forces rustc to infer one common `Out` for two function items, so `same_output(rpit, foo)` and `same_output(foo, rpit)` require the compiler to relate the opaque return type of `rpit` with the opaque return type of `foo`. These opaque types are identity-sensitive and should remain distinct unless the compiler has a sound rule to equate them. The reproducer also varies the bound on `rpit` (`impl Sized` vs `impl Clone`), suggesting the bug is triggered when RPIT comparison logic relies too much on revealed hidden type or trait-bound compatibility instead of opaque-type identity. The ICE location around `type_of` during item type checking indicates a defect in compiler type computation / normalization for opaque types, likely while instantiating or equating function signatures involving RPITs. The symmetric calls imply argument order may incorrectly influence obligation solving or opaque-type inference, pointing to non-commutative handling in equality/subtyping/canonicalization of function signatures with opaque returns.",
+      "possible_causes": [
+        "A defect in RPIT opaque type equality/unification logic where rustc incorrectly attempts to equate opaque return types from different function definitions (`rpit` vs `foo`) based on compatible bounds or revealed hidden types rather than preserving distinct opaque identities.",
+        "A bug in function item signature comparison or coercion when inferring the generic `Out` in `same_output`, causing non-commutative or order-sensitive normalization/subtyping of `fn() -> impl Trait` signatures.",
+        "Incorrect handling of nested/recursive opaque return type relations: `foo` returns its own RPIT but its body returns `rpit()`, so type checking may accidentally create a cyclic or invalid `type_of` computation when comparing `foo`'s opaque type against `rpit`'s opaque type.",
+        "A compiler bug in trait solver / obligation resolution for RPIT normalization where differing bounds (`impl Sized` vs `impl Clone`) are treated as sufficient for compatibility, leading to an invalid state later in `type_of` query execution.",
+        "Missing guard in `check_mod_item_types` or opaque type instantiation code against cross-def opaque type comparison during generic argument inference, leading to an ICE instead of a proper type mismatch diagnostic."
+      ],
+      "evidence": [
+        "The reproducer specifically forces comparison of two different RPIT-producing functions via `same_output<Out>(_: impl Fn() -> Out, _: impl Fn() -> Out)`.",
+        "`foo` and `rpit` each have their own opaque return type identities; comparing them is exactly the stress point of the test.",
+        "The two calls `same_output(rpit, foo)` and `same_output(foo, rpit)` indicate the bug may depend on argument order, suggesting asymmetry in inference or normalization.",
+        "Switching `rpit` between `impl Sized` and `impl Clone` shows the issue is tied to trait-bound handling for opaque types, not normal concrete return types.",
+        "`foo` returns `impl Sized` but its returned value is `rpit()`, creating a cross-function opaque-type relation that should be diagnosed carefully rather than crashing.",
+        "The stack trace shows the ICE during `rustc_query_impl::query_impl::type_of` invoked from `check_mod_item_types`, consistent with a compiler defect in type computation/checking for item signatures involving opaque types.",
+        "The panic points at `same_output(foo, rpit);`, i.e. at the site where rustc must reconcile both function return types under one generic `Out`."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1681,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "Most directly implicated by the reproducer: it handles hidden/concrete type collection for opaque `impl Trait` definitions. The bug involves comparing RPIT opaque outputs across different functions (`rpit` vs `foo`), and `foo` returning `rpit()` creates exactly the kind of cross-function opaque relation that this code must validate. An ICE during `type_of` strongly suggests faulty opaque hidden-type collection or missing rejection of invalid cross-defining-use situations."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "The stack trace explicitly goes through the `type_of` query during `check_mod_item_types`. This file computes `type_of` for HIR-owned definitions, including opaque-related cases, so it is a prime suspect for mishandling RPIT item types or triggering an invalid recursive/cyclic computation when `same_output(foo, rpit)` forces signature comparison."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "This file contains inference-time support for tracking and resolving opaque types. The reproducer stresses whether distinct RPIT opaque identities are incorrectly equated based on hidden types or compatible bounds, which is exactly the kind of logic managed here when opaque aliases are replaced with inference variables and constrained."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/equate.rs",
+        "reason": "`same_output<Out>` forces rustc to equate the return types of two function items. Since the failure appears order-sensitive (`same_output(rpit, foo)` vs `same_output(foo, rpit)`), equality handling for function signatures or opaque-return types may be asymmetric or incorrectly instantiate opaques during equality."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "reason": "Shared type-relation infrastructure underlies equality/subtyping and carries the `DefineOpaqueTypes` policy. A bug here could explain non-commutative behavior when relating `fn() -> impl Trait` signatures and deciding whether opaque return types from different defs may be defined or must remain opaque."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "This file implements `ty`-level generic remapping for opaque types. RPIT identity and argument remapping are central when relating `foo`'s opaque return type to `rpit`'s, especially since `foo` returns `rpit()`. Incorrect remapping or key construction could lead to invalid hidden-type associations and later `type_of` ICEs."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The reproducer likely requires normalization of function signatures containing opaque return types before inference can compare them. If normalization reveals or relates RPITs too aggressively, especially under argument-order-dependent inference, this query wrapper is a plausible source."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/structural_normalize.rs",
+        "reason": "Structural normalization is often used before equality/obligation solving on alias-like types. Distinct RPIT opaque types being normalized into an invalid common form would fit the observed crash when forcing a common `Out` for two different `fn() -> impl Trait` items."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/eq.rs",
+        "reason": "This is the query-side equality operation wiring. Because the reproducer specifically forces an equality-like relation between two return types through a generic function parameter, a bug in the type-op equality path for opaque/RPIT types could produce the bad state that later crashes in `type_of`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/check.rs",
+        "reason": "`check_mod_item_types` appears in the stack trace, and this file is a central HIR-analysis checking entry point. While likely not the root logic bug, it is a plausible location for missing guards or incorrect sequencing around item type checking that allows invalid cross-function RPIT comparison to reach an ICE instead of a diagnostic."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 227.966,
+    "stage_times_sec": {
+      "checkout": 0.787,
+      "load_bug_context": 0.294,
+      "test_behavior_analysis": 7.162,
+      "test_failure_analysis": 11.062,
+      "load_file_candidates": 63.816,
+      "search_suspicious_files": 144.845
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 32,
+      "input_tokens": 413772,
+      "output_tokens": 9937,
+      "total_tokens": 423709,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.162,
+          "input_tokens": 390,
+          "output_tokens": 318,
+          "total_tokens": 708
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.061,
+          "input_tokens": 1992,
+          "output_tokens": 748,
+          "total_tokens": 2740
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_src_intrinsics_cpuid_rs",
+          "latency_sec": 4.82,
+          "input_tokens": 1305,
+          "output_tokens": 220,
+          "total_tokens": 1525
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_src_intrinsics_cpuid_rs_repair",
+          "latency_sec": 2.725,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_interpret_intrinsics_caller_location_rs",
+          "latency_sec": 4.451,
+          "input_tokens": 1202,
+          "output_tokens": 220,
+          "total_tokens": 1422
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_interpret_intrinsics_caller_location_rs_repair",
+          "latency_sec": 3.135,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_data_structures_src_functor_rs",
+          "latency_sec": 4.983,
+          "input_tokens": 1342,
+          "output_tokens": 220,
+          "total_tokens": 1562
+        },
+        {
+          "stage": "file_summary:compiler_rustc_data_structures_src_functor_rs_repair",
+          "latency_sec": 4.635,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_generator_rs",
+          "latency_sec": 5.467,
+          "input_tokens": 1236,
+          "output_tokens": 220,
+          "total_tokens": 1456
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_generator_rs_repair",
+          "latency_sec": 6.779,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_type_ir_src_structural_impls_rs",
+          "latency_sec": 5.74,
+          "input_tokens": 1467,
+          "output_tokens": 220,
+          "total_tokens": 1687
+        },
+        {
+          "stage": "file_summary:compiler_rustc_type_ir_src_structural_impls_rs_repair",
+          "latency_sec": 3.685,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_type_ir_src_sty_rs",
+          "latency_sec": 5.916,
+          "input_tokens": 1428,
+          "output_tokens": 220,
+          "total_tokens": 1648
+        },
+        {
+          "stage": "file_summary:compiler_rustc_type_ir_src_sty_rs_repair",
+          "latency_sec": 3.163,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_stable_mir_src_fold_rs",
+          "latency_sec": 5.095,
+          "input_tokens": 1416,
+          "output_tokens": 220,
+          "total_tokens": 1636
+        },
+        {
+          "stage": "file_summary:compiler_stable_mir_src_fold_rs_repair",
+          "latency_sec": 3.118,
+          "input_tokens": 249,
+          "output_tokens": 216,
+          "total_tokens": 465
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.162,
+          "input_tokens": 27442,
+          "output_tokens": 398,
+          "total_tokens": 27840
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.81,
+          "input_tokens": 27694,
+          "output_tokens": 368,
+          "total_tokens": 28062
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.417,
+          "input_tokens": 27188,
+          "output_tokens": 296,
+          "total_tokens": 27484
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 10.344,
+          "input_tokens": 27482,
+          "output_tokens": 394,
+          "total_tokens": 27876
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.238,
+          "input_tokens": 27410,
+          "output_tokens": 371,
+          "total_tokens": 27781
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.115,
+          "input_tokens": 27828,
+          "output_tokens": 370,
+          "total_tokens": 28198
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.312,
+          "input_tokens": 27617,
+          "output_tokens": 338,
+          "total_tokens": 27955
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.946,
+          "input_tokens": 27619,
+          "output_tokens": 318,
+          "total_tokens": 27937
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 10.551,
+          "input_tokens": 27612,
+          "output_tokens": 394,
+          "total_tokens": 28006
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.31,
+          "input_tokens": 27358,
+          "output_tokens": 323,
+          "total_tokens": 27681
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.297,
+          "input_tokens": 27769,
+          "output_tokens": 322,
+          "total_tokens": 28091
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.513,
+          "input_tokens": 27589,
+          "output_tokens": 300,
+          "total_tokens": 27889
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.929,
+          "input_tokens": 27890,
+          "output_tokens": 346,
+          "total_tokens": 28236
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.038,
+          "input_tokens": 27593,
+          "output_tokens": 353,
+          "total_tokens": 27946
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 3.232,
+          "input_tokens": 2992,
+          "output_tokens": 83,
+          "total_tokens": 3075
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.602,
+          "input_tokens": 11132,
+          "output_tokens": 840,
+          "total_tokens": 11972
+        }
+      ]
+    }
+  }
+}

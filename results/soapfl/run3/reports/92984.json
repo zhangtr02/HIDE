@@ -1,0 +1,231 @@
+{
+  "bug_id": "92984",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-01-11",
+    "resolved": "89b9f7b284aacc5f8613438b80e4dd7bdd10549e"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/type_check/liveness/trace.rs",
+    "compiler/rustc_borrowck/src/type_check/liveness/mod.rs",
+    "compiler/rustc_mir_dataflow/src/drop_flag_effects.rs",
+    "compiler/rustc_mir_dataflow/src/move_paths/builder.rs",
+    "compiler/rustc_borrowck/src/lib.rs",
+    "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+    "compiler/rustc_trait_selection/src/traits/query/dropck_outlives.rs",
+    "compiler/rustc_traits/src/dropck_outlives.rs",
+    "compiler/rustc_borrowck/src/diagnostics/explain_borrow.rs",
+    "compiler/rustc_codegen_ssa/src/mir/analyze.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `Console<'gfx>` holding an immutable reference, exercising explicit lifetime parameters on structs tied to a local variable.",
+        "Implements `Drop` for `Console`, making the type non-trivially droppable and forcing drop-check/liveness analysis by the compiler.",
+        "Creates `console` borrowing `gfx`, then enters a loop that repeatedly uses `gfx` in `println!`, testing borrow interaction across loop iterations.",
+        "Conditionally calls `drop(console)`, explicitly ending one owner before later reassignment, exercising move semantics and manual destruction of a `Drop` type.",
+        "After dropping `console`, mutates `gfx`, which is only legal if the prior borrow is considered ended; this stresses non-lexical lifetime reasoning.",
+        "Reinitializes `console = Console(&gfx)` after mutation, testing whether the compiler accepts sequential borrows of the same local in one loop body.",
+        "Uses a branch `if gfx == 0` so the drop/mutate/reborrow path happens only once, requiring path-sensitive borrow checking.",
+        "Targets nightly-2022-01-11, suggesting a compiler bug around borrow checking, drop elaboration, or move analysis for loop-carried state with `Drop`. "
+      ],
+      "summary": "The reproducer builds a `Drop` type that borrows `gfx`, explicitly drops it inside a loop, mutates `gfx`, then re-borrows it into the same variable. This exercises lifetimes, move semantics, explicit `drop`, non-lexical lifetimes, path-sensitive analysis, and loop-carried borrow state. The failing behavior likely involves rustc mishandling when a dropped borrowed value should stop blocking later mutation and reinitialization."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on borrow checking for a local variable (`gfx`) that is immutably borrowed by a value (`console`) of a type with a `Drop` impl. The program explicitly calls `drop(console)` before mutating `gfx`, then recreates `console` with a fresh borrow. This should require the compiler to recognize that the original borrow ends at the explicit drop point, even inside a loop and only on one control-flow path. However, the diagnostic says the borrow may still be used when `console` is dropped later at the reassignment site, which indicates rustc is conservatively treating `console` as still live or still needing drop after the explicit `drop(console)`. The common pattern across the reproducer, compiler output, and behavior summary is therefore a path-sensitive/NLL/drop-liveness issue involving a moved-and-dropped local of a `Drop` type inside a loop, where the compiler fails to kill the prior loan before allowing mutation and reborrow of the borrowed local.",
+      "possible_causes": [
+        "Incorrect borrow-checker liveness/drop-range analysis for explicit `drop(console)`, causing the loan from `Console(&gfx)` to remain active after the value has been moved into `drop`.",
+        "Bug in move-path or dataflow handling for locals of types implementing `Drop`, where a local consumed by `drop(...)` is still considered potentially dropped again later during reassignment or scope exit.",
+        "Imprecise drop-check integration with non-lexical lifetimes: rustc may be extending the borrow of `gfx` to the later `console = Console(&gfx)` assignment because it assumes the old `console` might still need destructor execution.",
+        "Loop-specific dataflow defect where borrow/live state from one iteration or branch is merged too conservatively, preventing the compiler from recognizing that the borrow is terminated on the `if gfx == 0` path before `gfx += 1`.",
+        "Path-insensitive handling of conditional explicit destruction and reinitialization of the same local, especially for `Drop` types, leading to a false E0506 when mutation occurs between `drop(console)` and `console = ...`.",
+        "Possible MIR borrowck/drop elaboration bug: the compiler may not correctly mark `console` as uninitialized/dead after the call to `std::mem::drop`, so later mutation of the referent is rejected due to a stale borrow."
+      ],
+      "evidence": [
+        "`Console<'gfx>` stores `&'gfx usize`, so the only reason `gfx` is considered borrowed is through `console`.",
+        "`Console` implements `Drop`, and the error explicitly references destructor execution: `borrow might be used here, when console is dropped and runs the Drop code for type Console`.",
+        "The source explicitly calls `drop(console);` before `gfx += 1;`, so acceptance depends on rustc ending the original borrow at that exact point.",
+        "The diagnostic still claims assignment to `gfx` is illegal after the explicit drop, indicating the previous borrow was not released in compiler analysis.",
+        "The code immediately reassigns `console = Console(&gfx);`, and the error points at this reassignment site, suggesting rustc thinks the old value may still need dropping there.",
+        "The problematic sequence occurs inside a `for` loop and within `if gfx == 0`, matching the kind of control-flow-sensitive case where dataflow merging can produce false positives.",
+        "The behavior summary explicitly stresses NLL, manual destruction, loop-carried state, and path-sensitive analysis, all of which align with a compiler defect in borrowck/drop liveness rather than a source-level mistake."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1377,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/liveness/trace.rs",
+        "reason": "Most suspicious because the failure is about a borrow remaining live after an explicit `drop(console)` of a `Drop` type inside a loop. This file computes use-liveness and drop-liveness by walking MIR backward, exactly the machinery that could incorrectly keep regions in `Console<&gfx>` live past the `drop(console)` call or merge loop/path information too conservatively."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/liveness/mod.rs",
+        "reason": "Coordinates liveness generation for borrow checking, combining ordinary use liveness with initialization/move analysis. The bug looks like stale liveness for `console` or its embedded region after explicit destruction and before reassignment, especially in a loop with path-sensitive control flow, which fits this module’s responsibilities."
+      },
+      {
+        "path": "compiler/rustc_mir_dataflow/src/drop_flag_effects.rs",
+        "reason": "Explicit `drop(console)` should affect the local’s drop state so later reassignment does not require dropping the old value again. The diagnostic suggests rustc still thinks `console` might be dropped at reassignment/scope exit, which points to incorrect drop-flag state propagation after a move into `std::mem::drop`."
+      },
+      {
+        "path": "compiler/rustc_mir_dataflow/src/move_paths/builder.rs",
+        "reason": "The reproducer depends on `console` being recognized as moved by `drop(console)` and then reinitialized. If move paths for this local are built imprecisely for `Drop` types or in loop bodies, later analyses may think the old `console` is still initialized and still carries the borrow of `gfx`."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/lib.rs",
+        "reason": "Top-level MIR borrowck orchestration is less likely than the liveness internals, but still plausible because it wires together NLL region inference, move/init analysis, and diagnostics. A bug in how these analyses are sequenced or queried could manifest as this false E0506."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+        "reason": "Although the error is in borrow checking, the core semantic issue is whether the compiler models destructor execution and initializedness correctly for a `Drop` type. Drop elaboration is central to representing when drops may occur, so mismatches here can feed conservative borrowck behavior around reassignment of a previously dropped local."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/dropck_outlives.rs",
+        "reason": "The error specifically mentions the borrow might be used when `console` is dropped, implicating drop-check reasoning about what must outlive destructor execution. This file computes dropck-outlives information and could cause rustc to over-approximate the lifetime requirements of `Console<&gfx>` during drop."
+      },
+      {
+        "path": "compiler/rustc_traits/src/dropck_outlives.rs",
+        "reason": "Provider-side implementation of the dropck outlives query is another plausible source if the compiler is conservatively concluding that `&gfx` must remain valid longer than it should after explicit destruction of `console`."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/diagnostics/explain_borrow.rs",
+        "reason": "Lower suspicion for causing rejection, but the exact message says the borrow may be used when `console` is dropped and points at reassignment. If the underlying analysis is correct but the diagnostic explanation is wrong, this file would be involved. It is included as a secondary possibility because the wording aligns with its responsibility."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/analyze.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 159.101,
+    "stage_times_sec": {
+      "checkout": 5.229,
+      "load_bug_context": 0.085,
+      "test_behavior_analysis": 6.686,
+      "test_failure_analysis": 15.6,
+      "load_file_candidates": 0.348,
+      "search_suspicious_files": 131.152
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 317766,
+      "output_tokens": 6027,
+      "total_tokens": 323793,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.686,
+          "input_tokens": 438,
+          "output_tokens": 344,
+          "total_tokens": 782
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.6,
+          "input_tokens": 1153,
+          "output_tokens": 733,
+          "total_tokens": 1886
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.61,
+          "input_tokens": 26900,
+          "output_tokens": 350,
+          "total_tokens": 27250
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.661,
+          "input_tokens": 26519,
+          "output_tokens": 332,
+          "total_tokens": 26851
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.735,
+          "input_tokens": 26692,
+          "output_tokens": 414,
+          "total_tokens": 27106
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.497,
+          "input_tokens": 26627,
+          "output_tokens": 310,
+          "total_tokens": 26937
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.966,
+          "input_tokens": 26641,
+          "output_tokens": 374,
+          "total_tokens": 27015
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 10.844,
+          "input_tokens": 26729,
+          "output_tokens": 375,
+          "total_tokens": 27104
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 10.09,
+          "input_tokens": 26725,
+          "output_tokens": 377,
+          "total_tokens": 27102
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.933,
+          "input_tokens": 25810,
+          "output_tokens": 317,
+          "total_tokens": 26127
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 10.022,
+          "input_tokens": 26508,
+          "output_tokens": 335,
+          "total_tokens": 26843
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.79,
+          "input_tokens": 26731,
+          "output_tokens": 311,
+          "total_tokens": 27042
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.144,
+          "input_tokens": 26265,
+          "output_tokens": 353,
+          "total_tokens": 26618
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.612,
+          "input_tokens": 13803,
+          "output_tokens": 364,
+          "total_tokens": 14167
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 17.226,
+          "input_tokens": 10225,
+          "output_tokens": 738,
+          "total_tokens": 10963
+        }
+      ]
+    }
+  }
+}

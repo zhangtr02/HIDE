@@ -1,0 +1,246 @@
+{
+  "bug_id": "104736",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-08-03",
+    "resolved": "8131b9774ebcb6c162fcac71545a13543ec369e7"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/build/scope.rs",
+    "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+    "compiler/rustc_mir_dataflow/src/elaborate_drops.rs",
+    "compiler/rustc_mir_build/src/build/expr/into.rs",
+    "compiler/rustc_mir_transform/src/simplify.rs",
+    "compiler/rustc_mir_transform/src/remove_noop_landing_pads.rs",
+    "compiler/rustc_codegen_ssa/src/mir/block.rs",
+    "compiler/rustc_monomorphize/src/collector.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_borrowck/src/type_check/liveness/trace.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines two zero-sized structs with explicit Drop impls, forcing the compiler to track destruction order and drop scopes even though the destructors do nothing.",
+        "Calls weird_temporary with by-value parameters A and B, exercising move semantics and MIR drop elaboration for function arguments consumed inside nested expressions.",
+        "Uses a labeled block with break 'scope nothing to return early from inside a tuple element, testing nonlocal control flow through temporary construction.",
+        "Binds b to local _z inside the first tuple field, so B is dropped at that inner block’s end unless control flow exits via the labeled break.",
+        "Wraps a in match { a } { _ => () }, forcing a temporary/move used by pattern matching and checking when A is considered consumed and dropped.",
+        "Builds a three-element tuple combining a block, a match, and a function call, stressing evaluation order and cleanup of partially constructed aggregates.",
+        "Includes a trivially non-panicking #[inline(always)] function no_unwind, exercising compiler no-unwind assumptions during optimization and cleanup generation.",
+        "Uses the unit tuple ((),(),()) as both the early-break value and function return type, isolating the bug to temporary lifetime/drop behavior rather than data content."
+      ],
+      "summary": "The reproducer stresses MIR drop elaboration and cleanup generation for partially evaluated tuple expressions. It combines by-value Drop types, a labeled-block early break, a moved value inside match, and an inlined no-unwind call. The key behavior is determining correct evaluation order and destructor scheduling when tuple construction is interrupted by nonlocal control flow."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a compiler ICE in monomorphization/codegen preparation rather than a user-code type error. The reproducer is centered on MIR control-flow and drop semantics: two by-value arguments with Drop impls, tuple construction with left-to-right evaluation, an early `break 'scope nothing` from inside the first tuple element, and another tuple element that moves `a` through `match { a }`. This creates a partially constructed aggregate with nonlocal exit and requires precise cleanup scheduling for moved/remaining values. The presence of `-Z validate-mir`, high MIR opt level, and `#[inline(always)] no_unwind()` suggests the bug is triggered after MIR construction/elaboration, likely during MIR optimization or mono-item collection when analyzing unwind/cleanup edges. The stack trace ending in `collect_and_partition_mono_items` indicates compiler internal inconsistency in the MIR or instance reachability after optimization, likely caused by incorrect handling of drop scopes / cleanup blocks for early-exit from aggregate construction. The common theme is: partial tuple initialization + labeled break + Drop types + no-unwind call produce malformed or inconsistent MIR/control-flow metadata that later ICEs during codegen item collection.",
+      "possible_causes": [
+        "Bug in MIR drop elaboration for partially constructed tuple/aggregate expressions when evaluation is interrupted by `break` from an inner block, causing incorrect cleanup paths or double/missing drop scheduling.",
+        "Incorrect handling of moved-by-value Drop arguments across nonlocal control flow: `b` is bound to `_z` in one tuple field while `a` is consumed in another, and the compiler may miscompute which locals are live, moved, or need cleanup after the labeled break.",
+        "MIR optimization defect (likely SimplifyCfg / destination propagation / cleanup-unwind transformation) that assumes normal completion of tuple field evaluation and produces invalid cleanup CFG when an early `break` exits the aggregate construction.",
+        "Incorrect propagation of `no_unwind` / inlined call assumptions into cleanup generation, leading to malformed unwind edges or unreachable cleanup blocks in optimized MIR for this expression.",
+        "Defect in monomorphization item collection triggered by invalid optimized MIR, where drop glue or referenced instances from cleanup blocks become inconsistent after MIR transforms involving nonlocal exits.",
+        "Possible issue in drop-range / initialization-state analysis for zero-sized types with explicit Drop impls, where ZST layout masks but does not remove destructor obligations, exposing a compiler bug in tracking partial initialization and destruction order."
+      ],
+      "evidence": [
+        "The reproducer uses two explicit `Drop` types passed by value, which forces the compiler to generate and reason about destructor scheduling even though the types are zero-sized.",
+        "The core construct is a tuple expression whose first element may execute `break 'scope nothing`, meaning later tuple elements may be skipped and the aggregate may be only partially evaluated.",
+        "`b` is moved into `_z` inside an inner block in the first tuple field, so cleanup differs depending on whether control exits normally or via the labeled break.",
+        "`a` is moved in `match { a } { _ => () }` in the second tuple field, which stresses move-path and drop-state tracking across tuple evaluation order.",
+        "The third tuple field is an `#[inline(always)]` trivial `no_unwind()` call, matching the reported behavior that no-unwind assumptions may interact with cleanup generation.",
+        "The compiler crashes with an ICE during `collect_and_partition_mono_items`, indicating internal compiler inconsistency rather than a frontend diagnostic from the source program.",
+        "Compiler flags include `-Z validate-mir -Z mir-opt-level=3 -Z print-mono-items=eager`, which strongly suggests the failure is exposed by MIR validation/optimization and later codegen item collection on malformed MIR.",
+        "The behavior summary explicitly isolates the stressor as temporary lifetime/drop behavior under partially evaluated tuple construction with nonlocal control flow."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1648,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/build/scope.rs",
+        "reason": "Most suspicious because the reproducer hinges on MIR construction for lexical/breakable scopes, early `break 'scope` exits from inside tuple evaluation, and precise scheduling of drops/cleanups for partially evaluated expressions. This file is responsible for emitting drops on early exits and managing breakable scope cleanup, which matches the failure pattern closely."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+        "reason": "Highly suspicious because the bug involves explicit `Drop` types, partial tuple initialization, and nonlocal control flow. Drop elaboration is exactly where provisional drops are rewritten into guarded runtime-correct cleanup CFG, and an error here could yield malformed MIR that later ICEs during mono-item collection/codegen."
+      },
+      {
+        "path": "compiler/rustc_mir_dataflow/src/elaborate_drops.rs",
+        "reason": "Closely related to the previous file: this is the dataflow/drop protocol machinery used to elaborate drops with partial initialization and unwind handling. The reproducer stresses initializedness tracking across moves and early exit, so incorrect drop-flag or unwind modeling here could explain invalid MIR."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/into.rs",
+        "reason": "Tuple construction with a labeled-block `break` inside the first element is lowered here as expression-into-destination logic. Since the failure depends on partially constructed aggregate evaluation order and control-flow-producing subexpressions, this lowering code is a strong candidate."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/simplify.rs",
+        "reason": "The analysis strongly suggests optimized MIR may become inconsistent after cleanup CFG rewrites. `SimplifyCfg` can incorrectly fold or remove blocks/edges around cleanup paths and early exits from aggregate construction, especially under `-Z mir-opt-level=3`."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/remove_noop_landing_pads.rs",
+        "reason": "The reproducer includes an inlined `no_unwind()` call and likely exercises cleanup/unwind edge canonicalization. If unwind/cleanup blocks created for tuple/drop handling are malformed or misclassified as no-op landing pads, this pass could introduce invalid CFG seen later in codegen preparation."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/block.rs",
+        "reason": "Although likely downstream of the real bug, this file lowers MIR terminators and cleanup/unwind control flow to backend IR. If the issue only manifests when codegen traverses unusual cleanup edges from partially evaluated tuples, this is a plausible crash surface."
+      },
+      {
+        "path": "compiler/rustc_monomorphize/src/collector.rs",
+        "reason": "The stack trace ends in `collect_and_partition_mono_items`, so this file is the immediate crash site. It may be tripping over invalid MIR produced earlier, especially inconsistent drop-glue or instance reachability from cleanup blocks."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/liveness/trace.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 150.848,
+    "stage_times_sec": {
+      "checkout": 4.86,
+      "load_bug_context": 0.081,
+      "test_behavior_analysis": 5.934,
+      "test_failure_analysis": 14.466,
+      "load_file_candidates": 0.867,
+      "search_suspicious_files": 124.64
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 398023,
+      "output_tokens": 6383,
+      "total_tokens": 404406,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.934,
+          "input_tokens": 479,
+          "output_tokens": 319,
+          "total_tokens": 798
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.466,
+          "input_tokens": 2071,
+          "output_tokens": 780,
+          "total_tokens": 2851
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.459,
+          "input_tokens": 27556,
+          "output_tokens": 374,
+          "total_tokens": 27930
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.964,
+          "input_tokens": 27786,
+          "output_tokens": 327,
+          "total_tokens": 28113
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.674,
+          "input_tokens": 27222,
+          "output_tokens": 318,
+          "total_tokens": 27540
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.884,
+          "input_tokens": 27693,
+          "output_tokens": 333,
+          "total_tokens": 28026
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.607,
+          "input_tokens": 27544,
+          "output_tokens": 379,
+          "total_tokens": 27923
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.696,
+          "input_tokens": 27918,
+          "output_tokens": 338,
+          "total_tokens": 28256
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.008,
+          "input_tokens": 27705,
+          "output_tokens": 348,
+          "total_tokens": 28053
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.223,
+          "input_tokens": 27772,
+          "output_tokens": 342,
+          "total_tokens": 28114
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.737,
+          "input_tokens": 27710,
+          "output_tokens": 359,
+          "total_tokens": 28069
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.422,
+          "input_tokens": 27509,
+          "output_tokens": 347,
+          "total_tokens": 27856
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.554,
+          "input_tokens": 27793,
+          "output_tokens": 321,
+          "total_tokens": 28114
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.409,
+          "input_tokens": 27794,
+          "output_tokens": 300,
+          "total_tokens": 28094
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.426,
+          "input_tokens": 27938,
+          "output_tokens": 275,
+          "total_tokens": 28213
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.45,
+          "input_tokens": 21083,
+          "output_tokens": 325,
+          "total_tokens": 21408
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.098,
+          "input_tokens": 14450,
+          "output_tokens": 598,
+          "total_tokens": 15048
+        }
+      ]
+    }
+  }
+}

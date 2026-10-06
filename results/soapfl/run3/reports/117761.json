@@ -1,0 +1,253 @@
+{
+  "bug_id": "117761",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-08",
+    "resolved": "7adc89b69b941afceadcf8609dd6b2999353e550"
+  },
+  "final_top10": [
+    "compiler/rustc_codegen_ssa/src/mir/place.rs",
+    "compiler/rustc_codegen_ssa/src/mir/operand.rs",
+    "compiler/rustc_codegen_ssa/src/mir/block.rs",
+    "compiler/rustc_codegen_llvm/src/builder.rs",
+    "compiler/rustc_codegen_llvm/src/type_of.rs",
+    "compiler/rustc_mir_transform/src/gvn.rs",
+    "compiler/rustc_mir_transform/src/unreachable_prop.rs",
+    "compiler/rustc_mir_transform/src/simplify.rs",
+    "compiler/rustc_abi/src/layout.rs",
+    "compiler/rustc_target/src/abi/call/x86_64.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `Affine2` containing an aligned `Mat2` field and a `Vec2` field, creating a mixed-layout aggregate for field access and calling convention testing.",
+        "`Affine2::inverse(&self)` borrows `self.matrix2` but then moves `self.translation`, exercising partial-move-from-borrowed-struct behavior when the moved field is `Copy`.",
+        "`Mat2` derives `Clone, Copy` and uses `#[repr(align(8))]`, stressing alignment-sensitive field projection, ABI layout, and code generation for references to aligned inner fields.",
+        "`Vec2` also derives `Clone, Copy`, so passing `self.translation` by value from `&self` is legal and tests compiler handling of implicit copies from shared references.",
+        "`mat2_ref(&Mat2)` and `vec2_move(Vec2)` are both `#[inline(never)]`, forcing distinct call boundaries so MIR/LLVM must materialize borrow and copy operations explicitly.",
+        "`mat2_ref` is called first and diverges via `loop {}`, making subsequent `vec2_move` unreachable and exercising dead-code/unreachable-block handling after a divergent call.",
+        "`main` constructs `Affine2` as a temporary and immediately calls `.inverse()`, testing method dispatch on temporaries and borrow formation over rvalue aggregates.",
+        "The reproducer targets optimizer/codegen behavior around evaluation order, field projections, and unreachable code in nightly `rustc`, rather than runtime functionality."
+      ],
+      "summary": "The reproducer builds a temporary `Affine2`, borrows one aligned field by reference, and then nominally copies another `Copy` field by value inside a method taking `&self`. Because the first non-inlined callee diverges, the second call is unreachable. This stresses Rust’s field projection rules, `Copy` semantics from shared references, temporary method calls, alignment-aware layout, and compiler MIR/LLVM optimization of divergent control flow."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during code generation/optimization rather than a semantic type-checking issue. The reproducer combines several stressors in one small function: a method on a temporary aggregate, projection of two different fields from `&self`, one field having explicit `repr(align(8))`, the second field being copied by value because it is `Copy`, and a first non-inlined call that diverges so the later field access/call becomes unreachable. The common theme is mishandling of field projections and operand formation for mixed-layout aggregates across unreachable control-flow after MIR optimizations (`-Z mir-opt-level=2`, `-Z inline-mir`, `+GVN`). Since the panic occurs in `rustc_codegen_llvm`/`rustc_codegen_ssa` with no query-stack involvement, the likely defect is in production compiler code that lowers optimized MIR to LLVM IR or computes ABI/layout for projected fields in unreachable blocks. In particular, codegen may be incorrectly trying to materialize the `self.translation` operand after a divergent call, or miscomputing alignment/offset/projection metadata for `self.matrix2` vs `self.translation` within `Affine2` when one field has stronger alignment. Another plausible compiler defect is an optimizer/codegen inconsistency: MIR simplification may leave an invalid or partially-dead place/operand that LLVM codegen still assumes is live and well-formed, causing a panic when emitting loads/geps/calls for the unreachable tail.",
+      "possible_causes": [
+        "Bug in MIR-to-LLVM lowering for field projections from `&self` on mixed-layout structs, especially when one field has `#[repr(align(...))]` and another is copied by value.",
+        "Incorrect handling of unreachable blocks after a divergent call: codegen may still attempt to evaluate or assign operands for the later `self.translation` copy/call even though the block is dead.",
+        "Defect in ABI/layout computation for aggregate field access where an explicitly aligned field changes offsets/alignment and later projections are emitted with inconsistent assumptions.",
+        "MIR optimization (`GVN`, inlining, unreachable/dead-code cleanup) may produce an invalid place/operand state for a partially used borrowed aggregate, which `rustc_codegen_ssa`/`rustc_codegen_llvm` does not robustly handle.",
+        "Codegen bug in forming by-value arguments from `Copy` fields accessed through a shared reference to a temporary aggregate, especially when combined with divergence before the use.",
+        "Possible panic in LLVM backend support code when generating GEP/load/reference metadata for a projected field in an unreachable successor block with stale layout or alignment information."
+      ],
+      "evidence": [
+        "The compiler panic happens during `codegen_crate` / `start_codegen`, indicating a backend/codegen defect rather than a front-end borrow-checking or type system issue.",
+        "`Affine2::inverse(&self)` accesses two fields from the same `&self`: one by reference (`&self.matrix2`), one by value copy (`self.translation`), stressing place projection and operand creation from shared references.",
+        "`Mat2` has `#[repr(align(8))]`, introducing nontrivial alignment/layout constraints inside `Affine2` and making field offset/alignment handling more fragile.",
+        "Both callees are `#[inline(never)]`, so MIR/codegen must preserve explicit call boundaries and argument materialization instead of optimizing everything away locally.",
+        "The first callee `mat2_ref` diverges with `loop {}`, so the second call is unreachable; this directly stresses dead/unreachable-block handling after MIR optimization.",
+        "The reproducer uses a temporary `Affine2 { ... }.inverse()`, which forces borrow/projection on an rvalue aggregate and can expose bugs in temporary place handling.",
+        "Compiler flags include `-Z mir-opt-level=2 -Z inline-mir -Z mir-enable-passes=+GVN`, matching the hypothesis that an optimization/codegen interaction around unreachable control flow triggers the ICE.",
+        "The test behavior explicitly centers on evaluation order, field projections, alignment-aware layout, and unreachable code, all consistent with a backend defect in lowering optimized MIR for this pattern."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1699,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/place.rs",
+        "reason": "Most suspicious because the reproducer stresses field projection from `&self` on a mixed-layout struct with an explicitly aligned field. This file handles MIR place lowering, field offsets/alignment, and typed projections into backend addresses; a bug here could panic when projecting `matrix2` and then later forming `translation` in optimized/unreachable code."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/operand.rs",
+        "reason": "Very likely involved because `self.translation` is a `Copy` field read by value from a shared reference, after another field borrow. Operand lowering is exactly where by-value copies from projected places are materialized, and stale/invalid operand formation in an unreachable successor after a diverging call matches this file’s responsibilities."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/block.rs",
+        "reason": "The first call diverges and makes the second call unreachable, so terminator/basic-block lowering is highly suspect. If codegen mishandles continuation blocks or still tries to emit/evaluate unreachable successor operands after a `!`-returning call, the bug would likely be here."
+      },
+      {
+        "path": "compiler/rustc_codegen_llvm/src/builder.rs",
+        "reason": "The panic happens during LLVM codegen, and this builder emits loads, GEPs, calls, and alignment-sensitive memory operations. A malformed field access or load in an unreachable block could surface as a panic here, especially with aligned inner-field references."
+      },
+      {
+        "path": "compiler/rustc_codegen_llvm/src/type_of.rs",
+        "reason": "The aligned `Mat2` field changes aggregate LLVM type shape and padding. If LLVM type construction for `Affine2` is inconsistent with place/operand projection assumptions, mixed aligned-field layout could trigger backend panics during emission."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/gvn.rs",
+        "reason": "The reproducer is compiled with `-Z mir-enable-passes=+GVN`, and the pattern is explicitly optimization-sensitive. GVN may incorrectly rewrite values or preserve an invalid projected operand across the divergent call/unreachable tail, leaving codegen to crash on malformed MIR."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/unreachable_prop.rs",
+        "reason": "This pass directly rewrites/control-propagates unreachable blocks at MIR opt level 2. Since the bug depends on a diverging first call and unreachable second call, a transformation bug here could leave broken block structure or dead statements/operands that codegen later mishandles."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/simplify.rs",
+        "reason": "CFG simplification commonly runs after unreachable/dead-code changes. If it incorrectly preserves or merges blocks containing now-dead field projections/calls, it could create malformed MIR that only crashes later in codegen."
+      },
+      {
+        "path": "compiler/rustc_abi/src/layout.rs",
+        "reason": "The explicit `#[repr(align(8))]` on `Mat2` makes layout computation a core part of the failure scenario. A wrong field offset/alignment or aggregate placement decision for `Affine2` could explain crashes when projecting one field by reference and another by value."
+      },
+      {
+        "path": "compiler/rustc_target/src/abi/call/x86_64.rs",
+        "reason": "Less likely than MIR/place codegen, but still plausible because the reproducer uses by-reference and by-value arguments across non-inlined calls on x86_64. If overaligned small aggregates or copied fields are classified inconsistently for calls, backend codegen could panic while lowering the call ABI."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 158.809,
+    "stage_times_sec": {
+      "checkout": 1.203,
+      "load_bug_context": 0.112,
+      "test_behavior_analysis": 7.673,
+      "test_failure_analysis": 13.56,
+      "load_file_candidates": 3.334,
+      "search_suspicious_files": 132.927
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 419039,
+      "output_tokens": 7333,
+      "total_tokens": 426372,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.673,
+          "input_tokens": 560,
+          "output_tokens": 399,
+          "total_tokens": 959
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.56,
+          "input_tokens": 2529,
+          "output_tokens": 841,
+          "total_tokens": 3370
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.478,
+          "input_tokens": 28075,
+          "output_tokens": 404,
+          "total_tokens": 28479
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 12.252,
+          "input_tokens": 28305,
+          "output_tokens": 404,
+          "total_tokens": 28709
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.063,
+          "input_tokens": 27840,
+          "output_tokens": 366,
+          "total_tokens": 28206
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.701,
+          "input_tokens": 28113,
+          "output_tokens": 339,
+          "total_tokens": 28452
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.929,
+          "input_tokens": 28043,
+          "output_tokens": 292,
+          "total_tokens": 28335
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.64,
+          "input_tokens": 28461,
+          "output_tokens": 332,
+          "total_tokens": 28793
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.283,
+          "input_tokens": 28257,
+          "output_tokens": 353,
+          "total_tokens": 28610
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.181,
+          "input_tokens": 28247,
+          "output_tokens": 386,
+          "total_tokens": 28633
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.033,
+          "input_tokens": 28257,
+          "output_tokens": 379,
+          "total_tokens": 28636
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.197,
+          "input_tokens": 28104,
+          "output_tokens": 369,
+          "total_tokens": 28473
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.292,
+          "input_tokens": 28453,
+          "output_tokens": 343,
+          "total_tokens": 28796
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.215,
+          "input_tokens": 28193,
+          "output_tokens": 301,
+          "total_tokens": 28494
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.627,
+          "input_tokens": 28478,
+          "output_tokens": 363,
+          "total_tokens": 28841
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.747,
+          "input_tokens": 28323,
+          "output_tokens": 387,
+          "total_tokens": 28710
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.037,
+          "input_tokens": 7388,
+          "output_tokens": 334,
+          "total_tokens": 7722
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.222,
+          "input_tokens": 13413,
+          "output_tokens": 741,
+          "total_tokens": 14154
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,244 @@
+{
+  "bug_id": "112560",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-06-11",
+    "resolved": "7820972f866ca2cea281ccc39201c0cd27087110"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_hir_analysis/src/errors.rs",
+    "compiler/rustc_hir_analysis/src/astconv/generics.rs",
+    "compiler/rustc_ast_lowering/src/path.rs",
+    "compiler/rustc_parse/src/parser/path.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_middle/src/ty/assoc.rs",
+    "compiler/rustc_ty_utils/src/assoc.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly feature `associated_const_equality`, allowing equality constraints on associated constants in trait bounds.",
+        "Defines `Trait1` with both an associated constant `const A: u32` and an associated type `type A`, intentionally reusing the same identifier.",
+        "Uses `T: Trait1<A = 12>` inside an impl, which is syntactically ambiguous because `A` could denote the associated const or associated type.",
+        "Implements `Trait2` for any array `[T; N]`, exercising const generics with array lengths via `const N: usize`.",
+        "The impl combines trait solving, associated item resolution, and const-equality normalization during type checking.",
+        "The reproducer stresses compiler name resolution for associated items when a trait contains both a type and const with identical names.",
+        "It checks whether the compiler correctly accepts, rejects, or mishandles the equality constraint in an impl header under this feature.",
+        "`main` is empty; all exercised behavior occurs during compilation, specifically parsing and trait-bound validation."
+      ],
+      "summary": "This reproducer is a compile-time test for nightly associated-const equality. It defines a trait with an associated const and associated type sharing the name `A`, then uses `Trait1<A = 12>` in a const-generic array impl. The code stresses parser and trait-resolution behavior around ambiguous associated item names, equality constraints, and impl header checking."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to compiler handling of ambiguous associated item names in generic trait bounds under `associated_const_equality`. The reproducer enables the feature intended to allow constraints like `Trait<CONST = value>`, but the trait declares both `const A` and `type A`. In the impl bound `T: Trait1<A = 12>`, rustc resolves `A` as the associated type and emits `expected associated type bound, found constant`, instead of correctly disambiguating, producing a targeted ambiguity diagnostic, or routing the equality through associated-const handling. The common thread across the behavior and diagnostic is that parsing/HIR lowering/trait-bound validation appears to classify `A = 12` using the associated-type binding path before considering associated constants with the same name. Since the feature is specifically about associated const equality, the likely bug is in associated item lookup or bound validation logic for trait segment bindings when both an associated type and associated const share an identifier.",
+      "possible_causes": [
+        "Incorrect associated-item name resolution in trait bounds: compiler lookup for `Trait1<A = 12>` likely prefers or exclusively searches associated types, ignoring an associated const of the same name when both exist.",
+        "Bug in parser/HIR lowering or AST-to-HIR classification of trait generic bindings: `A = 12` may always be lowered as an associated-type binding node rather than an associated-const equality constraint under the feature gate.",
+        "Defect in ambiguity handling for associated items with identical names: compiler should detect and report ambiguity (or require disambiguation) when a trait contains both `type A` and `const A`, but instead misclassifies the binding and emits a misleading type-bound error.",
+        "Incomplete integration of `associated_const_equality` into trait-bound validation / WF checking in impl headers, especially when combined with item lookup on traits containing both assoc types and assoc consts.",
+        "Associated item collection or trait item namespace checking may incorrectly allow later stages to treat same-named associated type/const bindings without proper disambiguation metadata, leading to wrong diagnostic selection."
+      ],
+      "evidence": [
+        "Nightly feature `associated_const_equality` is explicitly enabled, so the compiler is expected to consider associated-const equality syntax in trait bounds.",
+        "Trait `Trait1` defines both `const A: u32;` and `type A;`, creating a same-name associated item collision scenario.",
+        "The bound `T: Trait1<A = 12>` uses a constant literal on the right-hand side, which strongly suggests intent to constrain the associated const, not the associated type.",
+        "Compiler output says `expected associated type bound, found constant` and points at `A = 12`, showing rustc interpreted the binding as an associated-type equality/binding attempt.",
+        "Diagnostic note references `type A` specifically, indicating the lookup/validation path selected the associated type item and did not properly account for the associated const of the same name.",
+        "All behavior is compile-time only, centered on parsing and trait-bound validation in an impl header; no runtime logic is involved.",
+        "The reproducer also includes const generics (`[T; N]`), but the emitted error occurs before any array-length reasoning, narrowing the issue to associated item resolution and bound checking rather than const-generic evaluation itself."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1632,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "Most likely location: the error shows `Trait1<A = 12>` is being interpreted specifically as an associated type binding, even though `associated_const_equality` should allow const equality. `astconv` is where HIR trait/path syntax is converted into internal predicates and where associated item lookup and binding-kind classification happen. A bug here could easily prefer an associated type named `A` and reject the const literal RHS before const-equality handling is considered."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/errors.rs",
+        "reason": "This file defines diagnostics including `AmbiguousAssocItem` and `AssocKindMismatch`. The observed diagnostic (`expected associated type bound, found constant`) strongly suggests the compiler took the wrong associated-item kind path instead of emitting ambiguity-aware or const-aware reporting. Even if not the root semantic bug, this file is highly suspicious for the incorrect diagnostic selection in the same codepath."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/generics.rs",
+        "reason": "The reproducer uses `A = 12` in a trait bound segment, which passes through generic-argument/binding validation. If generic bindings are classified or validated here with an assumption that named equality bindings target associated types first, this would produce exactly the seen rejection when the RHS is a const literal."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "A plausible earlier bug point is AST-to-HIR lowering of path segment bindings. If `A = 12` is lowered uniformly as an associated-type binding node, later analysis would inevitably report a type/const mismatch. The reproducer is compile-time only and specifically stresses path/bound syntax with ambiguous associated item names, making this lowering file a strong candidate."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/path.rs",
+        "reason": "The syntax `Trait1<A = 12>` is parsed in path generic arguments. If the parser builds the wrong AST form for this feature-gated equality syntax, especially in the presence of same-named associated type and const items, downstream stages would mis-handle it. Less likely than `astconv`, but still relevant because the failure appears before deeper trait solving."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The error occurs in an impl header during bound validation. If associated-const equality was lowered but WF checking only recognizes associated type equality/bindings in this context, it could issue the observed kind mismatch while validating the impl's predicates."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/assoc.rs",
+        "reason": "This file defines `AssocKind` metadata for associated items. Since the bug centers on choosing between a trait's associated const `A` and associated type `A`, a flaw in how associated items are represented or queried by kind/name could contribute to selecting the type item over the const item."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/assoc.rs",
+        "reason": "Associated-item query construction lives here. If trait associated items with duplicate names across kinds are collected or exposed without preserving the needed ambiguity/disambiguation behavior, later lookup in `astconv` may incorrectly see or prefer the associated type."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "Although associated item equality in trait bounds is usually handled later than name resolution, this reproducer stresses identifier resolution for `A` in a trait path segment. A late-resolution bug around trait-associated bindings with same-name items could bias later lowering toward the type namespace/item."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "As a lower-probability candidate, AST validation may be enforcing or assuming older invariants about equality bindings in trait bounds, especially before full support for `associated_const_equality` in ambiguous cases. This could help explain an early rejection path before proper const-aware handling."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 139.265,
+    "stage_times_sec": {
+      "checkout": 1.975,
+      "load_bug_context": 0.056,
+      "test_behavior_analysis": 6.13,
+      "test_failure_analysis": 10.306,
+      "load_file_candidates": 0.123,
+      "search_suspicious_files": 120.675
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 372995,
+      "output_tokens": 6544,
+      "total_tokens": 379539,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.129,
+          "input_tokens": 383,
+          "output_tokens": 290,
+          "total_tokens": 673
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.306,
+          "input_tokens": 1001,
+          "output_tokens": 664,
+          "total_tokens": 1665
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.261,
+          "input_tokens": 26417,
+          "output_tokens": 349,
+          "total_tokens": 26766
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.352,
+          "input_tokens": 26463,
+          "output_tokens": 368,
+          "total_tokens": 26831
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.636,
+          "input_tokens": 26087,
+          "output_tokens": 324,
+          "total_tokens": 26411
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.581,
+          "input_tokens": 26342,
+          "output_tokens": 386,
+          "total_tokens": 26728
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.581,
+          "input_tokens": 26305,
+          "output_tokens": 355,
+          "total_tokens": 26660
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 6.815,
+          "input_tokens": 26731,
+          "output_tokens": 323,
+          "total_tokens": 27054
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.859,
+          "input_tokens": 26547,
+          "output_tokens": 343,
+          "total_tokens": 26890
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.145,
+          "input_tokens": 26557,
+          "output_tokens": 356,
+          "total_tokens": 26913
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.999,
+          "input_tokens": 26535,
+          "output_tokens": 393,
+          "total_tokens": 26928
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.73,
+          "input_tokens": 26310,
+          "output_tokens": 338,
+          "total_tokens": 26648
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.275,
+          "input_tokens": 26637,
+          "output_tokens": 338,
+          "total_tokens": 26975
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 4.684,
+          "input_tokens": 26622,
+          "output_tokens": 110,
+          "total_tokens": 26732
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.498,
+          "input_tokens": 26709,
+          "output_tokens": 381,
+          "total_tokens": 27090
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.653,
+          "input_tokens": 16643,
+          "output_tokens": 410,
+          "total_tokens": 17053
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.577,
+          "input_tokens": 10706,
+          "output_tokens": 816,
+          "total_tokens": 11522
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "title": "impl Trait lifetimes regression 1.67",
+  "labels": [
+    "P-high",
+    "T-compiler",
+    "regression-from-stable-to-stable",
+    "A-impl-trait",
+    "C-bug",
+    "T-types"
+  ],
+  "body": "Some regressions of #103491 that I previously reported in https://github.com/rust-lang/rust/issues/105826#issuecomment-1356364617, but they were missed:\r\n\r\n```rust\r\nstruct MyTy<'a>(Vec<u8>, &'a ());\r\n\r\nimpl MyTy<'_> {\r\n    fn one(&mut self) -> &mut impl Sized {\r\n        &mut self.0\r\n    }\r\n    fn two(&mut self) -> &mut (impl Sized + 'static) {\r\n        self.one()\r\n        //~^ ERROR lifetime may not live long enough\r\n    }\r\n}\r\n```\r\n\r\n```rust\r\n#![feature(type_alias_impl_trait)]\r\ntype Opaque<'a> = impl Sized;\r\nfn define<'a>() -> Opaque<'a> {}\r\n\r\nfn test<'a>() {\r\n    None::<&'static Opaque<'a>>;\r\n    //~^ ERROR lifetime may not live long enough\r\n}\r\n```\r\n\r\n```rust\r\nfn one<'a, 'b: 'b>() -> &'a impl Sized {\r\n    &()\r\n}\r\nfn two<'a, 'b>() {\r\n    one::<'a, 'b>();\r\n    //~^ ERROR lifetime may not live long enough\r\n}\r\n```\r\n\r\nI guess the way to fix this is to ignore non-captured lifetimes of opaque types here https://github.com/rust-lang/rust/blob/ca1bc7f1f6487991dd6b504d1fddbc982e6b779c/compiler/rustc_infer/src/infer/outlives/obligations.rs#L417\r\n\r\ncc @cjgillot \r\n\r\n@rustbot label C-bug regression-from-stable-to-stable T-types T-compiler A-impl-trait"
+}

@@ -1,0 +1,283 @@
+{
+  "bug_id": "117489",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-10-31",
+    "resolved": "31bc7e2c47e82798a392c770611975a6883132c8"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+    "compiler/rustc_borrowck/src/type_check/input_output.rs",
+    "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+    "compiler/rustc_borrowck/src/region_infer/mod.rs",
+    "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+    "compiler/rustc_infer/src/infer/nll_relate/mod.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_hir_typeck/src/callee.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a custom `LendingIterator` using a generic associated type `Item<'a>` with `where Self: 'a`, exercising GATs and higher-ranked lifetime relationships.",
+        "`next(&mut self) -> Option<Self::Item<'_>>` returns items borrowing from `self`, testing self-referential iteration patterns that standard `Iterator` cannot express directly.",
+        "Default trait method `for_each` consumes `self` and accepts `Box<dyn FnMut(Self::Item<'_>) + 'static>`, stressing trait-object lifetime handling with GAT-produced arguments.",
+        "`Query<'q>` stores a slice reference and index, then implements the lending iterator by yielding `&u32` tied to the borrow lifetime of `&mut self`.",
+        "`Query::new(&data)` coerces `&Vec<u32>` to `&[u32]`, exercising ordinary slice coercion while preserving the outer borrow lifetime `'q`.",
+        "The loop inside `for_each` repeatedly calls `next` and passes each borrowed item into the boxed closure, checking borrow-checking across repeated mutable borrows of `self`.",
+        "The UFCS call `LendingIterator::for_each(Query::new(&data), ...)` compiles, probing method resolution and trait default method instantiation separately from normal method-call syntax.",
+        "The commented method-call form reportedly triggers a `'static`-related failure or crash, indicating a compiler bug in lifetime inference/object safety around GATs and boxed closures."
+      ],
+      "summary": "The reproducer builds a lending iterator with a GAT, where yielded items borrow from the iterator itself. `Query` iterates over a borrowed slice and `for_each` feeds borrowed items into a boxed `FnMut` trait object. It specifically contrasts UFCS and method-call syntax: the UFCS version compiles, while the method-call form exposes a `'static` lifetime issue or compiler crash, highlighting a rustc bug in handling GAT lifetimes, closure trait objects, and method resolution."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on borrow checking of closures in the presence of a generic associated type (GAT) whose output lifetime is tied to `&mut self`. The trait defines `Item<'a>` with `where Self: 'a`, and the default method `for_each` accepts `Box<dyn FnMut(Self::Item<'_>) + 'static>`, forcing rustc to reason about an erased trait object callable with values whose type is itself lifetime-indexed by a higher-ranked borrow of `self`. The query stack shows the ICE occurs specifically during `mir_borrowck` of `main::{closure#0}` and then `main`, not during parsing or trait selection, which strongly suggests an internal inconsistency in MIR borrow-checking / region solving for the closure environment or call signature. A key similarity in the reproducer behavior is that UFCS invocation and method-call invocation are treated differently, even though they should instantiate the same default trait method; that points to a defect in method-call lowering, canonicalization, or obligation instantiation around late-bound regions and GAT projections. The reported `'static` sensitivity further suggests rustc may be incorrectly promoting or requiring the GAT-projected argument type to satisfy `'static`, or mishandling higher-ranked trait object bounds when checking repeated `self.next()` borrows passed into `FnMut`. Overall, the likely compiler defect is in borrow-check / trait-object lifetime handling for GAT projections inside closure call signatures, especially when default trait methods are invoked through different call paths.",
+      "possible_causes": [
+        "Bug in MIR borrow checker region inference for closures whose argument type is a GAT projection like `Self::Item<'_>` tied to a mutable self-borrow, causing an ICE instead of a proper lifetime error.",
+        "Incorrect normalization / canonicalization of `Box<dyn FnMut(Self::Item<'_>) + 'static>` when `Self::Item<'_>` is a higher-ranked GAT projection, leading to inconsistent region obligations during borrow checking.",
+        "Defect in method/default-method instantiation or HIR-to-MIR lowering where UFCS and method-call syntax produce different lifetime obligations for the same trait method involving GATs and trait objects.",
+        "Improper handling of the `where Self: 'a` requirement on the GAT during borrow checking, possibly losing the relationship between the yielded reference and the temporary `&mut self` borrow across loop iterations.",
+        "Compiler bug in trait-object lifetime erasure/object-safety-like checks for `dyn FnMut` taking GAT-instantiated arguments, especially around accidental inference of a `'static` requirement for non-`'static` borrowed items.",
+        "Internal mismatch between closure signature checking and call-site obligation generation for higher-ranked/late-bound regions in `FnMut(Self::Item<'_>)`, surfacing as a panic in `mir_borrowck`.",
+        "Potential issue in projection handling for `Self::Item<'_>` inside a default trait method body, where projection equality/region constraints are not preserved correctly once monomorphized for `Query<'q>`.",
+        "Borrow-check bug around repeated mutable borrows from `self.next()` in a loop combined with passing the returned borrow into a boxed closure, causing invalid internal assumptions about borrow ending points or placeholder regions."
+      ],
+      "evidence": [
+        "Query stack pinpoints the crash at `mir_borrowck` for `main::{closure#0}` and `main`, implicating MIR borrow checking rather than parsing or codegen.",
+        "The reproducer uses a GAT `type Item<'a> where Self: 'a;` and `next(&mut self) -> Option<Self::Item<'_>>`, which requires nontrivial region reasoning about borrows tied to `self`.",
+        "`for_each` accepts `Box<dyn FnMut(Self::Item<'_>) + 'static>`, combining trait objects, closure calling conventions, and lifetime-indexed projected types.",
+        "The loop repeatedly calls `self.next()` and passes the result directly to the closure, stressing borrow checker handling of sequential `&mut self` borrows and argument lifetimes.",
+        "Behavior differs between UFCS call and method-call syntax, even though both target the same default trait method, indicating inconsistent compiler handling rather than a source-level logic error.",
+        "The comment notes a `'static`-related issue in the method-call form, aligning with a likely bug in lifetime obligation generation or trait-object bound handling.",
+        "`Query<'q>` yields `&'a u32` from data borrowed via `&'q [u32]`, so the compiler must correctly relate `'a`, `'q`, and the closure argument lifetime; mishandling these can easily lead to internal region inconsistencies.",
+        "The compiler emits an ICE (`error: could not compile` with panic backtrace and bug-report note) instead of a normal diagnostic, confirming a production compiler defect rather than an issue in the reproducer code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1701,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+        "reason": "Just below the panic, the top frame is `UniversalRegionRelationsBuilder::add_implied_bounds`, which lives in this file. The failure analysis implicates implied-bounds construction for projected GAT lifetimes on a `FnMut` trait object - a placeholder region originating from `Self::Item<'_>` is being fed into free-region relation building - which is exactly the responsibility of this code."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/input_output.rs",
+        "reason": "The ICE occurs in `mir_borrowck` specifically while borrow-checking `main::{closure#0}`. This file explicitly handles closure signature reconciliation in borrowck, including user-visible closure signatures with binders, canonical variables, and normalization. Since the reproducer stresses a boxed `FnMut(Self::Item<'_>)` where the argument is a GAT projection tied to lifetimes, a bug here could easily mis-instantiate or mismatch the closure input signature and trigger later internal failure."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+        "reason": "This is the core MIR borrowck type-relation engine that turns type equality/subtyping involving regions into NLL constraints. The reproducer hinges on relating `Self::Item<'_>` projections, higher-ranked-like lifetimes, and closure argument types under `FnMut`; if variance or projection relation is mishandled here, it would explain an ICE during MIR borrow checking."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/mod.rs",
+        "reason": "Region inference is a prime suspect because the bug involves complex lifetime relationships (`where Self: 'a`, GAT output tied to `&mut self`, trait object `'static`) and the panic happens during borrow checking rather than earlier type checking. An inconsistent or unsound placeholder/universe/outlives solution here could produce the observed compiler crash instead of a proper diagnostic."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+        "reason": "If borrowck type checking successfully generates obligations for the GAT projection and boxed closure but converts them incorrectly into region constraints, region inference can later ICE. This file is directly responsible for lowering type-outlives and query region constraints into MIR borrowck constraints, and the reproducer is exactly about subtle outlives relationships."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/nll_relate/mod.rs",
+        "reason": "`relate_tys.rs` delegates to the generic NLL relation engine here. The reproducer combines projections, binders, and regions in a way that depends on correct higher-ranked/NLL-aware type relation. A defect in this lower-level relation logic could manifest in borrowck when comparing closure signatures or GAT-instantiated argument types."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "The bug strongly suggests incorrect decomposition of type-outlives obligations for a projected GAT type like `Self::Item<'_>` under trait-object and closure-call constraints. This file translates such obligations into region constraints and deferred checks, making it a strong candidate for mishandling the required lifetime relationships."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "`Self::Item<'_>` is an associated type projection from a GAT, so projection/normalization correctness is essential. If rustc normalizes or caches the projected type incorrectly in the default trait method or closure-call context, borrowck could receive malformed or inconsistent types, leading to the ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/callee.rs",
+        "reason": "The reproducer highlights a difference between UFCS and method-call behavior for the same default trait method. This file is responsible for type-checking call expressions and overloaded callable traits, so a bug in call resolution or argument/return signature setup for the boxed closure could explain why different invocation forms produce different lifetime obligations."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "This file contains broad expression/type-checking and adjustment logic, including method/callee resolution plumbing used by calls. Since the issue appears sensitive to invocation form and may involve inferred adjustments feeding later MIR/borrowck, this is a plausible source of incorrect obligations or recorded typeck results."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 197.967,
+    "stage_times_sec": {
+      "checkout": 0.476,
+      "load_bug_context": 0.183,
+      "test_behavior_analysis": 7.091,
+      "test_failure_analysis": 15.328,
+      "load_file_candidates": 16.337,
+      "search_suspicious_files": 158.551
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 22,
+      "input_tokens": 425439,
+      "output_tokens": 8240,
+      "total_tokens": 433679,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.091,
+          "input_tokens": 701,
+          "output_tokens": 413,
+          "total_tokens": 1114
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.328,
+          "input_tokens": 2653,
+          "output_tokens": 992,
+          "total_tokens": 3645
+        },
+        {
+          "stage": "file_summary:compiler_rustc_plugin_impl_src_errors_rs",
+          "latency_sec": 4.728,
+          "input_tokens": 333,
+          "output_tokens": 173,
+          "total_tokens": 506
+        },
+        {
+          "stage": "file_summary:compiler_rustc_plugin_impl_src_lib_rs",
+          "latency_sec": 4.54,
+          "input_tokens": 535,
+          "output_tokens": 181,
+          "total_tokens": 716
+        },
+        {
+          "stage": "file_summary:compiler_rustc_plugin_impl_src_load_rs",
+          "latency_sec": 3.811,
+          "input_tokens": 881,
+          "output_tokens": 220,
+          "total_tokens": 1101
+        },
+        {
+          "stage": "file_summary:compiler_rustc_plugin_impl_src_load_rs_repair",
+          "latency_sec": 3.159,
+          "input_tokens": 255,
+          "output_tokens": 196,
+          "total_tokens": 451
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.477,
+          "input_tokens": 28351,
+          "output_tokens": 377,
+          "total_tokens": 28728
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.825,
+          "input_tokens": 28581,
+          "output_tokens": 346,
+          "total_tokens": 28927
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.045,
+          "input_tokens": 28116,
+          "output_tokens": 293,
+          "total_tokens": 28409
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 11.101,
+          "input_tokens": 28389,
+          "output_tokens": 380,
+          "total_tokens": 28769
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.679,
+          "input_tokens": 28319,
+          "output_tokens": 325,
+          "total_tokens": 28644
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 11.935,
+          "input_tokens": 28737,
+          "output_tokens": 423,
+          "total_tokens": 29160
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.337,
+          "input_tokens": 28533,
+          "output_tokens": 354,
+          "total_tokens": 28887
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 10.414,
+          "input_tokens": 28523,
+          "output_tokens": 344,
+          "total_tokens": 28867
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 11.08,
+          "input_tokens": 28533,
+          "output_tokens": 414,
+          "total_tokens": 28947
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 11.977,
+          "input_tokens": 28305,
+          "output_tokens": 480,
+          "total_tokens": 28785
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.561,
+          "input_tokens": 28691,
+          "output_tokens": 276,
+          "total_tokens": 28967
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 10.919,
+          "input_tokens": 28474,
+          "output_tokens": 340,
+          "total_tokens": 28814
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 4.641,
+          "input_tokens": 28763,
+          "output_tokens": 97,
+          "total_tokens": 28860
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.345,
+          "input_tokens": 28598,
+          "output_tokens": 370,
+          "total_tokens": 28968
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.956,
+          "input_tokens": 8077,
+          "output_tokens": 351,
+          "total_tokens": 8428
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 16.228,
+          "input_tokens": 13091,
+          "output_tokens": 895,
+          "total_tokens": 13986
+        }
+      ]
+    }
+  }
+}

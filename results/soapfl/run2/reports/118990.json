@@ -1,0 +1,236 @@
+{
+  "bug_id": "118990",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-08-26",
+    "resolved": "7480389611f9d04bd34adf41a2b3029be4eb815e"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/build/block.rs",
+    "compiler/rustc_mir_build/src/build/scope.rs",
+    "compiler/rustc_mir_build/src/build/expr/stmt.rs",
+    "compiler/rustc_const_eval/src/transform/validate.rs",
+    "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+    "compiler/rustc_mir_dataflow/src/elaborate_drops.rs",
+    "compiler/rustc_mir_transform/src/simplify.rs",
+    "compiler/rustc_typeck/src/check/diverges.rs",
+    "compiler/rustc_typeck/src/check/fn_ctxt/_impl.rs",
+    "compiler/rustc_typeck/src/check/region.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a zero-sized struct with a custom Drop impl, making values of that type non-trivial to destroy during control-flow analysis.",
+        "Adds an inherent method `throw(&self)`, then calls it using `CompileError.throw()`, exercising method-call autoref on a type name used as a value-like constructor expression.",
+        "Creates a labeled block `'code: { ... }` and exits it immediately with `break 'code;`, testing labeled block control flow rather than loops.",
+        "Places `CompileError.throw()` after the unconditional `break`, making that statement unreachable and forcing unreachable-code analysis.",
+        "Uses a temporary `CompileError` receiver in the unreachable method call, exercising drop elaboration and cleanup handling for temporaries in dead code.",
+        "Combines unreachable code with a type that implements Drop, stressing MIR construction and drop scheduling around never-executed statements.",
+        "Ends the labeled block with a semicolon in `main`, ensuring the block is used purely for side effects and control-flow checking.",
+        "Targets a pinned nightly toolchain, indicating the reproducer depends on compiler-internal behavior/regression in that version."
+      ],
+      "summary": "The reproducer builds a labeled block that breaks immediately, leaving a later `CompileError.throw()` unreachable. That unreachable statement still creates a temporary of a type with a custom Drop implementation and invokes an inherent method through autoref. It specifically exercises Rust’s labeled-block control flow, unreachable-code handling, method-call resolution on a temporary constructor expression, and MIR/drop elaboration for dead code on nightly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer consistently stresses MIR construction/validation for unreachable code that still syntactically contains a temporary needing drop. The key pattern is: a labeled block is exited unconditionally via `break`, yet a later statement in the same block performs method-call autoref on a temporary `CompileError` value of a type with a non-trivial `Drop`. This combines dead-code handling, temporary lifetime creation, method-call lowering, and drop scheduling. Because the failure occurs under `-Z validate-mir` and the query stack is empty, the likely fault is an internal MIR invariant violation introduced during MIR building, cleanup/drop elaboration, or CFG simplification for unreachable basic blocks, rather than type checking or borrow checking. In particular, the compiler likely still builds MIR for the unreachable method-call expression, creates/drop-elaborates a temporary for the receiver, but mishandles the cleanup edge or drop scope once the enclosing labeled block has already been terminated by `break`.",
+      "possible_causes": [
+        "Bug in MIR builder handling of labeled-block `break` where statements after an unconditional terminator are marked unreachable but still receive partially constructed temporaries/scopes, leaving invalid MIR.",
+        "Defect in drop elaboration for unreachable temporaries of types implementing `Drop`, causing a drop to be scheduled in a basic block or scope that is no longer reachable or properly initialized.",
+        "Incorrect interaction between method-call autoref lowering (`CompileError.throw()` creating a temporary receiver borrowed as `&self`) and unreachable-code CFG construction, producing inconsistent storage live/dead or borrow/drop ordering.",
+        "MIR validation regression specific to dead code after `break` in non-loop labeled blocks, where cleanup paths or terminators are malformed for dead successor blocks.",
+        "Possible compiler bug in scope/region cleanup for temporary rvalues in dead code: the temporary `CompileError` may be assigned a destruction scope that is invalid after early exit from the labeled block."
+      ],
+      "evidence": [
+        "The code exits the labeled block immediately with `break 'code;`, so the following method call is definitively unreachable.",
+        "The unreachable statement still constructs a temporary of `CompileError`, and that type has a custom `Drop`, forcing non-trivial cleanup logic.",
+        "The method call uses autoref on a temporary receiver (`throw(&self)` called as `CompileError.throw()`), which requires MIR to create and borrow a temporary even in dead code.",
+        "The crash happens with `-Z validate-mir`, strongly indicating malformed MIR or violated MIR invariants rather than a normal semantic error in user code.",
+        "The behavior specifically combines unreachable code, labeled-block control flow, temporary creation, and drop scheduling, which points to MIR builder/drop elaboration logic as the common intersection.",
+        "The query stack is empty and the compiler ICEs instead of reporting a normal diagnostic, consistent with an internal compiler bug during MIR generation/validation passes."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1480,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/build/block.rs",
+        "reason": "The reproducer centers on a labeled block exited by `break 'code;` with a later unreachable statement. This file lowers THIR blocks and explicitly handles breakable blocks, statement sequencing, and end-of-block control flow, making it a prime place for mishandling statements that appear after an unconditional break."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/scope.rs",
+        "reason": "The bug strongly suggests incorrect cleanup/drop scheduling for a temporary of a `Drop` type in unreachable code after an early exit. This file manages MIR scopes, breakable scopes, and the drops emitted on early exits like `break`, so a scope/drop bookkeeping mistake here would fit the ICE under MIR validation."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/stmt.rs",
+        "reason": "The unreachable `CompileError.throw()` is an expression used as a statement, and lowering it may still create temporaries, borrows, and drops even though control flow is already terminated. This statement-lowering code is a likely source of partially constructed MIR for dead statement expressions."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/validate.rs",
+        "reason": "The failure happens specifically with `-Z validate-mir`, indicating that MIR validation is catching malformed MIR or possibly panicking while checking an invalid CFG/drop pattern. This validator is therefore directly implicated, either as the panicking site or as the checker exposing the malformed MIR."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+        "reason": "A temporary of a type with custom `Drop` appears in unreachable code, which is exactly the kind of edge case that can break drop elaboration. If MIR build leaves a questionable drop site in an unreachable block, this pass may rewrite it into invalid control flow or invalid drop-flag logic."
+      },
+      {
+        "path": "compiler/rustc_mir_dataflow/src/elaborate_drops.rs",
+        "reason": "This file contains the core machinery that rewrites abstract drops into explicit MIR based on initialization state. Unreachable temporaries with nontrivial drop semantics are a classic stress point for this logic, especially if the place/scope was created in dead code after a `break`."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/simplify.rs",
+        "reason": "The reproducer depends on unreachable code after an unconditional terminator inside a labeled block. CFG simplification may incorrectly retain, merge, or partially clean unreachable blocks, leading to invalid MIR that later validation rejects."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/diverges.rs",
+        "reason": "The program relies on the compiler recognizing that execution definitely diverges from the block via `break`, making the following statement unreachable. If divergence tracking for labeled blocks is wrong, later MIR lowering may see inconsistent reachability information."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/fn_ctxt/_impl.rs",
+        "reason": "This file contains unreachable-code warning logic and broader per-body control-flow handling. Since the reproducer triggers warnings for unreachable code and the ICE follows a precise reachability pattern, inconsistent unreachable-state propagation from type checking could contribute to bad MIR lowering."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/region.rs",
+        "reason": "The issue may involve temporary destruction scopes assigned to an rvalue in dead code after the block has already been exited. This file builds the scope tree and destruction/terminating scopes that later MIR construction uses for temporary lifetimes, so a bad scope assignment here is plausible."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 135.292,
+    "stage_times_sec": {
+      "checkout": 3.925,
+      "load_bug_context": 0.06,
+      "test_behavior_analysis": 5.858,
+      "test_failure_analysis": 12.238,
+      "load_file_candidates": 0.09,
+      "search_suspicious_files": 113.121
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 355899,
+      "output_tokens": 5748,
+      "total_tokens": 361647,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.857,
+          "input_tokens": 383,
+          "output_tokens": 311,
+          "total_tokens": 694
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.238,
+          "input_tokens": 2266,
+          "output_tokens": 579,
+          "total_tokens": 2845
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.005,
+          "input_tokens": 27861,
+          "output_tokens": 356,
+          "total_tokens": 28217
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.87,
+          "input_tokens": 27436,
+          "output_tokens": 329,
+          "total_tokens": 27765
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 10.058,
+          "input_tokens": 27437,
+          "output_tokens": 371,
+          "total_tokens": 27808
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.649,
+          "input_tokens": 27679,
+          "output_tokens": 336,
+          "total_tokens": 28015
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.537,
+          "input_tokens": 27595,
+          "output_tokens": 281,
+          "total_tokens": 27876
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.977,
+          "input_tokens": 27675,
+          "output_tokens": 337,
+          "total_tokens": 28012
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.152,
+          "input_tokens": 27647,
+          "output_tokens": 334,
+          "total_tokens": 27981
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.434,
+          "input_tokens": 27634,
+          "output_tokens": 285,
+          "total_tokens": 27919
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.918,
+          "input_tokens": 26228,
+          "output_tokens": 346,
+          "total_tokens": 26574
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.853,
+          "input_tokens": 27642,
+          "output_tokens": 253,
+          "total_tokens": 27895
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 5.607,
+          "input_tokens": 27601,
+          "output_tokens": 164,
+          "total_tokens": 27765
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.803,
+          "input_tokens": 27315,
+          "output_tokens": 362,
+          "total_tokens": 27677
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.141,
+          "input_tokens": 11214,
+          "output_tokens": 372,
+          "total_tokens": 11586
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.091,
+          "input_tokens": 12286,
+          "output_tokens": 732,
+          "total_tokens": 13018
+        }
+      ]
+    }
+  }
+}

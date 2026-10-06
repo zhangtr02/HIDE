@@ -1,0 +1,236 @@
+{
+  "bug_id": "104025",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-11-05",
+    "resolved": "09508489efc223287731fe8abbd2a81bbf7adf8e"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+    "compiler/rustc_hir_typeck/src/callee.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a custom trait `Fn0` that inherits from the built-in `Fn()` trait and adds an associated type `Out`.",
+        "Implements `Fn0` only for callables `F` satisfying `Fn() -> ()`, fixing `Out = ()` in the impl.",
+        "Uses `impl Fn0` in a function parameter, exercising opaque argument types (`impl Trait`) in function signatures.",
+        "Passes a closure literal `move || {}` to `closure_typer`, triggering closure type inference and trait selection.",
+        "The closure is zero-argument and returns unit, so the compiler must match it against the `Fn() -> ()` bound.",
+        "The `move` keyword forces capture-by-value closure semantics, even though this closure captures nothing.",
+        "Trait inheritance from `Fn` exercises compiler handling of callable traits, associated types, and supertrait obligations together.",
+        "Compiler behavior under test is whether nightly correctly accepts this closure as implementing the derived custom callable trait via the blanket impl."
+      ],
+      "summary": "The reproducer creates a custom trait extending `Fn()`, implements it for any zero-argument closure returning `()`, then passes a `move` closure to a function taking `impl Fn0`. It exercises closure inference, callable trait resolution, supertraits, associated types, and `impl Trait` argument lowering to expose a rustc trait-selection/type-checking bug."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on a closure literal being checked against a user-defined trait that has `Fn()` as a supertrait and is used through `impl Trait` in a function parameter. The closure is trivial (`move || {}`), captures nothing, and clearly satisfies `Fn() -> ()`, so E0644 ('closure/generator type that references itself') is unexpected and indicates a compiler-internal cycle introduced during type checking or trait solving rather than a real self-referential closure. The common theme across the reproducer and error is interaction between closure type inference, callable trait hierarchy (`Fn` supertrait), associated type projection (`Self::Out`), and opaque argument lowering for `impl Fn0`. A likely compiler defect is that while proving the closure implements `Fn0`, rustc incorrectly relates the closure's own type to the associated type or supertrait obligations in a recursive way, manufacturing a self-reference cycle. The fact that the closure is `move` but captureless suggests the bug is not in borrow checking or capture analysis itself, but in trait obligation construction/normalization for closure signatures and inherited callable traits.",
+      "possible_causes": [
+        "Bug in trait selection / obligation generation for a custom trait with `Fn()` as a supertrait, causing the closure type to be recursively required to reference itself when proving `impl Fn0` for a closure.",
+        "Incorrect normalization or projection handling of the associated type `Self::Out` inherited alongside the `Fn` supertrait, leading rustc to form a cyclic predicate involving the closure's own output/signature.",
+        "Defect in closure signature inference when matching a closure against a user-defined trait implemented via a blanket impl `impl<F: Fn() -> ()> Fn0 for F`, especially through `impl Trait` argument lowering.",
+        "Compiler bug in handling callable trait inheritance (`Fn0: Fn() -> Self::Out`) for closure types, where supertrait obligations are elaborated incorrectly and trigger the E0644 self-referential closure diagnostic spuriously.",
+        "Possible issue in the HIR/typeck lowering or predicate construction for `impl Fn0` function parameters, causing the opaque parameter type and closure type to participate in an erroneous cycle during trait solving."
+      ],
+      "evidence": [
+        "The closure `move || {}` is zero-arg, captureless, and returns `()`, so it should straightforwardly satisfy `Fn() -> ()` and thus the blanket `Fn0` impl.",
+        "The emitted error is E0644 ('closure/generator type that references itself'), but the source closure does not capture itself or take itself as an argument, indicating a spurious compiler-created cycle.",
+        "The custom trait explicitly combines a callable supertrait and an associated type: `trait Fn0: Fn() -> Self::Out { type Out; }`, a pattern that stresses supertrait elaboration and projection.",
+        "`closure_typer(_: impl Fn0)` uses `impl Trait` in argument position, adding opaque-type/predicate-lowering machinery on top of closure trait resolution.",
+        "The only impl is `impl<F: Fn() -> ()> Fn0 for F { type Out = (); }`, so proving the closure implements `Fn0` should reduce to proving it implements `Fn() -> ()`; failure suggests that reduction path is buggy.",
+        "The problem reproduces specifically on nightly-2022-11-05, consistent with a regression in compiler type-checking/trait-solving logic rather than invalid user code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1522,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "Most directly implicated: the failure is a spurious E0644 on a trivial closure, so the bug likely originates where closure expressions are assigned signatures and matched against contextual expectations. This reproducer stresses closure signature inference under an expected `impl Fn0` type whose supertrait is `Fn() -> Self::Out`, making closure expectation handling and signature deduction highly suspicious."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "Proving the closure satisfies `Fn0` should reduce through the blanket impl `impl<F: Fn() -> ()> Fn0 for F`. Confirmation is where candidate matching unifies trait inputs/outputs and emits nested obligations, so an incorrect recursive relation between the closure type, `Fn()` supertrait, and output type could easily manufacture the self-referential cycle that triggers E0644."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "The reproducer hinges on trait selection for a closure against a user-defined trait with a `Fn` supertrait. Candidate assembly/filtering for callable traits, supertrait elaboration, and closure-specific trait handling all live here; a regression in selecting or evaluating the relevant candidate could cause the bogus recursive obligation."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "The observed error smells like an obligation-processing cycle rather than a true closure capture issue. Fulfillment drives pending trait obligations and revisits nested obligations from selection/projection; if the `Fn0` -> `Fn() -> ()` obligations are reintroduced in a cyclic way, this engine is a plausible place where the bad recursion is exposed."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "`Fn0` includes an associated type `Out`, and the supertrait uses `Self::Out` in `Fn() -> Self::Out`. That makes associated-type normalization/projection central to the reproducer. A projection bug could incorrectly normalize or defer `Self::Out` for the closure in a way that feeds back into proving the same closure trait obligation."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "If the issue is not higher-level trait selection but lower-level deferred projection handling, this file is a strong candidate. The reproducer mixes closure traits and associated type projection, exactly the kind of scenario where projection obligations may be created and accidentally become cyclic."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "This file computes generic predicates and injects implicit trait predicates. Since the custom trait inherits from `Fn() -> Self::Out`, an error in collecting/elaborating the trait’s predicates or supertrait obligations could create malformed recursive requirements before type checking even tries to satisfy them."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "Well-formedness checking touches trait bounds, normalization, and associated types early. A faulty WF obligation for `trait Fn0: Fn() -> Self::Out` could incorrectly conclude that the closure type participates in a self-referential cycle, especially given the interaction with `impl Trait` argument position."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+        "reason": "Because the reproducer depends on inherited bounds from a trait definition with an associated type appearing in a supertrait signature, bound collection/remapping is relevant. If the `Fn() -> Self::Out` bound is lowered or remapped incorrectly, later stages could see a recursively structured predicate."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/callee.rs",
+        "reason": "Less direct than closure/type-trait machinery, but still plausible because callable trait handling and overloaded call machinery encode special knowledge of `Fn` traits. Since the custom trait derives from `Fn`, any incorrect callable-trait expectation formation leaking into closure typing could contribute to the bogus self-reference diagnostic."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 156.287,
+    "stage_times_sec": {
+      "checkout": 1.019,
+      "load_bug_context": 0.059,
+      "test_behavior_analysis": 5.696,
+      "test_failure_analysis": 14.986,
+      "load_file_candidates": 0.089,
+      "search_suspicious_files": 134.438
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 346929,
+      "output_tokens": 6116,
+      "total_tokens": 353045,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.696,
+          "input_tokens": 387,
+          "output_tokens": 283,
+          "total_tokens": 670
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.986,
+          "input_tokens": 1026,
+          "output_tokens": 698,
+          "total_tokens": 1724
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.79,
+          "input_tokens": 26760,
+          "output_tokens": 330,
+          "total_tokens": 27090
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.573,
+          "input_tokens": 26297,
+          "output_tokens": 315,
+          "total_tokens": 26612
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 10.888,
+          "input_tokens": 26352,
+          "output_tokens": 322,
+          "total_tokens": 26674
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.638,
+          "input_tokens": 26511,
+          "output_tokens": 312,
+          "total_tokens": 26823
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.08,
+          "input_tokens": 26615,
+          "output_tokens": 343,
+          "total_tokens": 26958
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.922,
+          "input_tokens": 26686,
+          "output_tokens": 360,
+          "total_tokens": 27046
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.154,
+          "input_tokens": 26658,
+          "output_tokens": 288,
+          "total_tokens": 26946
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.861,
+          "input_tokens": 26582,
+          "output_tokens": 391,
+          "total_tokens": 26973
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.994,
+          "input_tokens": 26264,
+          "output_tokens": 330,
+          "total_tokens": 26594
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.109,
+          "input_tokens": 25433,
+          "output_tokens": 322,
+          "total_tokens": 25755
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.334,
+          "input_tokens": 26294,
+          "output_tokens": 333,
+          "total_tokens": 26627
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.578,
+          "input_tokens": 26718,
+          "output_tokens": 349,
+          "total_tokens": 27067
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.702,
+          "input_tokens": 18312,
+          "output_tokens": 308,
+          "total_tokens": 18620
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 16.787,
+          "input_tokens": 10034,
+          "output_tokens": 832,
+          "total_tokens": 10866
+        }
+      ]
+    }
+  }
+}

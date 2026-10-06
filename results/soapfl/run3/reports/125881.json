@@ -1,0 +1,252 @@
+{
+  "bug_id": "125881",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-06-01",
+    "resolved": "ada5e2c7b5427a591e30baeeee2698a5eb6db0bd"
+  },
+  "final_top10": [
+    "compiler/rustc_type_ir/src/ty_kind.rs",
+    "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_infer/src/infer/opaque_types/mod.rs",
+    "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+    "compiler/rustc_trait_selection/src/traits/normalize.rs",
+    "compiler/rustc_const_eval/src/check_consts/check.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `transmutability` and `unboxed_closures` feature gates, forcing compilation through unstable language and trait machinery.",
+        "Defines a `const fn` whose return type is `impl std::mem::BikeshedIntrinsicFrom()`, using opaque `impl Trait` in a const function signature.",
+        "Uses the unstable internal marker trait `std::mem::BikeshedIntrinsicFrom`, tied to transmutability and compiler intrinsic type-checking logic.",
+        "Returns a zero-capture closure `|| {}` from the function, creating an anonymous closure type as the hidden `impl Trait` concrete type.",
+        "Exercises closure typing together with `unboxed_closures`, even though the closure is not explicitly called via `Fn*` traits.",
+        "Forces the compiler to verify whether the closure type satisfies the intrinsic transmutability-related trait required by the opaque return type.",
+        "Combines const-context checking with opaque type inference, stressing trait solving and normalization for unstable intrinsic traits.",
+        "`main` is empty, so the reproducer isolates compile-time behavior rather than runtime execution."
+      ],
+      "summary": "This reproducer is compile-only. It uses nightly unstable features to return an anonymous closure from a `const fn` as `impl std::mem::BikeshedIntrinsicFrom()`. That combination stresses opaque `impl Trait` inference, closure type handling, const checking, and compiler trait resolution for an internal transmutability-related intrinsic trait."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer consistently stresses a narrow compiler path: an opaque `impl Trait` return in a `const fn`, where the hidden type is a closure, and the required trait is the unstable internal transmutability-related `std::mem::BikeshedIntrinsicFrom`. The common pattern is interaction between const checking, opaque type inference, closure type representation, and trait solving/normalization for an intrinsic marker trait. The ICE location in `rustc_type_ir/src/ty_kind.rs:854:17` strongly suggests the compiler reached an unexpected `TyKind`/alias/closure form during type introspection or normalization, likely while trying to prove that the closure hidden behind the opaque return type implements the intrinsic trait. Because the panic escalates to 'thread panicked while processing panic', this is likely an internal invariant violation rather than an ordinary unsupported-case diagnostic. The most plausible defect is that the compiler code handling `BikeshedIntrinsicFrom` or related transmutability trait obligations does not correctly account for opaque `impl Trait` whose hidden type is a closure inside a const context, and assumes a more concrete or non-closure type shape during type-kind matching, normalization, or trait obligation evaluation.",
+      "possible_causes": [
+        "Missing or incorrect handling in trait solving/normalization for `std::mem::BikeshedIntrinsicFrom` when the self type is an opaque `impl Trait` whose hidden type is a closure.",
+        "An internal invariant bug in `rustc_type_ir::ty_kind` consumers: compiler code likely pattern-matches on a type kind during transmutability checking and does not expect closure/opaque alias forms in this path.",
+        "Const-checking or const-evaluation related query path may be forcing premature normalization of the opaque return type, exposing a closure type to transmutability machinery that is not prepared to diagnose it gracefully.",
+        "The transmutability intrinsic trait implementation/selection code may assume only structural ADT/reference/scalar types and fail on anonymous closure types, leading to a panic instead of trait failure.",
+        "Interaction between `impl Trait` opaque type inference and unstable intrinsic trait obligation generation may produce an unexpected alias/projection state that violates assumptions in type-kind accessors around `ty_kind.rs:854`.",
+        "A missing fallback error path for unsupported hidden types in `BikeshedIntrinsicFrom` checking likely turns a user-facing trait error into an ICE."
+      ],
+      "evidence": [
+        "The return type is `impl std::mem::BikeshedIntrinsicFrom()` inside a `const fn`, directly combining opaque types, const context, and the unstable intrinsic trait machinery.",
+        "The concrete returned value is `|| {}`, so the hidden type is an anonymous zero-capture closure, not a normal named type.",
+        "`unboxed_closures` is enabled, indicating the reproducer intentionally exercises compiler closure/Fn-trait internals even without explicit calls.",
+        "The test is compile-only and `main` is empty, isolating the failure to type checking / trait resolution / const analysis rather than code generation or runtime behavior.",
+        "The compiler panics in `compiler/rustc_type_ir/src/ty_kind.rs:854:17`, pointing to an internal type-kind assumption failure rather than a standard trait error.",
+        "The panic happens while processing another panic, consistent with an internal invariant violation in a compiler query path.",
+        "The behavior summary explicitly forces verification that the closure type satisfies the transmutability-related intrinsic trait required by the opaque return type."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1786,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_type_ir/src/ty_kind.rs",
+        "reason": "The panic is reported directly at this file (`ty_kind.rs:854:17`), which strongly suggests an internal `TyKind` assumption is being violated while handling the closure/opaque/intrinsic-trait combination. Since the reproducer forces the compiler to inspect a closure hidden behind `impl Trait` for `BikeshedIntrinsicFrom`, this is the most suspicious location."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+        "reason": "`std::mem::BikeshedIntrinsicFrom` is an internal transmutability-related trait, so trait selection candidate assembly is a likely place where special-case builtin handling may incorrectly assume only structural non-closure types. The reproducer specifically triggers trait proving for a closure type behind an opaque return type."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "If candidate assembly succeeds far enough to confirm a builtin/special trait candidate, confirmation may be pattern-matching on the self type and failing to handle closure or opaque-alias forms correctly. This fits an ICE caused by an unsupported type shape reaching transmutability trait logic."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "The function body uses `const fn` with an opaque `impl Trait` return, and this file is responsible for replacing opaque return types with inference variables during body type checking. A bug here could mis-shape the hidden type obligations for a closure returned from a const function."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types/mod.rs",
+        "reason": "The reproducer depends on inferring the hidden type of an opaque `impl Trait` return as a closure. This module handles replacing definable opaque aliases with inference vars and recording hidden-type obligations, making it a prime suspect for malformed obligations or alias states later triggering the `TyKind` panic."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+        "reason": "Relating the inferred closure type to the opaque return type under the required trait/normalization constraints may hit unsupported alias or closure forms here. The bug description points to an unexpected alias/projection/closure state during relation or normalization."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/normalize.rs",
+        "reason": "Normalization is a plausible bridge where the opaque `impl Trait` return and the intrinsic trait obligation interact. If normalization reveals or partially normalizes the opaque/closure type incorrectly, downstream code may hit the `ty_kind` invariant failure."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/check_consts/check.rs",
+        "reason": "The issue occurs in a `const fn`, so const-checking may be forcing additional validation or premature normalization of the return type and its obligations. The reproducer is designed to combine const-context checking with opaque trait satisfaction, making this file relevant."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "The hidden concrete type is a zero-capture closure, and this file is responsible for closure typing and internal closure signature construction. If closure typing metadata is incomplete or represented unexpectedly in this context, later trait/transmutability logic could ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "Well-formedness checking may attempt to prove that the opaque return type satisfies `BikeshedIntrinsicFrom` in the function signature before later phases. Since the reproducer is compile-only and stresses type-level obligations, WF checking is a plausible early path that could expose the malformed type state."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 144.41,
+    "stage_times_sec": {
+      "checkout": 1.455,
+      "load_bug_context": 0.086,
+      "test_behavior_analysis": 5.703,
+      "test_failure_analysis": 12.835,
+      "load_file_candidates": 0.094,
+      "search_suspicious_files": 124.236
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 427023,
+      "output_tokens": 6773,
+      "total_tokens": 433796,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.703,
+          "input_tokens": 341,
+          "output_tokens": 297,
+          "total_tokens": 638
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.835,
+          "input_tokens": 2097,
+          "output_tokens": 697,
+          "total_tokens": 2794
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.118,
+          "input_tokens": 27774,
+          "output_tokens": 348,
+          "total_tokens": 28122
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.262,
+          "input_tokens": 27693,
+          "output_tokens": 181,
+          "total_tokens": 27874
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.878,
+          "input_tokens": 27280,
+          "output_tokens": 371,
+          "total_tokens": 27651
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.363,
+          "input_tokens": 27575,
+          "output_tokens": 355,
+          "total_tokens": 27930
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.987,
+          "input_tokens": 27497,
+          "output_tokens": 335,
+          "total_tokens": 27832
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.301,
+          "input_tokens": 27827,
+          "output_tokens": 388,
+          "total_tokens": 28215
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.88,
+          "input_tokens": 27669,
+          "output_tokens": 348,
+          "total_tokens": 28017
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.763,
+          "input_tokens": 27613,
+          "output_tokens": 307,
+          "total_tokens": 27920
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.066,
+          "input_tokens": 27711,
+          "output_tokens": 333,
+          "total_tokens": 28044
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.979,
+          "input_tokens": 27464,
+          "output_tokens": 342,
+          "total_tokens": 27806
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.765,
+          "input_tokens": 27678,
+          "output_tokens": 328,
+          "total_tokens": 28006
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.464,
+          "input_tokens": 27674,
+          "output_tokens": 343,
+          "total_tokens": 28017
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.904,
+          "input_tokens": 27928,
+          "output_tokens": 322,
+          "total_tokens": 28250
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.105,
+          "input_tokens": 27749,
+          "output_tokens": 361,
+          "total_tokens": 28110
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.191,
+          "input_tokens": 24876,
+          "output_tokens": 366,
+          "total_tokens": 25242
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.177,
+          "input_tokens": 12577,
+          "output_tokens": 751,
+          "total_tokens": 13328
+        }
+      ]
+    }
+  }
+}

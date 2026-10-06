@@ -1,0 +1,244 @@
+{
+  "bug_id": "104736",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-08-03",
+    "resolved": "8131b9774ebcb6c162fcac71545a13543ec369e7"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/build/scope.rs",
+    "compiler/rustc_mir_build/src/build/expr/into.rs",
+    "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+    "compiler/rustc_mir_dataflow/src/elaborate_drops.rs",
+    "compiler/rustc_mir_transform/src/simplify.rs",
+    "compiler/rustc_codegen_ssa/src/mir/block.rs",
+    "compiler/rustc_codegen_ssa/src/mir/mod.rs",
+    "compiler/rustc_codegen_ssa/src/mir/rvalue.rs",
+    "compiler/rustc_monomorphize/src/collector.rs",
+    "compiler/rustc_codegen_ssa/src/base.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `A` and `B` with `Drop`, forcing the compiler to track precise destruction and cleanup paths for moved values and temporaries.",
+        "`weird_temporary` takes owned `A`, `B`, and a tuple, so MIR must reason about moves, drops, and return-value forwarding.",
+        "The labeled block `'scope` is used as a breakable expression, exercising `break 'scope nothing` from inside a nested tuple element.",
+        "First tuple element introduces `let _z = b;`, moving `b` into a local temporary whose destructor must run on all exits.",
+        "The conditional `if x { break 'scope nothing; }` tests early exit from within a temporary-producing block while another local needs dropping.",
+        "Second tuple element uses `match { a } { _ => () }`, forcing `a` through a block expression and match scrutinee move before being dropped.",
+        "Third tuple element calls `#[inline(always)] fn no_unwind()`, encouraging simplification while marking a call site considered non-unwinding.",
+        "Overall this stresses MIR drop elaboration, temporary scope handling, tuple evaluation order, and cleanup generation around breaks and non-unwinding calls."
+      ],
+      "summary": "The reproducer builds a tuple inside a labeled block, but one tuple subexpression can `break` early with `nothing`. Because `A` and `B` implement `Drop`, rustc must correctly model moves, temporary scopes, tuple evaluation, and cleanup on both normal and early-exit paths. It specifically stresses MIR drop elaboration and CFG cleanup generation when a break escapes from inside a temporary-producing expression."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an internal compiler error during late compilation, not parsing or type checking: the stack trace reaches `collect_and_partition_mono_items` during codegen, while the test specifically stresses MIR validation (`-Z validate-mir`) and optimized MIR (`-Z mir-opt-level=3`). The reproducer combines several features that all affect MIR control-flow and drop semantics: (1) values of types `A` and `B` implement `Drop`, so moves must be tracked precisely; (2) a labeled block is used as an expression and is exited via `break 'scope nothing` from inside the first tuple operand; (3) the first tuple operand creates a local `_z = b`, requiring cleanup on both normal and early-exit edges; (4) the second operand moves `a` through a block/match scrutinee; and (5) a final `no_unwind()` call may let MIR optimization simplify cleanup edges under a non-unwinding assumption. The common theme is inconsistent MIR/cleanup state around early exit from tuple construction with destructors in scope. A likely compiler defect is in MIR building, drop elaboration, or a MIR optimization pass that rewrites CFG/unwind/drop edges for breakable-expression temporaries, leaving invalid or inconsistent drop scopes/live-drop state that later ICEs when MIR is validated or mono items are collected.",
+      "possible_causes": [
+        "Bug in MIR drop elaboration for `break` from inside a tuple subexpression: cleanup for `_z = b` and moved `a` may be generated incorrectly on the early-exit edge, producing invalid MIR.",
+        "Incorrect temporary-scope handling for breakable labeled-block expressions used as values, especially when a `break 'scope value` exits during tuple operand evaluation.",
+        "MIR optimization defect (at `-Z mir-opt-level=3`) that assumes a call like `no_unwind()` or tuple operand evaluation cannot interact with cleanup paths, and rewrites/removes drop or unwind edges unsoundly.",
+        "CFG construction bug in THIR/MIR lowering for tuple evaluation order plus early `break`, causing destination initialization/drop flags to become inconsistent across normal and broken-out paths.",
+        "Drop-flag/dataflow bug for moved `Drop` types in nested block/match expressions, where `b` is moved into `_z` and `a` into a match scrutinee, but early exit leaves the compiler with contradictory liveness or drop state."
+      ],
+      "evidence": [
+        "ICE occurs during `collect_and_partition_mono_items`/codegen, consistent with malformed MIR surviving earlier phases and failing under validation or later consumers.",
+        "Compiler was invoked with `-Z validate-mir -Z mir-opt-level=3`, increasing likelihood that invalid MIR introduced by optimization/drop elaboration is the direct trigger.",
+        "Both `A` and `B` implement `Drop`, so any bug in move-path or cleanup generation becomes observable.",
+        "`let _z = b; if x { break 'scope nothing; }` creates a local needing destruction exactly on the unusual early-exit path.",
+        "The `break 'scope nothing` occurs from inside the first element of a tuple expression, a complex control-flow shape that stresses tuple operand evaluation and partially-built aggregate handling.",
+        "`match { a } { _ => () }` forces an owned `Drop` value through another move-heavy expression, adding pressure on drop flags and temporary tracking.",
+        "The reproducer summary explicitly stresses MIR drop elaboration, temporary scope handling, tuple evaluation order, and cleanup generation around breaks and non-unwinding calls."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1648,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/build/scope.rs",
+        "reason": "Most suspicious because the reproducer hinges on early exit (`break 'scope nothing`) from inside tuple construction while a local `_z = b` with `Drop` is in scope. This file owns breakable-scope handling and emission of drops/cleanup on early exits, exactly the area likely to mis-handle destruction paths for labeled block expressions."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/into.rs",
+        "reason": "Tuple/labeled-block expression lowering into a destination is central to this pattern. The bug may originate when lowering a breakable block used as an expression inside tuple operand evaluation, producing malformed MIR or partially initialized aggregate state before later passes run."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+        "reason": "The test strongly stresses drop elaboration for moved `Drop` types across normal and early-exit edges. If MIR building leaves subtle state, this pass can incorrectly elaborate `Drop` terminators or drop flags for `_z`/`a` on the `break` path, yielding invalid MIR seen later during validation/codegen."
+      },
+      {
+        "path": "compiler/rustc_mir_dataflow/src/elaborate_drops.rs",
+        "reason": "This is the lower-level implementation of drop elaboration and drop-style selection. A bug in conditional/open/static drop decision logic for partially initialized tuple construction or early-exit cleanup could directly explain inconsistent drop state and an ICE under `-Z validate-mir`."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/simplify.rs",
+        "reason": "`-Z mir-opt-level=3` suggests an optimization pass may rewrite CFG after drops/cleanup are inserted. SimplifyCfg is a common place where unusual control-flow from tuple operands plus `break` can be folded incorrectly, leaving malformed successor/drop structure that later consumers trip over."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/block.rs",
+        "reason": "The stack reaches late codegen/mono-item collection, and this file lowers MIR terminators and cleanup edges. If malformed MIR around returns/break cleanup survives, terminator codegen here is a likely crash point, especially with unwind/cleanup threading and unusual CFG shapes."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/mod.rs",
+        "reason": "Central per-function MIR codegen context. If the issue manifests only when codegen walks odd local/drop state from this function, inconsistencies in block/local bookkeeping here could expose or amplify the bug."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/rvalue.rs",
+        "reason": "The reproducer constructs a tuple whose first operand can diverge via `break`. Rvalue lowering for aggregates and operand materialization is relevant if partially built tuple state or destination initialization assumptions are violated by early exit."
+      },
+      {
+        "path": "compiler/rustc_monomorphize/src/collector.rs",
+        "reason": "The panic is reported during `collect_and_partition_mono_items`. While likely downstream of bad MIR, this collector scans MIR bodies to discover reachable mono items, including drop glue, so invalid terminators or drop-related uses could surface here."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/base.rs",
+        "reason": "Included as a lower-confidence downstream candidate because the backtrace passes through crate codegen orchestration here. If the bug is not in MIR construction itself, this layer may be where malformed MIR is first consumed during item/codegen-unit processing."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 150.26,
+    "stage_times_sec": {
+      "checkout": 3.12,
+      "load_bug_context": 0.109,
+      "test_behavior_analysis": 6.268,
+      "test_failure_analysis": 13.44,
+      "load_file_candidates": 0.105,
+      "search_suspicious_files": 127.218
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 395702,
+      "output_tokens": 6784,
+      "total_tokens": 402486,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.268,
+          "input_tokens": 479,
+          "output_tokens": 333,
+          "total_tokens": 812
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.44,
+          "input_tokens": 2084,
+          "output_tokens": 724,
+          "total_tokens": 2808
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.595,
+          "input_tokens": 27511,
+          "output_tokens": 396,
+          "total_tokens": 27907
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.16,
+          "input_tokens": 27741,
+          "output_tokens": 342,
+          "total_tokens": 28083
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.57,
+          "input_tokens": 27177,
+          "output_tokens": 341,
+          "total_tokens": 27518
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.302,
+          "input_tokens": 27648,
+          "output_tokens": 344,
+          "total_tokens": 27992
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.857,
+          "input_tokens": 27499,
+          "output_tokens": 333,
+          "total_tokens": 27832
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.613,
+          "input_tokens": 27873,
+          "output_tokens": 372,
+          "total_tokens": 28245
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.529,
+          "input_tokens": 27660,
+          "output_tokens": 383,
+          "total_tokens": 28043
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.195,
+          "input_tokens": 27727,
+          "output_tokens": 369,
+          "total_tokens": 28096
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.764,
+          "input_tokens": 27665,
+          "output_tokens": 340,
+          "total_tokens": 28005
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 10.229,
+          "input_tokens": 27464,
+          "output_tokens": 398,
+          "total_tokens": 27862
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.946,
+          "input_tokens": 27748,
+          "output_tokens": 365,
+          "total_tokens": 28113
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.001,
+          "input_tokens": 27749,
+          "output_tokens": 321,
+          "total_tokens": 28070
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.715,
+          "input_tokens": 27893,
+          "output_tokens": 331,
+          "total_tokens": 28224
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.236,
+          "input_tokens": 21038,
+          "output_tokens": 374,
+          "total_tokens": 21412
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.48,
+          "input_tokens": 12746,
+          "output_tokens": 718,
+          "total_tokens": 13464
+        }
+      ]
+    }
+  }
+}

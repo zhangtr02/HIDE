@@ -1,0 +1,244 @@
+{
+  "bug_id": "113971",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-07-23",
+    "resolved": "1d56e3a6d943062e41165bf07fea5ea8324ae011"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_borrowck/src/region_infer/mod.rs",
+    "compiler/rustc_hir_typeck/src/writeback.rs",
+    "compiler/rustc_infer/src/infer/region_constraints/mod.rs",
+    "compiler/rustc_borrowck/src/type_check/relate_tys.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly `type_alias_impl_trait`, defining `Opaque<'a> = impl Copy + Captures<'a>` as an opaque type whose concrete hidden type is inferred from uses.",
+        "Defines `Captures<'a>` and blanket-implements it for all types, forcing the opaque alias to mention and carry a lifetime parameter in its bounds.",
+        "Uses `None::<Opaque<'_>>` to create an inferred opaque value with a fresh placeholder lifetime, exercising lifetime inference on opaque type aliases.",
+        "Calls `ensure_outlives::<'x>(opaque)` where `X: 'a`, imposing an outlives requirement from the inferred opaque lifetime to function lifetime `'x`.",
+        "Calls `relate(opaque, hidden)` with identical generic type parameters, forcing type equality between `Opaque<'?1>` and `u8` through unification.",
+        "Makes `relate` the defining use of the opaque alias, so the compiler must record the hidden concrete type for `Opaque` as `u8`.",
+        "Exercises interaction between hidden-type definition, lifetime capture, and outlives obligations on TAITs during type checking and borrow checking.",
+        "Targets a compiler bug where combining lifetime constraints with a defining use of a type-alias `impl Trait` can mis-handle region solving or opaque-type inference."
+      ],
+      "summary": "The reproducer defines a lifetime-parameterized type-alias `impl Trait` and creates `None::<Opaque<'_>>` so the alias gets an inferred lifetime. One call adds an outlives constraint to that lifetime, while another forces the opaque alias’s hidden type to be `u8`. This stresses nightly TAIT inference, lifetime capture through trait bounds, and compiler handling of defining uses plus region constraints."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is an interaction between type_alias_impl_trait (TAIT) hidden-type inference and region/lifetime solving. The reproducer creates an opaque alias `Opaque<'a> = impl Copy + Captures<'a>`, then instantiates it with an inferred lifetime via `None::<Opaque<'_>>`. That value is used in two different ways: one use imposes an outlives constraint (`Opaque<'?1>` must outlive `'x` through `X: 'x`), and another use is a defining use that equates the opaque type with a concrete hidden type (`u8`) via `relate(opaque, hidden)`. Since `u8` trivially satisfies `Captures<'a>` through the blanket impl, the compiler should accept this program. If the original bug reproducer expected failure but the compiler succeeded, the likely issue is that rustc did not correctly propagate or validate the lifetime constraints attached to the opaque alias when registering or checking its hidden type. In particular, the compiler may be losing the relationship between the inferred opaque lifetime parameter and the outlives obligation once the hidden type is resolved, causing unsound acceptance. This points to a defect in TAIT opaque-type inference/verification code, especially where defining uses are combined with region obligations and captured lifetimes.",
+      "possible_causes": [
+        "rustc may be incorrectly dropping or weakening outlives constraints on inferred lifetime arguments of a type-alias `impl Trait` when the opaque type is later defined from a concrete hidden type.",
+        "The hidden-type registration/checking logic for TAIT defining uses may fail to carry region constraints from prior uses (`ensure_outlives`) into the final opaque-type definition (`Opaque<'?1> := u8`).",
+        "Opaque type inference may be canonicalizing or erasing the inferred lifetime parameter (`'_'`) too aggressively, so the solver treats `Opaque<'?1>` as equivalent to a lifetime-independent hidden type without validating the captured lifetime relationship.",
+        "The compiler may mishandle the interaction between `Captures<'a>` bounds and region solving, treating the lifetime parameter as only syntactically present in bounds rather than semantically constrained during hidden-type equality/unification.",
+        "A defect is likely in borrow-check/type-check integration for TAITs, where region obligations generated before the defining use are not rechecked against the inferred hidden type during opaque type resolution.",
+        "The production bug may lie in opaque-type well-formedness or hidden-type instantiation code that accepts a concrete hidden type for all instantiations of `Opaque<'a>` without ensuring the alias's generic lifetime constraints are consistently enforced."
+      ],
+      "evidence": [
+        "The reproducer specifically combines a TAIT with a lifetime parameter and an inferred lifetime `Opaque<'_>`, which stresses opaque-type lifetime inference.",
+        "`ensure_outlives::<'x>(opaque)` creates an explicit outlives obligation tying the inferred opaque lifetime to `'x`.",
+        "`relate(opaque, hidden)` forces type equality and acts as the defining use, fixing the hidden type of the opaque alias to `u8`.",
+        "`Captures<'a>` is blanket-implemented for all types, so the only subtlety is not trait satisfaction itself but whether the compiler correctly tracks the lifetime parameter through opaque-type inference.",
+        "The compiler output shows successful compilation with only dead-code warnings, indicating rustc accepted a program that was intended to expose an incorrect acceptance bug in TAIT/lifetime handling.",
+        "The failure pattern described in the behavior summary explicitly targets mis-handling of region solving or opaque-type inference when lifetime constraints and defining uses of TAITs are combined."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1648,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "Most directly responsible for TAIT defining-use collection and hidden-type extraction. This reproducer hinges on a defining use (`relate(opaque, hidden)`) combined with lifetime-bearing opaque args, so a bug here could incorrectly accept or fail to validate the hidden type against captured lifetime constraints."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Core inference support for opaque types/TAITs. Likely place where `Opaque<'_>` is replaced with inference vars and where hidden-type definitions are registered or unified; lifetime arguments may be overly erased/canonicalized here."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Specialized post-NLL handling for opaque types after region inference. The bug description strongly suggests region constraints attached to an opaque instantiation are lost or mishandled when converting the inferred hidden type into the final opaque definition."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Contains generic-argument remapping machinery (`ReverseMapper`) for opaque types, including delicate region remapping. A lifetime parameter like the inferred `'_` in `Opaque<'_>` could be mis-remapped or dropped here, causing unsound acceptance."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "Responsible for lowering `X: 'a` style obligations into region constraints. The reproducer’s key nontrivial requirement is the outlives obligation from `ensure_outlives`, so a bug here could fail to preserve that obligation for the opaque alias instance."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Opaque-type region inference often relies on member constraints. If the inferred region for `Opaque<'_>` is not constrained to the right candidate regions, the compiler may incorrectly accept the defining hidden type despite missing lifetime validation."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/mod.rs",
+        "reason": "General NLL region solver; plausible secondary site if the issue is not opaque-specific but in solving/propagating the outlives relation `'?1: 'x` before opaque hidden-type resolution."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/writeback.rs",
+        "reason": "Writeback finalizes body-local typeck results including opaque types. If lifetime-bearing opaque instantiations are resolved too aggressively here, later stages may see a lifetime-independent hidden type and miss the intended constraint."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/region_constraints/mod.rs",
+        "reason": "Stores region and member constraints during inference. A bug in recording or snapshotting region/member constraints for TAIT uses could explain why prior outlives obligations are not enforced once the opaque hidden type becomes concrete."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+        "reason": "`relate(opaque, hidden)` forces equality between `Opaque<'?1>` and `u8`; this file drives type relations into NLL constraints. If equality involving opaque aliases fails to generate the right region/opaque obligations, the program could be accepted incorrectly."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 143.267,
+    "stage_times_sec": {
+      "checkout": 6.1,
+      "load_bug_context": 0.445,
+      "test_behavior_analysis": 6.956,
+      "test_failure_analysis": 11.587,
+      "load_file_candidates": 0.101,
+      "search_suspicious_files": 118.078
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 384402,
+      "output_tokens": 6292,
+      "total_tokens": 390694,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.956,
+          "input_tokens": 488,
+          "output_tokens": 357,
+          "total_tokens": 845
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.586,
+          "input_tokens": 1309,
+          "output_tokens": 733,
+          "total_tokens": 2042
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.174,
+          "input_tokens": 26791,
+          "output_tokens": 362,
+          "total_tokens": 27153
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 5.508,
+          "input_tokens": 26931,
+          "output_tokens": 188,
+          "total_tokens": 27119
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.66,
+          "input_tokens": 26475,
+          "output_tokens": 281,
+          "total_tokens": 26756
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.461,
+          "input_tokens": 26788,
+          "output_tokens": 343,
+          "total_tokens": 27131
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.548,
+          "input_tokens": 26731,
+          "output_tokens": 327,
+          "total_tokens": 27058
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.485,
+          "input_tokens": 27103,
+          "output_tokens": 381,
+          "total_tokens": 27484
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.902,
+          "input_tokens": 26915,
+          "output_tokens": 306,
+          "total_tokens": 27221
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.142,
+          "input_tokens": 26959,
+          "output_tokens": 334,
+          "total_tokens": 27293
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.404,
+          "input_tokens": 26912,
+          "output_tokens": 341,
+          "total_tokens": 27253
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.193,
+          "input_tokens": 26677,
+          "output_tokens": 405,
+          "total_tokens": 27082
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.982,
+          "input_tokens": 27015,
+          "output_tokens": 355,
+          "total_tokens": 27370
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.235,
+          "input_tokens": 26934,
+          "output_tokens": 200,
+          "total_tokens": 27134
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.415,
+          "input_tokens": 27172,
+          "output_tokens": 340,
+          "total_tokens": 27512
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.979,
+          "input_tokens": 20271,
+          "output_tokens": 357,
+          "total_tokens": 20628
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 9.962,
+          "input_tokens": 12931,
+          "output_tokens": 682,
+          "total_tokens": 13613
+        }
+      ]
+    }
+  }
+}

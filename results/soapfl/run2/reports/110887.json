@@ -1,0 +1,242 @@
+{
+  "bug_id": "110887",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-04-26",
+    "resolved": "458d4dae845ec155b285681a5b88305641abb868"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_trait_selection/src/traits/util.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_hir_analysis/src/astconv/generics.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_hir_analysis/src/bounds.rs",
+    "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_ty_utils/src/consts.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait `Bar` with a const generic parameter whose type is another trait alias `BB`, exercising const generics with a non-primitive const parameter type.",
+        "Creates `trait BB = Bar<{ 2 + 1 }>;`, using unstable trait aliases and making the alias recursively depend on `Bar` instantiated with a const expression.",
+        "Uses the const expression `{ 2 + 1 }` in a generic argument, forcing compile-time constant evaluation and normalization during trait alias expansion.",
+        "Introduces a self-referential relationship: `Bar` requires a const of type `BB`, while `BB` aliases `Bar<...>`, stressing cycle detection in name/type resolution.",
+        "Exercises compiler handling of trait objects versus trait bounds in const generic parameter positions, an area normally rejected or heavily restricted.",
+        "Targets nightly-only features and incomplete language interactions, probing rustc’s validation of unsupported const generic parameter types.",
+        "Checks whether rustc emits a proper diagnostic instead of ICEing when trait aliases, const generics, and recursive definitions interact."
+      ],
+      "summary": "The reproducer is minimal: it defines `Bar` with a const generic typed as `BB`, then defines `BB` as a trait alias for `Bar<{ 2 + 1 }>`. This combines unstable trait aliases, const generics, constant evaluation, and a recursive alias/type relationship. The test stresses rustc’s parsing, resolution, cycle detection, and error reporting for invalid or unsupported const-generic trait usage on nightly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on an invalid and highly recursive interaction between trait aliases and const generics during early type collection. The query stack shows the panic occurs while computing `super_predicates_of` for trait alias `BB`, not during codegen or later borrow/type checking, which strongly suggests a defect in trait/alias predicate construction or cycle handling. The reproducer creates a self-reference: `BB` is defined as `Bar<{2 + 1}>`, while `Bar` itself takes a const generic parameter of type `BB`. This means rustc must lower and validate a const generic parameter whose declared type is itself a trait alias, then expand the alias back into a trait application involving the same alias. The compiler should reject this combination with diagnostics (unsupported const param type, unstable trait alias usage, recursive/cyclic definition), but instead it reaches an ICE while computing super predicates. The common pattern is missing defensive validation or incorrect cycle/error recovery when building predicates for trait aliases that participate in const-generic signatures with unsupported parameter types and const-expression normalization.",
+      "possible_causes": [
+        "A bug in `super_predicates_of` / trait alias lowering where recursive trait-alias expansion through const generic parameter types is not cycle-checked before predicate construction, leading to an ICE instead of a reported cycle/error.",
+        "Missing validation in the compiler's const-generic parameter checking: a trait alias or trait-based type is being allowed to proceed too far as a const parameter type, causing later predicate computation to operate on an invalid `ConstParamTy` form.",
+        "Incorrect error recovery after diagnosing unstable/unsupported features (`trait_alias`, invalid const generic parameter type, trait object/bound misuse), so the compiler continues building super predicates for an already-invalid trait alias definition and panics.",
+        "A defect in normalization or lowering of const arguments inside trait aliases (`Bar<{ 2 + 1 }>`), especially when the aliased trait participates in a self-referential generic signature, causing recursive predicate elaboration to enter an inconsistent state.",
+        "Insufficient handling of self-referential alias/type relationships in item collection (`collect_mod_item_types`), where the alias `BB` and trait `Bar` form a cycle through the const parameter type and the compiler does not gracefully break or reject the cycle before querying super predicates."
+      ],
+      "evidence": [
+        "Query stack pinpoints the crash at `#0 [super_predicates_of] computing the super predicates of 'BB'`, indicating the defect is in compiler predicate computation for the trait alias rather than user code logic.",
+        "The reproducer creates direct recursion: `trait Bar<const N: BB> {}` and `trait BB = Bar<{ 2 + 1 }>;`, so expanding `BB` requires referencing `Bar`, whose const parameter type references `BB` again.",
+        "The test intentionally uses a nonstandard/unsupported const generic parameter type (`const N: BB`), which should normally be rejected early; ICE implies validation did not stop later compiler phases safely.",
+        "Compiler output mentions multiple prior errors (including E0391 cycle-related diagnostics), yet rustc still panics, showing defective error handling or recovery in production compiler code.",
+        "The panic occurs during `collect_mod_item_types`/`analysis`, consistent with early HIR-to-ty lowering and trait metadata construction, where trait alias super predicates are computed.",
+        "The reproducer combines unstable trait aliases, const expressions in generic arguments, and recursive alias expansion; this exact intersection is a strong indicator of a missing edge-case check in compiler support for trait aliases plus const generics."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1618,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The ICE occurs in query `super_predicates_of` while computing the super predicates of trait alias `BB`. This file is the most direct place where trait/alias predicates are assembled, and a missing cycle/error-recovery check during trait alias superpredicate construction is the most likely root cause."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/util.rs",
+        "reason": "The reproducer stresses recursive trait-alias expansion (`BB = Bar<{2+1}>` while `Bar` refers back to `BB`). This file contains trait alias expansion utilities, so incorrect handling of recursive alias expansion or invalid alias contents could feed bad data into `super_predicates_of` and trigger the ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "The invalid const generic parameter type `const N: BB` should likely be rejected during HIR-to-ty lowering. If AST conversion lets a trait alias/trait-like entity through as a const parameter type, later predicate computation can ICE instead of stopping cleanly."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/generics.rs",
+        "reason": "This file validates generic argument kinds and const-generic usage. Since the reproducer uses a const expression inside a trait alias plus an unsupported const parameter type, insufficient validation here could allow malformed generic/const structure to progress into predicate collection."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "Well-formedness checking is responsible for rejecting invalid const param types and malformed item signatures before later analysis relies on them. The compiler emitted errors but still panicked, which suggests WF checking or its recovery path may not be preventing downstream super-predicate computation on invalid items."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "WF obligation generation for generic arguments and consts may be involved once the invalid const-generic trait alias is lowered. If this layer does not robustly handle trait-alias-typed const params or recursive alias relationships, it could contribute to the bad state that reaches `super_predicates_of`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/bounds.rs",
+        "reason": "Supertraits and bounds are lowered and accumulated here. Trait aliases are represented through bound/predicate machinery, so a bug in lowering or ordering bounds for recursive aliases could surface as a `super_predicates_of` ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+        "reason": "This file collects and normalizes item-level bounds. Because the crash happens during top-level item type collection and involves trait alias super predicates, incorrect bound collection or remapping for the alias/item relationship is plausible."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The alias includes a const expression `{ 2 + 1 }`, so normalization of const-containing predicates may participate in the failing path. A normalization bug combined with recursive alias expansion could leave predicate construction in an inconsistent state."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "The reproducer forces abstract-const handling of `{ 2 + 1 }` in a generic argument. While the query stack points more strongly to predicate construction, malformed or insufficiently rejected abstract const lowering could be the enabling bug that interacts with trait alias super-predicate computation."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 147.683,
+    "stage_times_sec": {
+      "checkout": 0.599,
+      "load_bug_context": 0.056,
+      "test_behavior_analysis": 6.147,
+      "test_failure_analysis": 12.076,
+      "load_file_candidates": 0.1,
+      "search_suspicious_files": 128.705
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 389759,
+      "output_tokens": 6591,
+      "total_tokens": 396350,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.146,
+          "input_tokens": 341,
+          "output_tokens": 308,
+          "total_tokens": 649
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.076,
+          "input_tokens": 2132,
+          "output_tokens": 717,
+          "total_tokens": 2849
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.201,
+          "input_tokens": 27600,
+          "output_tokens": 341,
+          "total_tokens": 27941
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.224,
+          "input_tokens": 27650,
+          "output_tokens": 332,
+          "total_tokens": 27982
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.32,
+          "input_tokens": 27268,
+          "output_tokens": 279,
+          "total_tokens": 27547
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.985,
+          "input_tokens": 27517,
+          "output_tokens": 372,
+          "total_tokens": 27889
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.202,
+          "input_tokens": 27463,
+          "output_tokens": 403,
+          "total_tokens": 27866
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.452,
+          "input_tokens": 27899,
+          "output_tokens": 333,
+          "total_tokens": 28232
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.219,
+          "input_tokens": 27757,
+          "output_tokens": 345,
+          "total_tokens": 28102
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.832,
+          "input_tokens": 27600,
+          "output_tokens": 321,
+          "total_tokens": 27921
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.697,
+          "input_tokens": 27778,
+          "output_tokens": 338,
+          "total_tokens": 28116
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.654,
+          "input_tokens": 27532,
+          "output_tokens": 337,
+          "total_tokens": 27869
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.458,
+          "input_tokens": 27841,
+          "output_tokens": 384,
+          "total_tokens": 28225
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.298,
+          "input_tokens": 27800,
+          "output_tokens": 303,
+          "total_tokens": 28103
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.146,
+          "input_tokens": 27810,
+          "output_tokens": 385,
+          "total_tokens": 28195
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.445,
+          "input_tokens": 14962,
+          "output_tokens": 375,
+          "total_tokens": 15337
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.543,
+          "input_tokens": 12809,
+          "output_tokens": 718,
+          "total_tokens": 13527
+        }
+      ]
+    }
+  }
+}

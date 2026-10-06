@@ -1,0 +1,252 @@
+{
+  "bug_id": "123461",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-04-02",
+    "resolved": "1684a753dbca5d23b2e03568e6fbbb48eb72d0e6"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/intrinsicck.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_const_eval/src/const_eval/valtrees.rs",
+    "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_ty_utils/src/consts.rs",
+    "compiler/rustc_middle/src/ty/abstract_const.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_mir_build/src/build/mod.rs",
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Declares a local with inferred array type: `let _: [_; N];`, forcing the compiler to infer both element type and const generic array length.",
+        "Uses the array length position as a compile-time constant expression, so rustc must type-check the const argument for `[T; N]`.",
+        "Computes that length via `unsafe { std::mem::transmute(...) }`, exercising unsafe generic bit-reinterpretation during type checking.",
+        "The closure parameter is `Option<_>`, introducing a placeholder type variable inside the closure signature that must be inferred.",
+        "The closure body is empty and returns `()`, so the closure type is mostly unconstrained except by the transmute target context.",
+        "`transmute` has no explicit destination type here, pushing rustc to infer a target type from the required array-length `usize` context.",
+        "This combines closure typing, placeholder `_` inference, and const-expression checking in a single expression, stressing cross-component inference.",
+        "Nightly compilation may expose an ICE or diagnostic bug when rustc tries to resolve the transmute result as a valid const `usize`."
+      ],
+      "summary": "The reproducer creates an array declaration whose length must be inferred from an unsafe `transmute` of a closure taking `Option<_>`. This forces rustc to simultaneously infer closure types, placeholder `_` types, and a const `usize` array length. The code mainly stresses type inference, unsafe transmute checking, and const generic/array-length validation on nightly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on a malformed type-level constant used as an array length: `let _: [_; N];` where `N` must be a `usize` const expression. Here `N` is produced by `unsafe { std::mem::transmute(|o_b: Option<_>| {}) }`, which combines several difficult compiler responsibilities at once: inference of closure signature, inference of the placeholder `_` inside `Option<_>`, inference of the `transmute` destination type from surrounding context, and validation/evaluation of the result as a compile-time constant. The query stack shows the crash originates while type-checking a generated constant (`main::{constant#0}`), then proceeds through MIR building, const qualification, promotion, borrow checking, and finally CTFE (`eval_to_valtree`). This strongly suggests rustc incorrectly accepted or partially constructed an invalid constant expression far enough into the const pipeline, and then later panicked when trying to evaluate or lower it as a type-level const. The common pattern is therefore an ICE triggered by interaction between closure/type-variable inference and const generic array-length evaluation, likely around `transmute` destination-type inference or handling of unresolved inference variables in anonymous constants.",
+      "possible_causes": [
+        "A defect in type checking of anonymous constants for array lengths, where unresolved inference variables from the closure signature (`Option<_>`) are not rejected before const evaluation.",
+        "A bug in `transmute` checking/inference that incorrectly infers or delays inferring the destination type from the surrounding array-length `usize` context, leaving an invalid typed expression inside the const body.",
+        "A compiler ICE path in const-eval / valtree conversion that assumes the array-length constant is already fully typed and concrete, but receives a THIR/MIR constant containing closure-related inference placeholders or an invalid cast/transmute.",
+        "Improper error recovery in the type checker for invalid const expressions involving closures/functions, allowing MIR/CTFE to run on a constant that should have been rejected with a normal diagnostic.",
+        "A mismatch between closure typing and const-context validation: rustc may fail to detect early that a closure expression and its transmuted form are not valid const-evaluable values for a type-level `usize` constant.",
+        "A bug in match-checking/MIR construction for the synthesized anonymous constant (`main::{constant#0}`), where the compiler processes an impossible or ill-typed closure/transmute expression and later panics during const qualification or evaluation."
+      ],
+      "evidence": [
+        "The array length position requires a compile-time `usize`, making this a type-level constant path rather than ordinary runtime expression checking.",
+        "`transmute` is called without an explicit destination type, so rustc must infer the result type solely from context, increasing the chance of inference-state bugs.",
+        "The closure argument uses `Option<_>`, introducing an inference variable inside the closure signature that must be resolved during type checking.",
+        "The query stack starts at `typeck` for `main::{constant#0}` and ends in `eval_to_valtree`, showing the crash happens in processing of the anonymous constant used for the array length.",
+        "The stack includes `mir_const_qualif`, `mir_promoted`, `mir_for_ctfe`, and `eval_to_allocation_raw`, indicating the compiler carried the expression deep into the const pipeline instead of cleanly rejecting it earlier.",
+        "The reproducer specifically combines closure typing, placeholder inference, unsafe transmute, and const array-length validation, matching a cross-component compiler bug rather than a simple user-code mistake.",
+        "The compiler exits with an ICE (return code 101 and rustc ICE note), which is consistent with an internal assumption violation in production compiler code rather than a normal semantic error in the source."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1765,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/intrinsicck.rs",
+        "reason": "The reproducer hinges on `std::mem::transmute` without an explicit destination type, with the destination inferred from an array-length `usize` const context while the source is a closure involving `Option<_>`. This file contains `FnCtxt::check_transmute`, explicitly handling transmute validation and rejecting unresolved inference in transmute operands. A bug here could let an underconstrained or ill-typed transmute survive typeck and leak into anonymous-const MIR/CTFE, matching the query stack."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "The source expression includes a closure `|o_b: Option<_>| {}` inside the const expression, forcing closure-signature inference with an underscore placeholder in parameter type. This file is responsible for closure signature deduction and body checking. If closure typing leaves unresolved inference variables or produces a malformed type that is not rejected before const processing, it would explain why the anonymous const reaches later MIR and CTFE stages and ICEs."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/valtrees.rs",
+        "reason": "The panic reaches `eval_to_valtree` while evaluating the anonymous constant used as an array length. This file implements conversion from const-eval results into `ty::ValTree`, which is exactly the endpoint shown in the query stack. If rustc incorrectly attempts to convert an invalid or unsupported constant shape derived from the transmute/closure expression, this is a prime ICE site."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+        "reason": "The query stack includes `eval_to_allocation_raw` before `eval_to_valtree`, indicating the compiler proceeds deep into CTFE for the anonymous const instead of rejecting it earlier. This file is the query-facing entry point that drives CTFE and translates unevaluated constants into interpreter results. A bug in error handling or acceptance of malformed anonymous consts here could allow invalid MIR/consts to reach valtree conversion and crash."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "The ICE is on `main::{constant#0}`, an anonymous constant synthesized for the array length. This file computes `type_of` for anonymous consts and contains `anon_const_type_of`, which determines the type expected for such consts from context. Since the surrounding context requires a `usize`, an error in assigning or propagating the anon const type could interact badly with inference and transmute destination typing."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This file builds and validates abstract constants from THIR for const-related type queries. The reproducer stresses an invalid/underspecified anonymous const expression containing a closure and transmute, exactly the sort of structure that should likely be rejected during const abstraction or validation. If unsupported THIR forms are mishandled, later evaluability/CTFE stages may ICE."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/abstract_const.rs",
+        "reason": "The failure involves a type-level constant for array length, and this file defines abstract-const expansion plus `NotConstEvaluatable` cases like `MentionsInfer`. Given the reproducer includes unresolved inference via `Option<_>` and context-driven transmute typing, a bug here could fail to classify the constant as mentioning inference and instead let it proceed toward evaluation."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "Array lengths are type-level consts subject to const-evaluatability checking. This file decides whether a const is evaluatable, including special handling for anon consts and reporting `MentionsInfer`. The reproducer strongly suggests unresolved inference inside an anonymous const was not stopped soon enough, so this evaluatability gate is suspicious."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/mod.rs",
+        "reason": "The query stack passes through `check_match` and `mir_built` for `main::{constant#0}` before const qualification and CTFE. This file is the MIR construction entry point for const bodies. If MIR is being built for an impossible closure/transmute-based anonymous const without proper early rejection or fallback, the bug could originate in how const THIR/MIR bodies are constructed or permitted to continue after typeck issues."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "This file lowers HIR expressions into THIR, including closures, calls, casts/coercions, and the typed expression forms later consumed by MIR construction and abstract-const logic. A malformed THIR node for the transmute or closure within the anonymous const could explain why later const processing sees an unexpected shape and ICEs."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 157.11,
+    "stage_times_sec": {
+      "checkout": 1.268,
+      "load_bug_context": 0.099,
+      "test_behavior_analysis": 5.688,
+      "test_failure_analysis": 12.586,
+      "load_file_candidates": 0.095,
+      "search_suspicious_files": 137.374
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 424610,
+      "output_tokens": 7265,
+      "total_tokens": 431875,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.688,
+          "input_tokens": 322,
+          "output_tokens": 307,
+          "total_tokens": 629
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.586,
+          "input_tokens": 2092,
+          "output_tokens": 750,
+          "total_tokens": 2842
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.101,
+          "input_tokens": 27855,
+          "output_tokens": 376,
+          "total_tokens": 28231
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.929,
+          "input_tokens": 27722,
+          "output_tokens": 287,
+          "total_tokens": 28009
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.205,
+          "input_tokens": 27346,
+          "output_tokens": 322,
+          "total_tokens": 27668
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.386,
+          "input_tokens": 27515,
+          "output_tokens": 336,
+          "total_tokens": 27851
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.23,
+          "input_tokens": 27564,
+          "output_tokens": 365,
+          "total_tokens": 27929
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.106,
+          "input_tokens": 27895,
+          "output_tokens": 359,
+          "total_tokens": 28254
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.184,
+          "input_tokens": 27697,
+          "output_tokens": 339,
+          "total_tokens": 28036
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.358,
+          "input_tokens": 27685,
+          "output_tokens": 371,
+          "total_tokens": 28056
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 10.334,
+          "input_tokens": 27751,
+          "output_tokens": 422,
+          "total_tokens": 28173
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.393,
+          "input_tokens": 27608,
+          "output_tokens": 346,
+          "total_tokens": 27954
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.177,
+          "input_tokens": 27895,
+          "output_tokens": 345,
+          "total_tokens": 28240
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.104,
+          "input_tokens": 27731,
+          "output_tokens": 345,
+          "total_tokens": 28076
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.611,
+          "input_tokens": 27984,
+          "output_tokens": 264,
+          "total_tokens": 28248
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.469,
+          "input_tokens": 27723,
+          "output_tokens": 355,
+          "total_tokens": 28078
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.831,
+          "input_tokens": 20602,
+          "output_tokens": 381,
+          "total_tokens": 20983
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 14.927,
+          "input_tokens": 13623,
+          "output_tokens": 995,
+          "total_tokens": 14618
+        }
+      ]
+    }
+  }
+}

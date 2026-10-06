@@ -1,0 +1,243 @@
+{
+  "bug_id": "114664",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-08-08",
+    "resolved": "03a119b0b0e310d22d94399b24ed030056050f13"
+  },
+  "final_top10": [
+    "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+    "compiler/rustc_hir_pretty/src/lib.rs",
+    "compiler/rustc_driver_impl/src/pretty.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_hir_analysis/src/astconv/errors.rs",
+    "compiler/rustc_ast_lowering/src/path.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_parse/src/parser/ty.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `ice` returning `impl AsRef<Fn(&())>`, combining opaque `impl Trait` return types with a trait-object-like function trait in a type parameter.",
+        "Uses bare `Fn(&())` without `dyn`, exercising legacy trait object parsing and edition-2021 diagnostics around bare trait objects.",
+        "Puts the function trait inside `AsRef<T>`, forcing rustc to validate whether unsized trait-object types are acceptable as generic arguments and references.",
+        "Exercises parsing and semantic handling of parenthesized `Fn` traits with a tuple-like argument list `(&())` and implicit output `-> ()`.",
+        "Requires resolution of the `Fn` trait from the standard call traits and checking object-safety / trait-object compatibility in this position.",
+        "Uses `todo!()` so the function body is type-checked only enough to coerce the diverging `!` type to the declared return type.",
+        "The empty `main` ensures the crate builds without calling `ice`, so the reproducer isolates compiler type analysis of the signature itself.",
+        "Targets nightly-2023-08-08, indicating the bug is likely an ICE or incorrect diagnostic triggered during signature lowering, trait resolution, or well-formedness checking."
+      ],
+      "summary": "The reproducer is minimal: it declares a function with an opaque `impl Trait` return whose hidden type must implement `AsRef<Fn(&())>`, then leaves the body as `todo!()`. This stresses parsing and type-checking of bare `Fn` trait objects nested in a generic trait bound, especially around edition-2021 bare trait object handling, function-trait syntax, unsized trait-object use, and opaque return-type validation on nightly rustc."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a compiler ICE triggered by an invalid type appearing only in the function signature, not in executable code. The signature combines three stressors: an opaque return type (`impl Trait`), a nested generic bound (`AsRef<T>`), and a bare function trait written as `Fn(&())` in type position. In edition 2021, bare trait objects should be diagnosed and recovered gracefully, but here rustc panics while processing HIR for `-Z unpretty=hir`, indicating a bug in HIR lowering/pretty-printing or earlier semantic lowering of this function-trait-as-trait-object form. The marked span is exactly on `Fn(&())`, suggesting the compiler mishandles parenthesized `Fn` trait syntax when used as a generic argument to another trait inside `impl Trait`. Since `todo!()` means no concrete hidden type is inferred from the body, the crash is likely caused by signature validation/lowering rather than borrow checking or MIR. The most plausible defect is missing error handling or an invalid assumption that `Fn(&())` has already been normalized into a valid `dyn Fn(&())` trait object or a proper trait bound before HIR pretty-printing / well-formedness checks run.",
+      "possible_causes": [
+        "Bug in HIR lowering or HIR pretty-printing for bare `Fn` trait syntax used as a generic type argument inside `impl Trait`, causing an ICE instead of emitting a bare-trait-object diagnostic.",
+        "Missing recovery path when lowering parenthesized function traits (`Fn(..)`) in type position to a trait object form, especially when nested under `AsRef<T>` and opaque return types.",
+        "Compiler incorrectly assumes `Fn(&())` in `AsRef<...>` is a fully valid sized generic argument or already desugared form, leading to panic during well-formedness/type lowering of an unsized trait object type.",
+        "Defect in validation of opaque return types with nested trait-object-like generic parameters, where `impl AsRef<Fn(&())>` bypasses normal diagnostics and leaves malformed HIR/type structures consumed later by `-Z unpretty=hir`.",
+        "Improper handling of edition-2021 bare trait object diagnostics for call traits (`Fn`, `FnMut`, `FnOnce`) in parenthesized syntax, producing an internal compiler state inconsistent with later queries."
+      ],
+      "evidence": [
+        "The panic span points directly to `Fn(&())` on line 1, isolating the problematic construct.",
+        "The reproducer body is only `todo!()`, so the crash is driven by signature analysis rather than runtime semantics or complex body type inference.",
+        "The type combines `impl Trait` + `AsRef<T>` + bare `Fn(&())`, a rare nested form likely to expose missing normalization/recovery logic.",
+        "Compiler flags include `-Z unpretty=hir`, and the stack trace mentions `print_after_hir_lowering`, strongly suggesting the malformed construct survives into or breaks HIR lowering/printing.",
+        "`Fn(&())` is a legacy bare trait object style in edition 2021 and should normally produce a diagnostic, not an ICE.",
+        "The query stack is empty at panic end, consistent with a direct ICE in pretty-printing/lowering infrastructure rather than a deep trait solver recursion."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1649,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+        "reason": "The crash involves a fresh, elided lifetime manufactured from `&()` within parenthetical Fn trait syntax. Lowering-time lifetime collection - including elided anchors while lowering bounds - is this file's job, so a mismatch between the lifetimes it collects and what the opaque impl-trait machinery captures would yield precisely a fresh lifetime lacking a DefId."
+      },
+      {
+        "path": "compiler/rustc_hir_pretty/src/lib.rs",
+        "reason": "The ICE happens specifically under `-Z unpretty=hir`, and the stack trace points into `print_after_hir_lowering`. That strongly implicates HIR pretty-printing of the lowered type `impl AsRef<Fn(&())>`, especially handling bare `Fn` trait syntax nested inside generic arguments."
+      },
+      {
+        "path": "compiler/rustc_driver_impl/src/pretty.rs",
+        "reason": "This file drives `-Z unpretty=hir` and selects/dispatches the HIR printing path. If malformed or recovery HIR from bare `Fn` trait syntax is not handled before printing, the bug may be here in the driver-side pretty-print orchestration."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "The problematic construct is semantic lowering of `Fn(&())` in type position inside `AsRef<_>` and `impl Trait`. `astconv` is the core AST/HIR-to-`ty` conversion layer for such type syntax and is a likely place for an invalid assumption or bad recovery around call-trait syntax."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/errors.rs",
+        "reason": "This file explicitly handles diagnostics for malformed generic arguments and `Fn`-family trait syntax. Since the reproducer should likely emit a bare-trait-object or invalid `Fn` syntax diagnostic instead of ICEing, missing or incorrect recovery here is highly plausible."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "Lowering the parsed path/type form involving `AsRef<Fn(&())>` into HIR path structures could mishandle the nested `Fn` trait path or its parenthesized generic form, leaving malformed HIR that later crashes the HIR pretty-printer."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The reproducer stresses well-formedness of an unsized trait-object-like generic argument inside `impl Trait`. If invalid `Fn(&())` syntax survives far enough, WF checking may hit an unexpected type form or fail to gracefully reject it."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "The bug is triggered by a function signature alone, with `todo!()` preventing meaningful body inference. That makes early signature/type collection for the function and its opaque return type a plausible source of malformed internal type state."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/ty.rs",
+        "reason": "The reproducer relies on parenthesized `Fn(&())` type syntax and bare trait object behavior in edition 2021. If parsing or recovery around this syntax is off, later lowering/printing stages may receive an AST shape they do not expect."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "AST validation is an early place that should reject or lint invalid type syntax combinations before lowering. A missed validation for bare `Fn` trait object syntax in this nested position could allow bad IR to reach HIR printing."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 157.19,
+    "stage_times_sec": {
+      "checkout": 4.088,
+      "load_bug_context": 0.047,
+      "test_behavior_analysis": 8.17,
+      "test_failure_analysis": 12.954,
+      "load_file_candidates": 2.023,
+      "search_suspicious_files": 129.907
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 393938,
+      "output_tokens": 6698,
+      "total_tokens": 400636,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 8.17,
+          "input_tokens": 341,
+          "output_tokens": 353,
+          "total_tokens": 694
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.954,
+          "input_tokens": 1974,
+          "output_tokens": 670,
+          "total_tokens": 2644
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.9,
+          "input_tokens": 27347,
+          "output_tokens": 374,
+          "total_tokens": 27721
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 10.248,
+          "input_tokens": 27577,
+          "output_tokens": 348,
+          "total_tokens": 27925
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.855,
+          "input_tokens": 27013,
+          "output_tokens": 347,
+          "total_tokens": 27360
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.226,
+          "input_tokens": 27484,
+          "output_tokens": 344,
+          "total_tokens": 27828
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.809,
+          "input_tokens": 27335,
+          "output_tokens": 348,
+          "total_tokens": 27683
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.454,
+          "input_tokens": 27709,
+          "output_tokens": 368,
+          "total_tokens": 28077
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.485,
+          "input_tokens": 27504,
+          "output_tokens": 357,
+          "total_tokens": 27861
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.386,
+          "input_tokens": 27546,
+          "output_tokens": 321,
+          "total_tokens": 27867
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.37,
+          "input_tokens": 27516,
+          "output_tokens": 349,
+          "total_tokens": 27865
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.616,
+          "input_tokens": 27298,
+          "output_tokens": 375,
+          "total_tokens": 27673
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.514,
+          "input_tokens": 27569,
+          "output_tokens": 338,
+          "total_tokens": 27907
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.456,
+          "input_tokens": 27584,
+          "output_tokens": 272,
+          "total_tokens": 27856
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 10.327,
+          "input_tokens": 27745,
+          "output_tokens": 419,
+          "total_tokens": 28164
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.515,
+          "input_tokens": 21083,
+          "output_tokens": 393,
+          "total_tokens": 21476
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.721,
+          "input_tokens": 13313,
+          "output_tokens": 722,
+          "total_tokens": 14035
+        }
+      ]
+    }
+  }
+}

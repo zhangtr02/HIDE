@@ -1,0 +1,258 @@
+{
+  "bug_id": "131915",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-10-19",
+    "resolved": "e92993dbb43f0a5d17fe56e2d82f90435d6521c8"
+  },
+  "final_top10": [
+    "compiler/rustc_resolve/src/def_collector.rs",
+    "compiler/rustc_passes/src/entry.rs",
+    "compiler/rustc_middle/src/hir/map/mod.rs",
+    "compiler/rustc_ast_lowering/src/item.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_expand/src/mbe/macro_rules.rs",
+    "compiler/rustc_expand/src/expand.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_hir_analysis/src/check/entry.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a declarative macro `y!` that accepts any token tree sequence using `$($matcher:tt)*`.",
+        "The macro expansion ignores its input and always emits the identifier `x`.",
+        "Inside a const generic argument, the code invokes `y! { test.tou8 }` with dotted tokens to test token-tree macro matching.",
+        "The const generic expression is wrapped in a block `{ ... }`, exercising block expressions inside generic const arguments.",
+        "The item `const _: A<{ ... }>;` references an undeclared generic type `A`, forcing early compiler analysis of generic arguments.",
+        "The expanded `x` is unresolved, testing name resolution and diagnostics after macro expansion in const-generic contexts.",
+        "The code has no executable runtime behavior; it is purely a compile-fail reproducer targeting front-end parsing and expansion stages.",
+        "Using a pinned nightly toolchain suggests the reproducer targets a regression in nightly rustc behavior around macros plus const generics."
+      ],
+      "summary": "This reproducer checks how nightly rustc handles a `macro_rules!` invocation inside a const generic argument. The macro accepts arbitrary token trees, including dotted syntax, but expands to an unresolved identifier. That places parsing, macro expansion, const-generic expression handling, and name resolution on the same path, while also involving an undeclared generic type. It is a compile-time-only test meant to expose a compiler bug in front-end processing rather than runtime behavior."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in the front-end pipeline while processing malformed code that should only produce ordinary diagnostics. The reproducer combines three stressors on the same path: (1) a `macro_rules!` matcher that accepts arbitrary token trees, including a dotted token sequence (`test.tou8`), (2) expansion of that macro inside a block expression used as a const-generic argument (`A<{ ... }>`), and (3) unresolved names introduced both by the expanded identifier `x` and by the undeclared type `A`. The query stack shows the panic occurs during `analysis`, specifically via `entry_fn` -> `hir_attrs` -> `hir_crate`, which is unusual because the actual user errors are name-resolution/type-resolution errors (E0412, E0425). This suggests rustc emits diagnostics for the bad code, but later analysis still traverses HIR/attributes/entry-point logic assuming some node was validly lowered/resolved. The common pattern is therefore: invalid macro-expanded syntax/name usage inside const-generic/block context leaves behind an HIR or owner state that later queries do not defensively handle, causing a panic instead of graceful error recovery.",
+      "possible_causes": [
+        "A defect in HIR lowering or error recovery for macro expansions inside const-generic arguments: expansion to an unresolved identifier within `A<{ ... }>` may produce an invalid/placeholder HIR owner that later `hir_attrs` or `entry_fn` assumes is well-formed.",
+        "A compiler bug in attribute/owner lookup (`hir_attrs`) when encountering items affected by prior parse/name-resolution errors in const-generic block expressions, leading to querying attributes for an invalid or missing HIR owner.",
+        "Improper recovery in name resolution/type checking for undeclared type `A` combined with macro-expanded unresolved `x`, where later analysis still proceeds with partially invalid crate state and triggers an ICE in crate HIR traversal.",
+        "A bug in the interaction between macro token-tree expansion and const-generic expression parsing: dotted tokens accepted by `$tt` and discarded by expansion may leave incorrect spans/owner mappings, later causing `hir_crate`/`hir_attrs` queries to panic during analysis.",
+        "Missing defensive handling in entry-function discovery (`entry_fn`) or crate-level analysis after earlier hard errors, especially when the crate contains malformed top-level items involving const generics and macro-expanded expressions."
+      ],
+      "evidence": [
+        "The macro accepts arbitrary token trees (`$($matcher:tt)*`) and is invoked with dotted input `test.tou8`, so this exercises macro token handling rather than ordinary expression parsing.",
+        "The macro always expands to bare identifier `x`, which is unresolved; compiler output includes E0425, confirming name-resolution failure after macro expansion.",
+        "The declaration `const _: A<{ ... }>;` uses undeclared type `A`; compiler output includes E0412, confirming simultaneous type-resolution failure.",
+        "The const generic argument is a block expression `{ y! { test.tou8 } }`, so parsing, macro expansion, lowering, and const-generic handling all meet on one code path.",
+        "The query stack during panic is `hir_crate` -> `hir_attrs` -> `entry_fn` -> `analysis`, indicating the ICE happens in later analysis/HIR traversal, not directly in parsing or macro expansion.",
+        "Because the program is compile-fail only and has no runtime behavior, the defect is almost certainly in compiler front-end error recovery or HIR/query handling.",
+        "Rustc reports normal user-facing errors and then panics, which is characteristic of an internal compiler invariant violated after unsuccessful recovery from earlier invalid code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1852,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_resolve/src/def_collector.rs",
+        "reason": "Definition collection for anonymous consts - including the documented `PendingAnonConstInfo` mechanism for macro-invocation const arguments whose true anon-const status is settled after expansion - is handled here. With the reproducer placing a macro invocation inside const-generic braces, a mismatch between this def collection and later AST lowering could plausibly yield duplicate anon-const definitions."
+      },
+      {
+        "path": "compiler/rustc_passes/src/entry.rs",
+        "reason": "The query stack ends in `entry_fn` and then panics while traversing crate HIR/attributes after earlier errors. This file implements entry-point discovery by scanning HIR items, so it is the most direct place where malformed or error-recovered top-level items like `const _: A<{ y!{...} }>;` could be mishandled instead of skipped safely."
+      },
+      {
+        "path": "compiler/rustc_middle/src/hir/map/mod.rs",
+        "reason": "The panic path includes `hir_crate` and `hir_attrs`, pointing at HIR owner/navigation access. If macro expansion plus const-generic error recovery produced an invalid or missing HIR owner/parent mapping, HIR map lookups here could panic when entry-point or attribute scanning walks the crate."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "The reproducer uses a top-level const item with an anon const generic argument containing a macro-expanded unresolved name. Item lowering is responsible for creating HIR owners for such items; a bad owner table entry or missing lowered owner would later surface as a `hir_attrs`/`hir_crate` failure during analysis."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "The suspicious syntax is specifically a block expression used as a const generic argument, with a macro invocation inside. Expression lowering handles anon const/block expression lowering and error recovery, making it a strong candidate for creating malformed HIR for later queries."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "This file contains logic for anonymous consts and const generic arguments (`anon_const_type_of`, `const_arg_anon_type_of`). Since the item is `A<{ ... }>` and both `A` and expanded `x` are unresolved, bad recovery here could leave analysis in an inconsistent state that later entry analysis trips over."
+      },
+      {
+        "path": "compiler/rustc_expand/src/mbe/macro_rules.rs",
+        "reason": "The reproducer is centered on a `macro_rules!` matcher over arbitrary token trees with dotted tokens, expanded inside a const-generic block. If declarative macro expansion/parsing of the resulting fragment in this context produces wrong spans or malformed AST nodes, downstream lowering/HIR ownership could break."
+      },
+      {
+        "path": "compiler/rustc_expand/src/expand.rs",
+        "reason": "This is the core expansion driver that inserts and replaces placeholders around macro expansion sites. A bug in fragment-kind handling for a macro inside a const-generic block expression could leave behind an AST/HIR shape that later crate traversal and attribute lookup do not expect."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The compiler reports expected name-resolution errors (E0412, E0425) before ICEing. Late resolution handles unresolved names in expressions, types, and anon consts; if it marks or recovers these nodes inconsistently in the const-generic/macro-expanded path, later HIR-based analysis may panic."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/entry.rs",
+        "reason": "Although the query itself is `entry_fn`, this file immediately consumes `tcx.entry_fn(())` during analysis and performs HIR-based validation. If error recovery allowed an invalid entry candidate or invalid local-def/HIR lookup to propagate, this check path is a plausible crash site."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 167.842,
+    "stage_times_sec": {
+      "checkout": 2.544,
+      "load_bug_context": 0.211,
+      "test_behavior_analysis": 6.154,
+      "test_failure_analysis": 11.77,
+      "load_file_candidates": 0.098,
+      "search_suspicious_files": 147.065
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 448486,
+      "output_tokens": 7513,
+      "total_tokens": 455999,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.154,
+          "input_tokens": 350,
+          "output_tokens": 303,
+          "total_tokens": 653
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.77,
+          "input_tokens": 2127,
+          "output_tokens": 736,
+          "total_tokens": 2863
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.519,
+          "input_tokens": 27884,
+          "output_tokens": 341,
+          "total_tokens": 28225
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.703,
+          "input_tokens": 27838,
+          "output_tokens": 334,
+          "total_tokens": 28172
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.436,
+          "input_tokens": 27219,
+          "output_tokens": 352,
+          "total_tokens": 27571
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.016,
+          "input_tokens": 27632,
+          "output_tokens": 361,
+          "total_tokens": 27993
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.296,
+          "input_tokens": 27695,
+          "output_tokens": 372,
+          "total_tokens": 28067
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.151,
+          "input_tokens": 27783,
+          "output_tokens": 371,
+          "total_tokens": 28154
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.76,
+          "input_tokens": 27834,
+          "output_tokens": 334,
+          "total_tokens": 28168
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.318,
+          "input_tokens": 27649,
+          "output_tokens": 353,
+          "total_tokens": 28002
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.718,
+          "input_tokens": 27796,
+          "output_tokens": 410,
+          "total_tokens": 28206
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.078,
+          "input_tokens": 27763,
+          "output_tokens": 424,
+          "total_tokens": 28187
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.615,
+          "input_tokens": 27550,
+          "output_tokens": 375,
+          "total_tokens": 27925
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.056,
+          "input_tokens": 27792,
+          "output_tokens": 327,
+          "total_tokens": 28119
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.027,
+          "input_tokens": 27974,
+          "output_tokens": 321,
+          "total_tokens": 28295
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.819,
+          "input_tokens": 27974,
+          "output_tokens": 273,
+          "total_tokens": 28247
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.747,
+          "input_tokens": 27745,
+          "output_tokens": 371,
+          "total_tokens": 28116
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 7.978,
+          "input_tokens": 13745,
+          "output_tokens": 370,
+          "total_tokens": 14115
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.796,
+          "input_tokens": 16136,
+          "output_tokens": 785,
+          "total_tokens": 16921
+        }
+      ]
+    }
+  }
+}

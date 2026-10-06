@@ -1,0 +1,244 @@
+{
+  "bug_id": "111906",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-08-19",
+    "resolved": "d06ca0ffaf4ac72732665f99dd9ad962194cd0b3"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_typeck/src/coercion.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/equate.rs",
+    "compiler/rustc_infer/src/infer/generalize.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_trait_selection/src/solve/opaques.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `foo` with an explicit lifetime parameter using the unusual self-outlives bound `'a: 'a`.",
+        "Returns `impl Sized`, exercising opaque return type handling even though the function body never produces a concrete value.",
+        "Inside `foo`, recursively calls `foo::<'a>()`, explicitly instantiating the same lifetime parameter.",
+        "Assigns the recursive call to `let _: ()`, forcing type checking to unify the opaque return type with unit `()`.",
+        "Ends with `loop {}`, making the function diverging and relying on the `!` never type to coerce to the declared return type.",
+        "Combines recursion and divergence so the recursive expression is checked despite being followed by unreachable infinite looping.",
+        "Exercises lifetime parameter substitution and region checking on a generic function returning an opaque type.",
+        "Targets compiler interactions among opaque types, never-type coercion, recursive calls, and unusual lifetime bounds on nightly."
+      ],
+      "summary": "The reproducer defines a generic function with a self-outlives lifetime bound, an `impl Sized` return, and a recursive self-call constrained to type `()`. Although the function ultimately diverges with `loop {}`, rustc still must type-check the recursive call, opaque return type, explicit lifetime instantiation, and never-type coercion. This stresses compiler handling of recursion, regions, and opaque return inference on nightly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during type analysis rather than a normal user-facing type error. The reproducer combines several stressors in one place: a generic lifetime parameter with the unusual reflexive bound `'a: 'a`, a function returning an opaque type (`impl Sized`), an explicit recursive self-call with lifetime substitution (`foo::<'a>()`), and a local annotation `let _: () = ...` that forces the recursive result to be checked against unit. Even though the function body diverges via `loop {}`, rustc still type-checks the earlier recursive expression. The stack shows the crash happens during `check_mod_item_types` / crate analysis, so the likely defect is in compiler type-checking or opaque-type handling, not codegen. The common theme is an invalid or insufficiently guarded interaction between recursive opaque return type inference and region/lifetime substitution for a generic function, especially when the recursive call is coerced/compared to `()`. The compiler likely reaches an internal state it expected to reject gracefully, such as trying to equate an unconstrained or self-referential opaque type with a concrete type under recursive obligations, or mishandling the lifetime binder/region obligations for the recursive instantiation.",
+      "possible_causes": [
+        "Bug in opaque return type (`impl Trait`) inference/type-checking for recursive functions, where a self-recursive call causes the hidden type of the opaque return to become self-referential or cyclic and the compiler ICEs instead of emitting a diagnostic.",
+        "Defect in type unification/coercion logic when forcing the result of a function returning `impl Sized` to type `()`, especially in the presence of divergence (`loop {}` / never-type coercion) and recursion.",
+        "Incorrect handling of generic lifetime substitution and region obligations for explicit recursive instantiation `foo::<'a>()`, potentially triggered by the unusual reflexive bound `'a: 'a` and leading to an internal inconsistency during type checking.",
+        "Missing cycle detection or invalid-state guard in HIR type checking / opaque type collection when recursive calls are analyzed before the opaque return type is fully resolved.",
+        "Compiler bug in never-type coercion interacting with opaque types: the body diverges, but an earlier expression still constrains the opaque return, and rustc may mishandle obligation solving for that combination during analysis."
+      ],
+      "evidence": [
+        "The reproducer’s core pattern is a function returning `impl Sized` that recursively calls itself and then constrains that result with `let _: () = foo::<'a>();`.",
+        "The crash location is reported at `src/main.rs:2:12`, exactly on the `()` type annotation that forces unification/coercion of the recursive call result.",
+        "Behavior explicitly stresses lifetime substitution, opaque return handling, recursive calls, and never-type coercion together.",
+        "The stack trace includes `rustc_hir_analysis::check_crate` and `check_mod_item_types`, indicating the ICE occurs during semantic/type analysis rather than later compilation phases.",
+        "The function uses an unusual lifetime bound `'a: 'a`, which is semantically trivial but may expose a bug in region/binder handling when combined with recursive opaque return checking.",
+        "Because the function ends in `loop {}`, no concrete value is produced for the opaque return; this increases the chance that the compiler mishandles hidden type inference or obligation resolution for the recursive expression.",
+        "The query stack is empty at panic end, suggesting a direct internal assertion/bug during analysis rather than a normal reported trait/type error path."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1656,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "The ICE happens during `check_mod_item_types` while type-checking a function body that returns `impl Sized`. This file sets up function body checking, including replacing opaque return types with inference variables and preparing return coercion, so a recursive `foo::<'a>()` inside the same function with an unconstrained opaque return is highly suspicious here."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "The crash span points directly at `let _: () = foo::<'a>();`, i.e. expression/type checking of a recursive call being forced to `()`. This file handles expression checking, call typing, divergence, and never-type behavior, all of which are exercised by the reproducer."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/coercion.rs",
+        "reason": "The reproducer relies on coercion/unification around `let _: () = foo::<'a>();` plus a diverging `loop {}` body. If rustc mishandles coercing a recursive opaque return / `!`-related path into the expected type, it would likely be in the coercion logic here."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "A core suspected cause is bad handling of recursive opaque return type inference. This file owns inference-time tracking and replacement of opaque types with inference variables, exactly the machinery likely involved when a function returning `impl Sized` recursively calls itself before any concrete hidden type is established."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "The reproducer explicitly instantiates a lifetime parameter `foo::<'a>()` and uses an unusual `'a: 'a` bound, suggesting possible trouble in remapping generic arguments/regions for opaque types. This file is the central ty-level logic for opaque type argument remapping and region handling."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/equate.rs",
+        "reason": "The local annotation `let _: () = ...` forces equality-like type relation between the recursive call result and unit. If the ICE comes from trying to equate a self-referential or not-yet-resolved opaque type with `()`, the equality relation code here is a plausible failure point."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/generalize.rs",
+        "reason": "Recursive opaque inference can accidentally create cyclic/self-referential assignments. This file is responsible for generalization and cycle prevention when solving inference variables, so a missing guard or bad generalization path could produce an ICE instead of a normal error."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "If the compiler reaches an invalid state while collecting the hidden type of the function's `impl Sized` return under recursion, this opaque-type collection code is relevant. Recursive defining-use scenarios are exactly the kind of edge case that can fail here."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/solve/opaques.rs",
+        "reason": "Opaque types are normalized and related through solver logic, and recursive/self-referential opaque obligations can expose missing ambiguity or cycle handling. The reproducer’s combination of `impl Sized`, recursion, and explicit lifetime substitution makes this solver-side opaque handling suspicious."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 139.793,
+    "stage_times_sec": {
+      "checkout": 2.404,
+      "load_bug_context": 0.039,
+      "test_behavior_analysis": 5.197,
+      "test_failure_analysis": 10.921,
+      "load_file_candidates": 0.102,
+      "search_suspicious_files": 121.13
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 392936,
+      "output_tokens": 6704,
+      "total_tokens": 399640,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.196,
+          "input_tokens": 350,
+          "output_tokens": 286,
+          "total_tokens": 636
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.921,
+          "input_tokens": 1908,
+          "output_tokens": 715,
+          "total_tokens": 2623
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.682,
+          "input_tokens": 27328,
+          "output_tokens": 416,
+          "total_tokens": 27744
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.028,
+          "input_tokens": 27580,
+          "output_tokens": 330,
+          "total_tokens": 27910
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.873,
+          "input_tokens": 26967,
+          "output_tokens": 301,
+          "total_tokens": 27268
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.561,
+          "input_tokens": 27465,
+          "output_tokens": 384,
+          "total_tokens": 27849
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.7,
+          "input_tokens": 27316,
+          "output_tokens": 392,
+          "total_tokens": 27708
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.572,
+          "input_tokens": 27693,
+          "output_tokens": 399,
+          "total_tokens": 28092
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.64,
+          "input_tokens": 27483,
+          "output_tokens": 366,
+          "total_tokens": 27849
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.216,
+          "input_tokens": 27547,
+          "output_tokens": 337,
+          "total_tokens": 27884
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.311,
+          "input_tokens": 27492,
+          "output_tokens": 352,
+          "total_tokens": 27844
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.642,
+          "input_tokens": 27260,
+          "output_tokens": 356,
+          "total_tokens": 27616
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.526,
+          "input_tokens": 27589,
+          "output_tokens": 333,
+          "total_tokens": 27922
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.116,
+          "input_tokens": 27515,
+          "output_tokens": 282,
+          "total_tokens": 27797
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.752,
+          "input_tokens": 27770,
+          "output_tokens": 332,
+          "total_tokens": 28102
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.523,
+          "input_tokens": 22499,
+          "output_tokens": 375,
+          "total_tokens": 22874
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.962,
+          "input_tokens": 11174,
+          "output_tokens": 748,
+          "total_tokens": 11922
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,235 @@
+{
+  "bug_id": "104763",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-11-22",
+    "resolved": "b7bc90fea3b441234a84b49fdafeb75815eebbab"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+    "compiler/rustc_infer/src/infer/outlives/env.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with an associated const, exercising trait-level constants and constant lookup through implementations.",
+        "Implements the trait for references of the form `&'static T`, using a generic impl over all `T` with a concrete lifetime.",
+        "Declares `fn test<T>()` and references `<&'static T>::TRAIT`, forcing method-resolution-style lookup of an associated const on a generic reference type.",
+        "Uses UFCS syntax (`<Type>::CONST`) to access the associated const without naming the trait explicitly.",
+        "Requires rustc to prove that `&'static T` implements `Trait` for an unconstrained generic `T` inside a generic function body.",
+        "Exercises well-formedness and outlives checking for `&'static T`, since such a reference type is only valid when `T: 'static`.",
+        "Triggers compiler handling of implied lifetime bounds versus explicit bounds, because `test<T>` lacks an explicit `T: 'static` constraint.",
+        "Uses nightly rustc, so the reproducer targets a compiler bug in trait/const resolution or WF checking rather than runtime behavior."
+      ],
+      "summary": "The reproducer defines a trait with an associated const, implements it for `&'static T`, and then accesses that const inside `test<T>` via `<&'static T>::TRAIT`. This makes rustc resolve a trait impl for a generic reference type that implicitly needs `T: 'static`, even though `test` does not declare that bound. The code is minimal and targets compiler behavior around associated-const lookup, UFCS, generic impl matching, and well-formedness/outlives checking."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer centers on associated-const lookup via UFCS on a generic type `&'static T` inside `fn test<T>()` without an explicit `T: 'static` bound. The common pattern across the code and behavior is that rustc must both resolve `<&'static T>::TRAIT` to the impl `impl<T> Trait for &'static T` and enforce the well-formedness/outlives requirement that `&'static T` is only valid when `T: 'static`. However, the compiler accepts the program and only emits warnings, which strongly suggests that during associated item projection/lookup the compiler is treating `&'static T` as matching the impl without propagating or checking the hidden outlives obligation on `T`. This points to a bug in trait selection / associated-const resolution / WF checking integration, specifically for reference types with concrete lifetimes used in generic contexts. The failure is not in parsing or codegen, but in semantic validation: the compiler should reject or constrain `test<T>` because `<&'static T>::TRAIT` requires `T: 'static`.",
+      "possible_causes": [
+        "Missing well-formedness/outlives check when resolving an associated const through UFCS on a type like `&'static T`, causing rustc to accept `<&'static T>::TRAIT` without requiring `T: 'static`.",
+        "Trait selection for the impl `impl<T> Trait for &'static T` is likely matching the self type structurally but failing to register the implied predicate `T: 'static` that arises from the reference type's well-formedness requirements.",
+        "Associated item normalization/projection code may be bypassing `wf::obligations` or equivalent implied-bound generation for the self type before confirming the const lookup, leading to unsound acceptance in generic function bodies.",
+        "A defect may exist in HIR/typeck or obligation collection where using UFCS `<Type>::CONST` on an associated const does not trigger the same validity checks as an explicit trait-qualified path would, especially for late generic parameters under concrete lifetimes.",
+        "The compiler may incorrectly treat lifetime requirements from impl headers involving `&'static T` as implied or already satisfied, instead of enforcing them at the use site when `T` is unconstrained."
+      ],
+      "evidence": [
+        "The impl target is `&'static T`, which is only a well-formed type if `T: 'static`; `fn test<T>()` does not declare that bound.",
+        "`<&'static T>::TRAIT` forces associated-const lookup on a generic self type, so rustc must resolve both the trait impl and any obligations induced by the self type.",
+        "The compiler output shows successful compilation with only `dead_code` and `path_statements` warnings, indicating the expected semantic rejection did not occur.",
+        "The reproducer is minimal and contains no runtime behavior; the only interesting operation is trait-associated const resolution on a reference type with a concrete lifetime, isolating the bug to compiler semantic analysis.",
+        "The behavior summary explicitly exercises implied lifetime bounds versus explicit bounds, matching the observed symptom that rustc failed to require `T: 'static`."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1547,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Most suspicious because the bug is fundamentally a missing well-formedness/outlives obligation for the self type `&'static T` during associated-const use. This file generates WF obligations like the hidden `T: 'static` requirement arising from reference well-formedness, and a failure here would directly explain why `<&'static T>::TRAIT` is accepted in `fn test<T>()` without an explicit bound."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "HIR WF checking should reject or at least register obligations for invalid generic uses involving `&'static T` when `T` is unconstrained. Since the reproducer is accepted during semantic analysis, this file is a strong candidate for missing WF enforcement in this expression/body context."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "The problematic construct is an expression-level UFCS associated-const access `<&'static T>::TRAIT`. Expression type checking may be resolving the associated const but failing to trigger the necessary WF/outlives checks on the self type, so the expression checker is highly relevant."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "Associated item lookup and obligation registration during body type checking are funneled through `FnCtxt`. If UFCS const lookup on a type-relative path bypasses required obligations, the bug could live in this shared body typeck machinery rather than only in the expression-specific layer."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "Trait selection confirmation for matching `impl<T> Trait for &'static T` against the obligation from `<&'static T>::TRAIT` may be structurally confirming the impl but neglecting nested obligations implied by the impl/self type WF, especially the needed `T: 'static` constraint."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "Although named for projection, this module participates in associated item normalization and obligation propagation. If associated const lookup through UFCS follows a projection-like path, missing propagation of self-type WF obligations could arise here."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+        "reason": "The reproducer is specifically about implied outlives bounds from requiring `&'static T` to be well formed. If computation of implied outlives bounds is incomplete or not triggered for this use-site, rustc could incorrectly accept the code."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/env.rs",
+        "reason": "This file gathers explicit and implied outlives facts for type checking. A bug in populating the outlives environment could cause the compiler to mishandle or fail to derive the `T: 'static` requirement associated with `&'static T`."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "If the `T: 'static` obligation is created but then not lowered into concrete region constraints or deferred checks, the program would compile incorrectly. This file is the bridge from type-outlives obligations to actual region enforcement, so it is a plausible source."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "UFCS type-relative associated item resolution begins in HIR analysis/AST conversion. If `<&'static T>::TRAIT` is resolved in a way that omits implied predicates or uses the wrong predicate filter, the hidden outlives requirement may never be attached."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 131.056,
+    "stage_times_sec": {
+      "checkout": 0.329,
+      "load_bug_context": 0.053,
+      "test_behavior_analysis": 7.287,
+      "test_failure_analysis": 9.456,
+      "load_file_candidates": 0.094,
+      "search_suspicious_files": 113.837
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 354152,
+      "output_tokens": 6325,
+      "total_tokens": 360477,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.286,
+          "input_tokens": 376,
+          "output_tokens": 337,
+          "total_tokens": 713
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 9.456,
+          "input_tokens": 1083,
+          "output_tokens": 650,
+          "total_tokens": 1733
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.073,
+          "input_tokens": 26471,
+          "output_tokens": 376,
+          "total_tokens": 26847
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.266,
+          "input_tokens": 26421,
+          "output_tokens": 356,
+          "total_tokens": 26777
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.735,
+          "input_tokens": 26290,
+          "output_tokens": 324,
+          "total_tokens": 26614
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.38,
+          "input_tokens": 26538,
+          "output_tokens": 348,
+          "total_tokens": 26886
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.098,
+          "input_tokens": 26550,
+          "output_tokens": 345,
+          "total_tokens": 26895
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 10.358,
+          "input_tokens": 26746,
+          "output_tokens": 379,
+          "total_tokens": 27125
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.629,
+          "input_tokens": 26602,
+          "output_tokens": 384,
+          "total_tokens": 26986
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.959,
+          "input_tokens": 26541,
+          "output_tokens": 300,
+          "total_tokens": 26841
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.155,
+          "input_tokens": 26654,
+          "output_tokens": 362,
+          "total_tokens": 27016
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.728,
+          "input_tokens": 25155,
+          "output_tokens": 408,
+          "total_tokens": 25563
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.123,
+          "input_tokens": 26679,
+          "output_tokens": 323,
+          "total_tokens": 27002
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.603,
+          "input_tokens": 26826,
+          "output_tokens": 294,
+          "total_tokens": 27120
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.583,
+          "input_tokens": 23572,
+          "output_tokens": 368,
+          "total_tokens": 23940
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.122,
+          "input_tokens": 11648,
+          "output_tokens": 771,
+          "total_tokens": 12419
+        }
+      ]
+    }
+  }
+}

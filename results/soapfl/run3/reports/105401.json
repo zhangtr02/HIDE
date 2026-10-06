@@ -1,0 +1,238 @@
+{
+  "bug_id": "105401",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-12-05",
+    "resolved": "53e4b9dd74c29cc9308b8d0f10facac70bb101a7"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/callee.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/sub.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+    "compiler/rustc_infer/src/infer/region_constraints/leak_check.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly features `type_alias_impl_trait` and `closure_lifetime_binder` to express opaque future return types and explicit higher-ranked closure lifetimes.",
+        "Defines `AsyncFn<I, R>` as a trait alias pattern over `FnMut(I) -> Fut`, with an associated future output type.",
+        "`call` is an async retry loop requiring `for<'a> AsyncFn<&'a mut C, Result<R, ()>>`, exercising higher-ranked trait bounds over mutable borrows.",
+        "`Cap<'a>` is a trivial lifetime-capturing marker trait, used to force the opaque future type to depend on both `'a` and `'b`.",
+        "`Ret<'a, 'b>` is a local type alias `impl Future + 'a + Cap<'b>`, testing lifetime-constrained opaque type aliases inside functions.",
+        "`works` stores a `for<'a, 'b>` closure in `callback` before passing it to `call`; this path type-checks.",
+        "`doesnt_work_but_should` passes the same higher-ranked closure inline to `call`; this is expected equivalent code but triggers the compiler bug.",
+        "The reproducer stresses rustc’s handling of HRTBs, closure lifetime binders, opaque future normalization, and inference differences between named and inline closures."
+      ],
+      "summary": "The reproducer compares two equivalent ways of supplying a higher-ranked async closure to a generic retry function. Both use a local `impl Future` type alias capturing multiple lifetimes. Assigning the closure to a variable compiles, but passing it inline fails, exposing a rustc bug in type/lifetime inference and normalization for closure binders with opaque future return types."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is a mismatch between two semantically equivalent forms of the same higher-ranked async closure: (1) binding the closure to a local variable and then passing it, versus (2) passing the closure inline as a call argument. Only the inline form triggers E0644 ('closure/generator type that references itself'), which strongly suggests the compiler is constructing an incorrect self-referential type during type checking or normalization rather than rejecting a real user-level cycle. The reproducer combines several advanced features in exactly the failing path: closure lifetime binders (`for<'a, 'b>`), local `type_alias_impl_trait`, an async block producing an opaque future, and an HRTB-based `AsyncFn` bound over `FnMut`. Since the named-closure version compiles, the bug is likely in how rustc handles inline closure argument coercion/inference under higher-ranked binders, especially when relating the closure's return opaque type `Ret<'a, 'b>` to the `AsyncFn` associated future type. The emitted self-reference error is probably spurious, caused by incorrect canonicalization/instantiation of late-bound lifetimes or by cycle detection seeing the closure signature/returned generator as depending on the closure type itself in the inline-call path only.",
+      "possible_causes": [
+        "Bug in closure type checking for inline higher-ranked closures: rustc likely mishandles `for<'a, 'b>` closure binders when the closure is supplied directly as a function argument, producing a bogus self-referential closure/generator type.",
+        "Defect in normalization/relating of `type_alias_impl_trait` inside function-local aliases with multiple lifetime parameters (`Ret<'a, 'b>`) when used as an inline closure return type, especially during obligation solving for `FnMut`/`AsyncFn` bounds.",
+        "Incorrect interaction between async closure body lowering (generator/future type creation) and HRTB instantiation, causing the returned generator to be tied to the enclosing closure type and triggering false E0644 cycle detection.",
+        "Inference discrepancy between named closures and inline closures in argument position: the compiler may be using different expectation/coercion paths, and the inline path likely fails to create or generalize the closure signature correctly before trait matching.",
+        "Possible bug in late-bound lifetime instantiation or leak-checking for closure lifetime binders combined with opaque types capturing both `'a` and `'b`, causing rustc to infer an invalid recursive relationship among the closure input, opaque future, and closure environment.",
+        "Trait selection/projection bug when proving `for<'a> AsyncFn<&'a mut C, Result<R, ()>>` for a closure whose `FnMut` output is a local opaque type alias; associated type projection for `Self::Fut` may recurse through the closure type incorrectly in the inline case."
+      ],
+      "evidence": [
+        "The code in `works` and `doesnt_work_but_should` is intentionally equivalent except for introducing a local `callback` binding first; only the inline form fails.",
+        "The diagnostic is E0644 ('closure/generator type that references itself'), but the closure does not syntactically capture or take itself; this indicates a compiler-internal mistaken cycle rather than a genuine program cycle.",
+        "The failing expression is exactly the inline closure passed to `call(ctx, for<'a, 'b> |...| -> Ret<'a, 'b> { ... })`, pointing to argument-position closure handling.",
+        "The accepted path also uses the same local opaque alias `Ret<'a, 'b> = impl Future + 'a + Cap<'b>` and same async body, so `type_alias_impl_trait` alone is not the sole issue; the bug depends on the inline closure path.",
+        "The reproducer stresses HRTBs (`for<'a>` in `call`, `for<'a, 'b>` on the closure), mutable reference nesting (`&'a mut &'b mut usize`), and async future generation, all of which are common sources of binder/normalization bugs in rustc.",
+        "`Cap<'b>` is included specifically to force the opaque type to depend on both lifetimes, making this likely a lifetime binder instantiation/normalization bug rather than a simple async closure issue.",
+        "Compiler output reports a cyclic type of infinite size at the closure literal span, matching a false-positive self-reference introduced while constructing or checking the closure/generator type in that context."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1553,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/callee.rs",
+        "reason": "The bug appears only when the higher-ranked closure is passed inline as a call argument, while the same closure works when first bound to a local. That strongly points to call-expression handling, expectation propagation, and argument-position closure typing. This file is responsible for resolving calls and setting up deferred/overloaded closure call checking, making it the most likely place where inline closure expectation differs from the named-closure path and triggers the bogus self-referential E0644 cycle."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "The reproducer centers on a `for<'a, 'b>` closure with explicit lifetime binders, an async body, and an opaque `impl Future` return alias. Closure signature construction, binder handling, and deriving the internal closure/coroutine signature all live here. A mismatch between bound signature creation for inline closures versus separately bound closures could easily produce the false 'closure/generator type that references itself' error."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "Expression type checking coordinates expectation-driven inference, coercions, and checking of closure expressions in context. Since the only semantic difference is inline expression position versus local binding, this file is highly suspicious as the place where the closure literal receives a different expected type or coercion path, leading to incorrect inference or cycle formation."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "The failing case uses explicit closure lifetime binders and HRTBs on both the closure and the callee trait bound. A bug in higher-ranked instantiation with placeholders/fresh vars could mis-handle the `for<'a, 'b>` closure signature or returned opaque future type in the inline case, causing an artificial recursive relation and the spurious E0644 diagnostic."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The closure returns a local `type_alias_impl_trait` future depending on multiple lifetimes, and the callee requires proving an `AsyncFn` bound that projects through `FnMut` output. Normalization of type-like values containing binders and opaque/projection structure is central here; an inline-only normalization bug could explain why relating the closure to `AsyncFn` goes recursive only in argument position."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "`AsyncFn` uses an associated type `Fut`, and the failing path likely involves projecting/normalizing that associated type while matching the closure against `FnMut`/`AsyncFn` under higher-ranked binders. A projection recursion or bad obligation setup in this file could manifest exactly as a false self-referential closure/generator cycle."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/sub.rs",
+        "reason": "Subtyping/equality relations are exercised heavily when comparing the inline closure's higher-ranked signature and opaque future return type against the expected `for<'a> AsyncFn<&'a mut C, ...>` bound. If the inline path creates a malformed subtype relation among binders or closure output, this relation engine is a plausible source of the bogus cycle."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "The reproducer crucially uses a function-local `type Ret<'a, 'b> = impl Future + 'a + Cap<'b>`, and `Cap<'b>` forces capture of both lifetimes. If remapping or capturing generic arguments for opaque types is mishandled under the inline closure path, the hidden type could be tied back to the closure in an invalid recursive way."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+        "reason": "Because the reproducer depends on explicit closure lifetime binders (`for<'a, 'b>`) and their interaction with nested async/opaque types, an error in lifetime classification or binder recording for closure expressions could affect only the more direct inline form. This is less likely than typeck, but still relevant to late-bound lifetime handling."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/region_constraints/leak_check.rs",
+        "reason": "The issue may involve incorrect placeholder-region relationships for higher-ranked lifetimes captured through the opaque future alias. While the observed error is not a leak-check diagnostic, a bad leak/placeholder interaction can cause inference to reject or distort the higher-ranked relation and potentially contribute to the spurious self-referential cycle in this edge case."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 158.845,
+    "stage_times_sec": {
+      "checkout": 1.063,
+      "load_bug_context": 0.272,
+      "test_behavior_analysis": 6.539,
+      "test_failure_analysis": 16.049,
+      "load_file_candidates": 0.077,
+      "search_suspicious_files": 134.845
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 366027,
+      "output_tokens": 6952,
+      "total_tokens": 372979,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.539,
+          "input_tokens": 804,
+          "output_tokens": 348,
+          "total_tokens": 1152
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 16.049,
+          "input_tokens": 1570,
+          "output_tokens": 899,
+          "total_tokens": 2469
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.546,
+          "input_tokens": 27210,
+          "output_tokens": 419,
+          "total_tokens": 27629
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 11.759,
+          "input_tokens": 27153,
+          "output_tokens": 315,
+          "total_tokens": 27468
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.735,
+          "input_tokens": 27038,
+          "output_tokens": 350,
+          "total_tokens": 27388
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.475,
+          "input_tokens": 27275,
+          "output_tokens": 435,
+          "total_tokens": 27710
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.064,
+          "input_tokens": 27312,
+          "output_tokens": 350,
+          "total_tokens": 27662
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.71,
+          "input_tokens": 27465,
+          "output_tokens": 333,
+          "total_tokens": 27798
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.859,
+          "input_tokens": 27346,
+          "output_tokens": 412,
+          "total_tokens": 27758
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.512,
+          "input_tokens": 27269,
+          "output_tokens": 342,
+          "total_tokens": 27611
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.154,
+          "input_tokens": 27411,
+          "output_tokens": 387,
+          "total_tokens": 27798
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.939,
+          "input_tokens": 25939,
+          "output_tokens": 419,
+          "total_tokens": 26358
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.171,
+          "input_tokens": 27475,
+          "output_tokens": 331,
+          "total_tokens": 27806
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.269,
+          "input_tokens": 27508,
+          "output_tokens": 308,
+          "total_tokens": 27816
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.591,
+          "input_tokens": 25596,
+          "output_tokens": 358,
+          "total_tokens": 25954
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 18.036,
+          "input_tokens": 11656,
+          "output_tokens": 946,
+          "total_tokens": 12602
+        }
+      ]
+    }
+  }
+}

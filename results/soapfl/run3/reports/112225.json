@@ -1,0 +1,245 @@
+{
+  "bug_id": "112225",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-06-02",
+    "resolved": "d59363ad0b6391b7fc5bbb02c9ccf9300eef3753"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_hir_typeck/src/callee.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/checks.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_infer/src/infer/mod.rs",
+    "compiler/rustc_infer/src/infer/type_variable.rs",
+    "compiler/rustc_infer/src/infer/fudge.rs",
+    "compiler/rustc_trait_selection/src/traits/engine.rs",
+    "compiler/rustc_trait_selection/src/traits/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Calls a generic function with an async block producing a one-element tuple `(0,)` as the future output type `R`.",
+        "Uses an `async` block expression, exercising anonymous future generation and `Future<Output = R>` trait-based type inference.",
+        "Passes a closure in a separate block, forcing parsing/type checking of a block expression whose final value is a closure.",
+        "The closure parameter `info` is inferred from the async future output, so `info` becomes `(i32,)` via cross-argument generic inference.",
+        "Uses tuple field access `info.0`, exercising tuple projection on an inferred closure parameter type.",
+        "`do_async` is fully generic over both the future type and closure type, testing inference without explicit type annotations.",
+        "The function body ignores both parameters, so the compiler must validate argument compatibility purely from signatures and expression typing.",
+        "The comment notes the closure must be inside a block, indicating the reproducer targets a compiler behavior sensitive to block-wrapped closure expressions."
+      ],
+      "summary": "The reproducer checks whether rustc correctly type-infers and validates a block-wrapped closure passed alongside an async block to a generic function. It exercises async block lowering to an anonymous `Future`, generic argument inference linking `Future::Output` to a `FnOnce` closure parameter, tuple field access on an inferred type, and parsing/type checking differences caused by wrapping the closure in a block."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a type inference gap when a generic function call must relate two arguments through a shared type parameter `R`: the first argument is an `async` block whose future output is `(i32,)`, and the second is a closure whose parameter should therefore be inferred as `(i32,)`. The closure body uses tuple-field projection `info.0`, which should be valid once `info` is inferred from `FnOnce(R)`. The error only appears when the closure is wrapped in a block expression, suggesting inference/type-checking differs for block-wrapped closures versus direct closures. Since `do_async`'s body is irrelevant, the bug is likely in compiler handling of argument type propagation, closure expectation assignment, or block expression type checking during call-site inference, especially in the presence of async-generated anonymous future types.",
+      "possible_causes": [
+        "A defect in call argument type inference where the shared generic type parameter `R` is inferred from the `async` argument (`Future<Output = R>`) but is not propagated correctly to the closure argument expected as `F: FnOnce(R)`.",
+        "A bug in closure expectation handling for block-wrapped closures, where a block expression whose tail expression is a closure fails to pass the expected `FnOnce(R)` signature into closure parameter inference.",
+        "An issue in type checking order/constraint solving for generic calls involving async blocks and closures, causing the closure parameter type to be checked before constraints from the async future output are incorporated.",
+        "A defect in tuple field projection type checking on closure parameters with deferred inference variables, producing E0282 instead of allowing later unification from the expected `FnOnce(R)` input type.",
+        "A compiler bug in HIR/typeck treatment of block tail expressions containing closures, making them lose contextual typing that a directly passed closure would receive.",
+        "A regression in async block lowering or opaque future output constraint generation, where `Future::Output = (i32,)` is not emitted strongly enough for downstream closure argument inference in the same call."
+      ],
+      "evidence": [
+        "The generic function signature explicitly links both arguments through the same type parameter: `Fut: Future<Output = R>` and `F: FnOnce(R)`.",
+        "The `async { (0,) }` expression provides concrete evidence that `R` should be `(i32,)`.",
+        "The closure body accesses `info.0`, which is only meaningful if `info` is inferred as a tuple; this matches the async output `(0,)`.",
+        "The compiler emits E0282 on the closure parameter `info`, showing contextual type information did not reach closure parameter inference.",
+        "The reproducer states the closure must be inside a block, strongly indicating the bug is sensitive to block-wrapped closure expressions rather than the reproducer logic itself.",
+        "`do_async` has an empty body, so the error must arise entirely from front-end type inference/type checking of the call site, not from code generation or runtime behavior.",
+        "The test behavior explicitly targets cross-argument generic inference between an async future output and a closure parameter, narrowing suspicion to compiler inference/typeck logic."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1628,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "Most suspicious because the bug is triggered specifically by wrapping the closure in a block expression. This file handles expression checking for both block expressions and tail expressions, and is a likely place where expected-type/context propagation into a block tail closure is lost."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "Closure parameter inference should use the contextual expectation from `F: FnOnce(R)`, where `R` is inferred from the async future output. Since E0282 is reported on the closure parameter, closure expectation/signature deduction is a prime suspect."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/callee.rs",
+        "reason": "The failure occurs at a generic function call where one argument (`async { (0,) }`) should constrain the shared type parameter `R` used to type the closure argument. Call checking and propagation of argument expectations across a call are handled here, making it highly relevant."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/checks.rs",
+        "reason": "Late function-body-local checks include deferred call argument validation and matching expected vs provided arguments. If inference/order of deferred checks causes the closure to be checked before `R` is known, the bug could live here."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "If obligations linking `Future<Output = R>` and `FnOnce(R)` are not being fulfilled at the right time, contextual information may not reach closure inference. This is less direct than HIR typeck, but still plausible for an inference-order bug involving async and call constraints."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/mod.rs",
+        "reason": "The reproducer looks like an inference-context propagation problem across expressions in one call. Core inference plumbing may mishandle unresolved vars or snapshots involved in expectation-driven checking."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/type_variable.rs",
+        "reason": "The emitted E0282 suggests a type variable for the closure parameter remains unconstrained when tuple field access is checked. A bug in type-variable creation/unification/state tracking could explain the missed propagation."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/fudge.rs",
+        "reason": "Expectation-driven expression checking in rustc often uses speculative snapshots and 'fudging' to preserve inferred structure. Because the issue is sensitive to block-wrapped closure expressions, snapshot-related loss of contextual typing is a plausible mechanism."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/engine.rs",
+        "reason": "Cross-argument inference here depends on obligations generated from both the future bound and the closure bound being accumulated and solved coherently. If the obligation engine sequencing is wrong, it could manifest exactly as missing closure context."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/mod.rs",
+        "reason": "Less direct, but still in scope for subtype/equality obligation handling shared by type checking. If the shared generic `R` relation is not enforced strongly enough, the closure parameter may remain unknown."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 160.434,
+    "stage_times_sec": {
+      "checkout": 3.225,
+      "load_bug_context": 0.076,
+      "test_behavior_analysis": 6.889,
+      "test_failure_analysis": 13.183,
+      "load_file_candidates": 0.1,
+      "search_suspicious_files": 136.961
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 372150,
+      "output_tokens": 6256,
+      "total_tokens": 378406,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.889,
+          "input_tokens": 428,
+          "output_tokens": 290,
+          "total_tokens": 718
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.183,
+          "input_tokens": 1083,
+          "output_tokens": 631,
+          "total_tokens": 1714
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.043,
+          "input_tokens": 26464,
+          "output_tokens": 295,
+          "total_tokens": 26759
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.495,
+          "input_tokens": 26510,
+          "output_tokens": 344,
+          "total_tokens": 26854
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 11.118,
+          "input_tokens": 26134,
+          "output_tokens": 424,
+          "total_tokens": 26558
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.008,
+          "input_tokens": 26389,
+          "output_tokens": 370,
+          "total_tokens": 26759
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.028,
+          "input_tokens": 26352,
+          "output_tokens": 299,
+          "total_tokens": 26651
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.893,
+          "input_tokens": 26778,
+          "output_tokens": 334,
+          "total_tokens": 27112
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.477,
+          "input_tokens": 26594,
+          "output_tokens": 359,
+          "total_tokens": 26953
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.213,
+          "input_tokens": 26604,
+          "output_tokens": 368,
+          "total_tokens": 26972
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.109,
+          "input_tokens": 26582,
+          "output_tokens": 337,
+          "total_tokens": 26919
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.641,
+          "input_tokens": 26357,
+          "output_tokens": 303,
+          "total_tokens": 26660
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.431,
+          "input_tokens": 26684,
+          "output_tokens": 270,
+          "total_tokens": 26954
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.44,
+          "input_tokens": 26673,
+          "output_tokens": 340,
+          "total_tokens": 27013
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.932,
+          "input_tokens": 26742,
+          "output_tokens": 321,
+          "total_tokens": 27063
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.838,
+          "input_tokens": 15852,
+          "output_tokens": 328,
+          "total_tokens": 16180
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.268,
+          "input_tokens": 9924,
+          "output_tokens": 643,
+          "total_tokens": 10567
+        }
+      ]
+    }
+  }
+}

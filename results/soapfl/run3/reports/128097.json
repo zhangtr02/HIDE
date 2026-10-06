@@ -1,0 +1,257 @@
+{
+  "bug_id": "128097",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-07-22",
+    "resolved": "92c6c03805408a1a261b98013304e9bbf59ee428"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_borrowck/src/type_check/liveness/mod.rs",
+    "compiler/rustc_mir_build/src/build/scope.rs",
+    "compiler/rustc_mir_build/src/build/matches/mod.rs",
+    "compiler/rustc_middle/src/mir/syntax.rs",
+    "compiler/rustc_mir_build/src/build/expr/into.rs",
+    "compiler/rustc_borrowck/src/lib.rs",
+    "compiler/rustc_middle/src/mir/mod.rs",
+    "compiler/rustc_mir_transform/src/validate.rs",
+    "compiler/rustc_mir_transform/src/mentioned_items.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `explicit_tail_calls` via `#![feature(explicit_tail_calls)]`, exercising unstable parsing, feature gating, and code generation for `become`.",
+        "Defines `cut(x: &mut ())`, using a mutable reference parameter to test tail-call handling with borrowed arguments across recursive replacement.",
+        "Creates `Some(Box::new(()))`, forcing heap allocation and drop glue generation before the tail call site.",
+        "Matches `if let Some(_) = ...`, destructuring an always-`Some` value so the branch is always taken after pattern matching.",
+        "Uses `_` in the pattern, discarding the boxed value and triggering destruction semantics before or around the tail call.",
+        "Executes `become cut(x);`, requesting a proper tail call instead of normal recursion, exercising MIR/LLVM tail-call lowering.",
+        "Recursively tail-calls itself forever, so runtime behavior would be non-terminating if compilation succeeds.",
+        "Combines allocation, pattern matching, drops, borrowing, and explicit tail recursion in one minimal case, stressing compiler correctness around tail-position cleanup."
+      ],
+      "summary": "This reproducer is a minimal nightly test for explicit tail calls. It always allocates a boxed unit, matches an always-successful `Option`, discards the box, and then tail-calls the same function with `become`. The code stresses compiler handling of tail-position recursion when cleanup/drop logic and a live mutable reference argument are present."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during MIR borrow checking rather than parsing or code generation. The reproducer combines the unstable `explicit_tail_calls` feature (`become`) with a tail call that occurs after an `if let` scrutinee producing a temporary `Some(Box::new(()))`. This means the compiler must reason about temporaries, destruction of the boxed value, cleanup scopes, and the liveness of the borrowed argument `x: &mut ()` at a tail-call terminator. The common pattern is: explicit tail call + drop of a temporary created in the same expression/branch + borrowed argument reused across the tail call. Since the query stack ends at `mir_borrowck` for `cut`, the likely defect is in MIR construction or borrow-check handling of `TailCall`/`become` when locals/temporaries with drop glue are cleaned up before the tail call. In particular, the compiler may be incorrectly modeling region/liveness, move/drop order, or unwind/cleanup edges for temporaries in a tail position, causing an internal inconsistency during borrow checking.",
+      "possible_causes": [
+        "Bug in MIR borrow checker support for `explicit_tail_calls`, especially handling a `become` terminator while a borrowed argument remains live and is forwarded into the tail call.",
+        "Incorrect MIR lowering of `if let Some(_) = Some(Box::new(()))` around `become`, where the temporary `Box<()>` and its drop scope are represented inconsistently for borrow checking.",
+        "Defect in drop elaboration / cleanup scope construction for temporaries with destructors before a tail call, leading borrowck to see invalid or unexpected liveness/CFG state.",
+        "Incorrect treatment of tail-call destinations as ordinary call sites or returns in borrowck, causing reuse of `x: &mut ()` across cleanup to violate internal assumptions.",
+        "Mismatch between explicit tail-call MIR and pattern-match desugaring for always-taken branches, especially when discarded bindings (`_`) still require destruction of the matched temporary."
+      ],
+      "evidence": [
+        "Compiler output shows panic in query `mir_borrowck` for function `cut`, so the crash happens during borrow checking of MIR, not during frontend parsing or later LLVM lowering.",
+        "The reproducer specifically uses `#![feature(explicit_tail_calls)]` and `become cut(x);`, directly exercising unstable tail-call MIR handling.",
+        "`Some(Box::new(()))` introduces a temporary heap allocation with drop glue, and `if let Some(_) = ...` ensures destruction semantics are involved immediately before the tail call.",
+        "The function parameter is `&mut ()`, so borrowck must track a live mutable borrow passed through the tail call while surrounding temporaries are cleaned up.",
+        "The branch is always taken, making this a minimal case where only pattern-match temporary/drop handling plus tail call is needed to trigger the ICE.",
+        "Behavior summary explicitly stresses allocation, pattern matching, drops, borrowing, and explicit tail recursion together, matching the likely area of compiler defect."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1818,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "The ICE occurs in the `mir_borrowck` query, and this module is where MIR type/terminator checking and region/liveness constraint generation happen. `become`/tail-call MIR is still unstable and likely needs special handling here; a mismatch in how a `TailCall` terminator with live borrows and pending temporary drops is validated could trigger an internal bug."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/liveness/mod.rs",
+        "reason": "The reproducer stresses liveness around a tail call after pattern-matching a temporary `Some(Box::new(()))`. This module computes which locals/regions are live at CFG points, and tail-call semantics plus cleanup of a dropped temporary before forwarding `x: &mut ()` is exactly the sort of case that could produce inconsistent liveness assumptions and crash borrowck."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/scope.rs",
+        "reason": "A likely root cause is incorrect MIR cleanup/drop-scope construction before `become`. This file manages lexical scopes and schedules drops on exits, so if explicit tail calls are modeled as a special exit but temporary destruction for the `if let` scrutinee is emitted incorrectly, borrowck would later ICE on malformed MIR/control-flow/liveness state."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/mod.rs",
+        "reason": "The trigger includes `if let Some(_) = Some(Box::new(()))`, which is lowered through match/let-pattern machinery. If this lowering creates an unusual temporary scope, branch structure, or drop order around the always-taken branch containing `become`, borrow checking could fail specifically on this pattern-matching form."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/syntax.rs",
+        "reason": "Explicit tail calls require MIR syntax support for a dedicated tail-call/become terminator. If the MIR representation or invariants for this terminator are incomplete or inconsistent with borrowck expectations, downstream `mir_borrowck` could panic when analyzing this function."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/into.rs",
+        "reason": "This is central expression lowering into MIR destinations and may participate in lowering the branch body containing `become cut(x)`. If tail-position expression lowering is wrong when combined with temporaries and control flow from `if let`, borrowck may receive structurally inconsistent MIR."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/lib.rs",
+        "reason": "This is the entry point of the `mir_borrowck` query. While less likely than the deeper analysis modules, any new special-case handling (or missing handling) for bodies containing tail-call terminators may live here and cause the query to panic instead of gracefully reporting an error."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/mod.rs",
+        "reason": "As the central MIR surface and re-export hub, this file is a plausible location if `TailCall` support or MIR phase invariants are incompletely integrated. Borrowck crashing on a new terminator kind often traces back to shared MIR definitions or helper APIs used across analyses."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/validate.rs",
+        "reason": "Although the observed panic is in borrowck, a missing MIR validation invariant for explicit tail calls plus drops could allow malformed analysis MIR to reach borrowck. This file is relevant because it enforces MIR dialect/terminator correctness and may be missing checks for this unstable feature combination."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/mentioned_items.rs",
+        "reason": "This file explicitly mentions handling `Call`/`TailCall` terminators. It is less directly tied to borrowck, but its existence is evidence that tail-call support was recently threaded through MIR consumers; borrowck may similarly be missing analogous handling, making nearby tail-call integration points suspicious."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 181.643,
+    "stage_times_sec": {
+      "checkout": 7.041,
+      "load_bug_context": 0.115,
+      "test_behavior_analysis": 6.21,
+      "test_failure_analysis": 10.898,
+      "load_file_candidates": 19.115,
+      "search_suspicious_files": 138.264
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 435059,
+      "output_tokens": 7334,
+      "total_tokens": 442393,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.209,
+          "input_tokens": 334,
+          "output_tokens": 295,
+          "total_tokens": 629
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.898,
+          "input_tokens": 2102,
+          "output_tokens": 609,
+          "total_tokens": 2711
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.26,
+          "input_tokens": 27689,
+          "output_tokens": 379,
+          "total_tokens": 28068
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.367,
+          "input_tokens": 27614,
+          "output_tokens": 412,
+          "total_tokens": 28026
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.494,
+          "input_tokens": 27151,
+          "output_tokens": 325,
+          "total_tokens": 27476
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.707,
+          "input_tokens": 27481,
+          "output_tokens": 381,
+          "total_tokens": 27862
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.06,
+          "input_tokens": 27428,
+          "output_tokens": 393,
+          "total_tokens": 27821
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.203,
+          "input_tokens": 27735,
+          "output_tokens": 349,
+          "total_tokens": 28084
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.502,
+          "input_tokens": 27500,
+          "output_tokens": 339,
+          "total_tokens": 27839
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.994,
+          "input_tokens": 27546,
+          "output_tokens": 341,
+          "total_tokens": 27887
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.619,
+          "input_tokens": 27610,
+          "output_tokens": 359,
+          "total_tokens": 27969
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.017,
+          "input_tokens": 27634,
+          "output_tokens": 399,
+          "total_tokens": 28033
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.645,
+          "input_tokens": 27357,
+          "output_tokens": 298,
+          "total_tokens": 27655
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.82,
+          "input_tokens": 27683,
+          "output_tokens": 336,
+          "total_tokens": 28019
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.915,
+          "input_tokens": 27763,
+          "output_tokens": 315,
+          "total_tokens": 28078
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.392,
+          "input_tokens": 27766,
+          "output_tokens": 308,
+          "total_tokens": 28074
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.67,
+          "input_tokens": 27625,
+          "output_tokens": 358,
+          "total_tokens": 27983
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 6.703,
+          "input_tokens": 6494,
+          "output_tokens": 334,
+          "total_tokens": 6828
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.866,
+          "input_tokens": 12547,
+          "output_tokens": 804,
+          "total_tokens": 13351
+        }
+      ]
+    }
+  }
+}

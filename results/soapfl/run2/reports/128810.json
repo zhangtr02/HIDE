@@ -1,0 +1,257 @@
+{
+  "bug_id": "128810",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-08-06",
+    "resolved": "e57f3090aec33cdbf66063c866afaa5e1e78b9bb"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/delegation.rs",
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+    "compiler/rustc_ast_lowering/src/delegation.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_middle/src/query/mod.rs",
+    "compiler/rustc_ast_lowering/src/item.rs",
+    "compiler/rustc_const_eval/src/const_eval/fn_queries.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `fn_delegation`, exercising unstable delegated trait method implementation syntax via `reuse` in an `impl` block.",
+        "Defines `InvariantRef<'a, T>` with `PhantomData<&'a mut &'a T>` to force invariance over `'a`, stressing variance and lifetime reasoning.",
+        "Creates associated const `InvariantRef::NEW` for `InvariantRef<'a, ()>`, using `InvariantRef::new(&())` and const evaluation of a lifetime-parameterized value.",
+        "Declares trait `Trait` with default method `foo`, so delegation targets a provided trait method rather than a concrete inherent method.",
+        "Implements `Trait` for `Z` by delegating `foo` with `reuse <u8 as Trait>::{foo}`, testing cross-type trait-method reuse syntax.",
+        "Supplies receiver adaptation `{ &const { InvariantRef::<'a>::NEW } }`, exercising const blocks, reference formation, and lifetime instantiation inside delegation.",
+        "Uses an undeclared lifetime `'a` inside the delegated receiver expression, probing compiler name resolution and lifetime binding in delegation lowering.",
+        "The target `<u8 as Trait>::foo` lacks a visible `Trait` impl for `u8`, testing trait selection/obligation handling during delegated method compilation."
+      ],
+      "summary": "The reproducer targets nightly function delegation. It combines delegated trait-method reuse, a const-block receiver expression, and an invariant lifetime-carrying wrapper type. The key stress points are delegation lowering, lifetime/name resolution for `'a` inside the generated receiver, const evaluation of an associated const, and trait obligation checking for `<u8 as Trait>::foo`."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a compiler ICE in the new `fn_delegation` pipeline, specifically during signature inheritance for a delegated item rather than normal user-facing error reporting. The reproducer combines several invalid or hard-to-resolve ingredients—delegation to `<u8 as Trait>::foo` without a corresponding impl, and a receiver adaptation expression containing an undeclared lifetime `'a` inside a const block—but instead of stopping after emitting ordinary diagnostics (E0261/E0599), rustc panics in query `inherit_sig_for_delegation_item` while type-checking the generated delegated method. The common thread is that delegation signature/lowering code appears to assume a successfully resolved callee signature and well-formed generic/lifetime environment. When the delegated receiver expression introduces an unbound late/early lifetime and the delegated target also fails trait resolution, the compiler likely propagates an error type or incomplete generics into delegation signature synthesis, hitting an unchecked `unwrap`/`expect`/bug assertion or otherwise violating an internal invariant.",
+      "possible_causes": [
+        "A defect in `fn_delegation` signature inheritance (`inherit_sig_for_delegation_item`) where it does not gracefully handle prior resolution/type errors in the delegated target or receiver adaptation expression, and panics instead of returning an error-tainted signature.",
+        "Delegation lowering may be incorrectly computing or inheriting generic parameters/lifetime binders for the generated method, especially when the adaptation expression mentions an undeclared lifetime `'a`; this suggests missing validation or incorrect binder plumbing for lifetimes referenced from delegation receiver expressions.",
+        "Trait selection failure for the delegated path `<u8 as Trait>::foo` may not be checked before delegation signature extraction, causing the compiler to assume an impl/callee exists and dereference missing method/assoc-item information.",
+        "The delegation code likely mishandles error types (`TyKind::Error`, unresolved regions, or dummy substitutions) produced by name resolution/type checking of const-block receiver expressions, leading to an ICE when variance/lifetime-sensitive types like `InvariantRef<'a, T>` are involved.",
+        "There may be a bug in combining const-block receiver adaptation with delegation: the compiler may lower/typeck the const expression in the wrong generic context, so undeclared lifetimes are not rejected early enough before signature inheritance attempts to use the expression's type."
+      ],
+      "evidence": [
+        "The query stack explicitly shows the panic in `inherit_sig_for_delegation_item` during type-checking of the delegated impl method `foo`, directly implicating delegation-specific compiler code.",
+        "Compiler output already includes ordinary diagnostics (E0261 and E0599), meaning the program is invalid but rustc should recover; panicking afterward indicates defective error recovery in compiler production code, not a reproducer issue.",
+        "The reproducer uses unstable `fn_delegation` syntax `reuse <u8 as Trait>::{foo}`, so the crash is exercised in new delegation-specific lowering/signature code paths.",
+        "The receiver adaptation expression references undeclared lifetime `'a` inside `{ &const { InvariantRef::<'a>::NEW } }`, stressing lifetime binder propagation/name resolution within delegation-generated code.",
+        "The delegated target `<u8 as Trait>::foo` has no visible `Trait` impl for `u8`, stressing trait-resolution failure handling during delegation target lookup.",
+        "The type `InvariantRef<'a, T>` is intentionally invariant in `'a` via `PhantomData<&'a mut &'a T>`, making lifetime substitution mistakes more likely to surface in signature construction or type normalization."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1830,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/delegation.rs",
+        "reason": "Most directly implicated by the query stack: the panic occurs in `inherit_sig_for_delegation_item`, and this file implements delegation signature/generics inheritance. The reproducer stresses exactly this code path with invalid delegation target resolution plus an undeclared lifetime in the receiver adaptation, suggesting missing error recovery or binder/generic remapping bugs here."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "This file is the collection entry point that forwards delegation signatures to `inherit_generics_for_delegation_item`. If the ICE arises while computing inherited generics/signature context for a delegated item under prior errors, this is a likely coordination point where erroneous inputs are insufficiently screened before calling delegation-specific logic."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/delegation.rs",
+        "reason": "Delegation lowering synthesizes placeholder HIR signatures and defers exact type/generic reconstruction via special delegation markers. A bug here could leave malformed HIR, missing lifetime binders, or bad signature identifiers that later make `inherit_sig_for_delegation_item` panic when the receiver adaptation mentions undeclared `'a` and the target method lookup already failed."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "The reproducer uses an undeclared lifetime `'a` inside a const-block receiver expression in a delegation item. If delegation-generated HIR is being analyzed in the wrong binder context, this bound-var resolution code may misclassify or fail to mark the lifetime use as erroneous, feeding inconsistent region data into delegation signature inheritance."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+        "reason": "Delegation lowering likely needs to discover free lifetime uses from synthesized receiver/adaptation syntax. Since the crash involves an undeclared lifetime inside a nested const block, incorrect lifetime collection during lowering could cause missing or wrong inferred generics, later surfacing as an ICE in inherited delegation signatures."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The invalid `'a` and unresolved `<u8 as Trait>::foo` both involve late resolution. Although rustc emits E0261/E0599, the ICE suggests recovery data from resolution may be incomplete or inconsistently propagated into delegation analysis. This file is a plausible source of delegation-specific name/lifetime resolution gaps."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "The receiver adaptation contains a const block and reference formation, both lowered here. If expression lowering for delegation adaptation fails to preserve the proper generic/lifetime environment across nested const blocks, later delegation signature/type reconstruction could observe malformed or error-tainted expression types and panic."
+      },
+      {
+        "path": "compiler/rustc_middle/src/query/mod.rs",
+        "reason": "The panicing query `inherit_sig_for_delegation_item` is declared through the query system, so this file is a weaker but possible suspect if the query definition/plumbing for delegation signatures has incorrect assumptions about dependencies or error handling. Less likely than the delegation-specific implementation files."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/fn_queries.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 153.962,
+    "stage_times_sec": {
+      "checkout": 0.95,
+      "load_bug_context": 0.061,
+      "test_behavior_analysis": 5.907,
+      "test_failure_analysis": 11.442,
+      "load_file_candidates": 0.123,
+      "search_suspicious_files": 135.477
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 442982,
+      "output_tokens": 7324,
+      "total_tokens": 450306,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.907,
+          "input_tokens": 445,
+          "output_tokens": 343,
+          "total_tokens": 788
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.442,
+          "input_tokens": 2298,
+          "output_tokens": 716,
+          "total_tokens": 3014
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.211,
+          "input_tokens": 27993,
+          "output_tokens": 438,
+          "total_tokens": 28431
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.307,
+          "input_tokens": 27918,
+          "output_tokens": 324,
+          "total_tokens": 28242
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.029,
+          "input_tokens": 27455,
+          "output_tokens": 340,
+          "total_tokens": 27795
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.609,
+          "input_tokens": 27785,
+          "output_tokens": 387,
+          "total_tokens": 28172
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.459,
+          "input_tokens": 27732,
+          "output_tokens": 327,
+          "total_tokens": 28059
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.3,
+          "input_tokens": 28043,
+          "output_tokens": 324,
+          "total_tokens": 28367
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.387,
+          "input_tokens": 27846,
+          "output_tokens": 326,
+          "total_tokens": 28172
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.082,
+          "input_tokens": 27865,
+          "output_tokens": 396,
+          "total_tokens": 28261
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.82,
+          "input_tokens": 27938,
+          "output_tokens": 395,
+          "total_tokens": 28333
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.072,
+          "input_tokens": 27786,
+          "output_tokens": 360,
+          "total_tokens": 28146
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.235,
+          "input_tokens": 27871,
+          "output_tokens": 334,
+          "total_tokens": 28205
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.993,
+          "input_tokens": 27935,
+          "output_tokens": 340,
+          "total_tokens": 28275
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.073,
+          "input_tokens": 28107,
+          "output_tokens": 300,
+          "total_tokens": 28407
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.176,
+          "input_tokens": 28006,
+          "output_tokens": 364,
+          "total_tokens": 28370
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.473,
+          "input_tokens": 27900,
+          "output_tokens": 348,
+          "total_tokens": 28248
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 7.172,
+          "input_tokens": 9329,
+          "output_tokens": 313,
+          "total_tokens": 9642
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.043,
+          "input_tokens": 12730,
+          "output_tokens": 649,
+          "total_tokens": 13379
+        }
+      ]
+    }
+  }
+}

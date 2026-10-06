@@ -1,0 +1,246 @@
+{
+  "bug_id": "113619",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-06-11",
+    "resolved": "7820972f866ca2cea281ccc39201c0cd27087110"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_hir_typeck/src/writeback.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/at.rs",
+    "compiler/rustc_middle/src/error.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_borrowck/src/region_infer/mod.rs",
+    "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `type_alias_impl_trait`, defining `type TestImpl = impl Test` as an opaque return type implementing `Test`.",
+        "Declares trait `Test`, concrete type `A`, and generic wrapper `B<T>`; both `A` and `B<T>` implement `Test` when `T: Test`.",
+        "Function `test()` fixes the hidden concrete type behind `TestImpl` by returning `A`, establishing the opaque alias’s inferred underlying type.",
+        "`make_option()` returns `Option<TestImpl>` via `Some(test())`, exercising opaque type propagation through a standard library generic container.",
+        "`make_option2()` unwraps `Option<TestImpl>`, binding `inner` as the opaque type rather than exposing its hidden concrete type directly.",
+        "`B { inner }.into()` attempts to produce `Option<TestImpl>` from `B<TestImpl>`, relying on `Option`’s `From<T> for Option<T>` conversion.",
+        "This conversion forces the compiler to compare the established hidden type of `TestImpl` with a different candidate, effectively `B<hidden_type>`, stressing opaque type identity checking.",
+        "The reproducer targets compiler behavior around TAIT inference across function boundaries, nested generics, trait bounds, and mismatched hidden-type diagnostics or ICE handling."
+      ],
+      "summary": "The reproducer uses nightly type-alias `impl Trait` to create an opaque `TestImpl` whose hidden type is set by `test()` to `A`. It then threads that opaque type through `Option`, unwraps it, wraps it in `B`, and converts it back into `Option<TestImpl>`. This makes rustc reconcile `TestImpl`’s established hidden type with a distinct wrapper type, exercising TAIT hidden-type inference, identity consistency, generic container propagation, and error/ICE handling for mismatched opaque types."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is a type-alias `impl Trait` (TAIT) whose hidden type is first fixed by one defining use (`test() -> A`) and later indirectly challenged by another use through generic wrapping and conversion (`B { inner }.into()` into `Option<TestImpl>`). All interesting operations preserve the opaque alias at the surface type level while changing the underlying candidate from `A` to `B<A>`. The reproducer specifically stresses rustc logic that tracks and equates opaque hidden types across function bodies, through generic ADTs (`Option`, `B<T>`), method-based conversion via `Into`/`From`, and trait-bound satisfaction (`B<T>: Test where T: Test`). The observed behavior is that the compiler succeeds with only warnings, even though `make_option2()` should require `Option<B<TestImpl>>`/`Option<B<A>>` to unify with `Option<TestImpl>`/`Option<A>`, which should be rejected as a mismatched hidden type for the TAIT. This strongly suggests a compiler bug where opaque type identity/hidden-type consistency checking is skipped, weakened, or incorrectly normalized when the TAIT is nested inside generic containers and reconstructed from an unwrapped opaque value.",
+      "possible_causes": [
+        "A defect in TAIT hidden-type consistency checking: rustc may fail to enforce that all defining/constraining uses of `TestImpl` resolve to the same hidden concrete type, incorrectly accepting `B<A>` after `A` was already fixed.",
+        "A bug in opaque-type inference across generic containers such as `Option<T>`: the compiler may be propagating only the outer `Option<TestImpl>` shape and losing validation of the inner hidden type during unwrap/rewrap flows.",
+        "Incorrect normalization/equality handling for type alias `impl Trait` during `Into`/`From` method resolution, causing `B<TestImpl>.into()` to be accepted as `Option<TestImpl>` as if the opaque alias could be re-instantiated with a new hidden type.",
+        "A flaw in borrowck/typeck/writeback or opaque-type collection for function bodies, where constraints from `make_option2` are not registered as conflicting with the defining hidden type from `test`.",
+        "A bug in type relation/canonicalization involving opaque aliases under nested generic substitution, possibly treating `TestImpl` as if it were only constrained by the trait bound `Test` rather than by its unique hidden type identity.",
+        "An issue in diagnostics/error-reporting path for mismatched opaque types where rustc suppresses or misses the expected type mismatch instead of emitting an error."
+      ],
+      "evidence": [
+        "`type TestImpl = impl Test;` introduces a single opaque type whose hidden concrete type should be consistent everywhere.",
+        "`fn test() -> TestImpl { A }` establishes the hidden type of `TestImpl` as `A`.",
+        "`make_option()` returns `Option<TestImpl>` via `Some(test())`, which is consistent with hidden type `Option<A>`.",
+        "`make_option2()` unwraps `Option<TestImpl>` to get `inner` of opaque type `TestImpl`/hidden type `A`, then constructs `B { inner }`, whose concrete type is `B<A>`.",
+        "`B { inner }.into()` uses `From<T> for Option<T>`, so it naturally yields `Option<B<A>>`, not `Option<A>`.",
+        "The declared return type of `make_option2()` is `Option<TestImpl>`, i.e. `Option<A>` once the TAIT hidden type is fixed, so the program should be rejected for hidden-type mismatch.",
+        "Compiler output shows successful compilation with only dead-code warnings and return code 0, indicating rustc failed to report the expected mismatch.",
+        "The reproducer’s structure specifically targets TAIT inference across function boundaries, nested generics, and opaque type identity, matching the likely failure area in compiler production code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1632,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "Most suspicious because this reproducer is specifically about type-alias `impl Trait` hidden-type collection and consistency across defining uses. `test()` fixes the hidden type to `A`, while `make_option2()` appears to introduce a conflicting candidate `B<A>`. If rustc accepted the program, the TAIT constraint collector likely failed to treat `make_option2()` as a conflicting defining/constraining use or failed to compare the collected hidden types correctly."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "This file owns inference-time tracking and unification of opaque hidden types. The bug looks like rustc allowed an opaque alias already inferred as `A` to later flow through `Option`/`Into` and effectively be treated as compatible with `B<A>`. That points strongly at missing or incorrect hidden-type compatibility checks during opaque-type inference/unification."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/writeback.rs",
+        "reason": "Typeck writeback records resolved opaque-type information from body checking into final `TypeckResults`. A plausible failure mode is that constraints from `make_option2()` were never written back or were written back too weakly, so the later opaque-type consistency machinery only saw the original defining type from `test()` and missed the conflicting use."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "This code handles remapping generics and constructing `OpaqueTypeKey`s for opaque types. Since the bug is triggered by threading the TAIT through `Option<TestImpl>`, unwrap, and rewrap into `B<TestImpl>`, a bad remapping/substitution of opaque arguments or loss of identity under nested generics could explain why `Option<B<A>>` was not rejected against `Option<A>`."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/at.rs",
+        "reason": "`InferCtxt::at` exposes relation operations with the `DefineOpaqueTypes` policy. If the relation used for the return expression in `make_option2()` was run with an overly permissive opaque-definition mode, rustc may have allowed the TAIT to be redefined or matched opaquely instead of enforcing the previously fixed hidden type."
+      },
+      {
+        "path": "compiler/rustc_middle/src/error.rs",
+        "reason": "Less likely as root cause, but relevant because the expected behavior is an opaque hidden-type mismatch diagnostic. If the mismatch was detected but then suppressed or mishandled, this diagnostic definition path would be involved. Included mainly because the failure mode mentions missing mismatched-hidden-type reporting."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 152.427,
+    "stage_times_sec": {
+      "checkout": 1.69,
+      "load_bug_context": 0.067,
+      "test_behavior_analysis": 5.94,
+      "test_failure_analysis": 13.782,
+      "load_file_candidates": 0.081,
+      "search_suspicious_files": 130.867
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 382954,
+      "output_tokens": 6547,
+      "total_tokens": 389501,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.94,
+          "input_tokens": 453,
+          "output_tokens": 382,
+          "total_tokens": 835
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.782,
+          "input_tokens": 1337,
+          "output_tokens": 793,
+          "total_tokens": 2130
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.482,
+          "input_tokens": 26878,
+          "output_tokens": 341,
+          "total_tokens": 27219
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.621,
+          "input_tokens": 26924,
+          "output_tokens": 370,
+          "total_tokens": 27294
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 10.509,
+          "input_tokens": 26548,
+          "output_tokens": 358,
+          "total_tokens": 26906
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.715,
+          "input_tokens": 26803,
+          "output_tokens": 293,
+          "total_tokens": 27096
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.579,
+          "input_tokens": 26766,
+          "output_tokens": 365,
+          "total_tokens": 27131
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.05,
+          "input_tokens": 27192,
+          "output_tokens": 408,
+          "total_tokens": 27600
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.005,
+          "input_tokens": 27008,
+          "output_tokens": 368,
+          "total_tokens": 27376
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.108,
+          "input_tokens": 27018,
+          "output_tokens": 339,
+          "total_tokens": 27357
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.706,
+          "input_tokens": 26996,
+          "output_tokens": 337,
+          "total_tokens": 27333
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.894,
+          "input_tokens": 26771,
+          "output_tokens": 338,
+          "total_tokens": 27109
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.461,
+          "input_tokens": 27098,
+          "output_tokens": 287,
+          "total_tokens": 27385
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.293,
+          "input_tokens": 27083,
+          "output_tokens": 295,
+          "total_tokens": 27378
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.321,
+          "input_tokens": 27170,
+          "output_tokens": 352,
+          "total_tokens": 27522
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.264,
+          "input_tokens": 17104,
+          "output_tokens": 364,
+          "total_tokens": 17468
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.828,
+          "input_tokens": 13805,
+          "output_tokens": 557,
+          "total_tokens": 14362
+        }
+      ]
+    }
+  }
+}

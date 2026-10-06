@@ -1,0 +1,3815 @@
+{
+  "bug_id": "117802",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-08",
+    "resolved": "7adc89b69b941afceadcf8609dd6b2999353e550"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/build/mod.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_parse/src/parser/ty.rs",
+    "compiler/rustc_borrowck/src/type_check/input_output.rs",
+    "compiler/rustc_mir_build/src/thir/cx/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines an empty trait `T` used only as a bound on an anonymous function parameter type.",
+        "Declares `f` returning `impl Fn(impl T)`, combining opaque return types with anonymous `impl Trait` in a nested `Fn` signature.",
+        "Exercises return-position `impl Trait` for the closure type, requiring rustc to infer a concrete closure implementing `Fn`.",
+        "Uses argument-position `impl Trait` inside the `Fn` trait’s call signature, stressing support for higher-order opaque parameter types.",
+        "Creates a closure `|_| p` that ignores its input, so the `impl T` parameter is unconstrained except by the signature.",
+        "Captures local variable `p` by move/copy into the closure environment, testing closure capture analysis and inferred output type `()`.",
+        "Checks whether rustc correctly lowers and normalizes `impl Fn(impl T)` syntax in function return types on nightly.",
+        "`main` is empty, so the reproducer targets compilation/type-checking behavior rather than runtime execution."
+      ],
+      "summary": "This reproducer is a compile-time test for nightly rustc’s handling of nested `impl Trait` with closures. It combines an opaque returned closure type and an anonymous opaque parameter type inside `Fn`, while the closure ignores that parameter and captures a local `()`. The code mainly exercises parsing, lowering, type inference, closure trait implementation, and normalization of unusual higher-order function signatures."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on nested `impl Trait` interacting with closure lowering and MIR construction. The signature `fn f() -> impl Fn(impl T)` combines two opaque-like forms: return-position `impl Trait` for the function result and argument-position anonymous `impl Trait` inside the `Fn` trait’s call signature. The compiler does emit user-facing errors (E0562 and E0666), so the construct is recognized as invalid or unsupported, but it still continues far enough into later compilation stages to ICE while building MIR for the returned closure `f::{closure#0}`. The query stack shows the panic originates during `mir_built`/unsafety checking for the closure, then propagates through borrowck and opaque type computation for `f::{opaque#0}`. This suggests the compiler accepted or partially lowered an invalid higher-order `impl Trait` form into internal representations that later passes were not prepared to handle. The common theme is inconsistent validation/lowering of opaque types in nested callable trait signatures, especially when the closure argument is ignored and thus the anonymous parameter type remains unconstrained. A likely compiler defect is that HIR/typeck permits creation of a closure signature containing an illegal anonymous opaque parameter, but MIR/closure signature generation assumes all such inputs are fully valid and representable, leading to an internal invariant violation or unexpected `ty::Error`/opaque type shape during MIR building or unsafety checking.",
+      "possible_causes": [
+        "Missing early rejection or incomplete gating for argument-position `impl Trait` nested inside `Fn` trait syntax (`impl Fn(impl T)`), allowing invalid constructs to reach MIR construction.",
+        "Bug in lowering/type checking of nested opaque types where return-position opaque closure types (`impl Fn(...)`) are combined with anonymous `impl Trait` in the closure call signature, producing an invalid internal function signature.",
+        "MIR builder or closure signature construction likely assumes closure parameter types are fully concrete or legally lowered; encountering an anonymous opaque input type inside the `Fn` trait may violate an internal invariant and trigger the panic.",
+        "Error recovery defect: after emitting E0562/E0666, the compiler should stop or fully poison the item, but instead continues into `mir_built` and `type_of_opaque` for `f::{closure#0}` / `f::{opaque#0}`, causing an ICE on erroneous HIR/Ty.",
+        "Possible normalization/projection bug in handling the returned opaque type for `f::{opaque#0}` when its hidden type is a closure whose `Fn` signature itself contains unsupported `impl Trait` syntax.",
+        "Closure type inference edge case: because the closure ignores its parameter, the illegal anonymous `impl T` input remains unconstrained, which may expose a defect in fallback/error-type substitution for closure argument types."
+      ],
+      "evidence": [
+        "The reproducer specifically uses `fn f() -> impl Fn(impl T)`, i.e. nested `impl Trait` inside a returned callable trait signature.",
+        "Compiler output reports E0562 and E0666, indicating rustc already considers parts of this syntax invalid/unsupported, yet still panics afterward.",
+        "The panic occurs in query `mir_built` for `f::{closure#0}`, not during parsing, showing the invalid construct survives into MIR generation.",
+        "Query stack also includes `type_of_opaque` for `f::{opaque#0}`, directly implicating opaque type computation for the returned `impl Fn(...)`.",
+        "The closure body `|_| p` ignores its input, so the parameter type is present only in the signature and may remain unresolved/error-typed, stressing compiler recovery paths.",
+        "The issue is compile-time only; `main` is empty, so runtime behavior is irrelevant and the defect must be in compiler analysis/lowering/type checking/MIR stages.",
+        "The combination of closure capture (`p`) plus opaque return type means rustc must infer a concrete hidden closure type and its call signature, exactly where malformed nested `impl Trait` can break invariants."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1699,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/build/mod.rs",
+        "reason": "The ICE occurs at query `mir_built` while building MIR for `f::{closure#0}`. This file is the MIR construction entry point and is the most direct place where an invalid closure signature that survived earlier errors could trigger an internal invariant failure during closure MIR building."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "The reproducer stresses closure signature formation for `impl Fn(impl T)` and combines a returned opaque closure type with an illegal anonymous `impl Trait` input in the Fn call signature. This file is responsible for deriving closure signatures and is a prime candidate for allowing or mis-shaping the closure's parameter types under error recovery."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "Converting the nested `impl Trait` syntax inside `Fn(impl T)` into internal `ty` representations is central to this bug pattern. If AST/HIR type conversion incompletely rejects or lowers this unsupported form, later closure/MIR code may observe malformed types."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "The query stack includes `type_of_opaque` for `f::{opaque#0}`, directly implicating opaque type computation for the return-position `impl Fn(...)`. This file computes item and opaque types and may be mishandling the hidden closure type when its signature contains an invalid nested `impl Trait`."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "The returned `impl Fn(...)` requires opaque type inference, and the failure description points to inconsistent handling of nested opaque-like forms. This file manages replacement and tracking of opaque types during inference, making it suspicious for bad hidden-type registration or recovery when the closure signature itself is ill-formed."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "This file handles remapping and construction details for opaque `impl Trait` types. Because the query stack reaches `type_of_opaque` and the hidden type is a closure with a problematic Fn signature, incorrect argument remapping or tolerance of invalid structure here could contribute to the ICE."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "The root language misuse is anonymous `impl Trait` nested inside a `Fn` trait signature. If AST validation does not reject this form early enough or leaves the item in a partially valid state, later typeck/MIR passes may proceed on unsupported syntax and crash."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/ty.rs",
+        "reason": "The reproducer relies on unusual parsing of `impl Fn(impl T)`. While parsing itself likely succeeds, this file owns type-syntax parsing for `impl Trait` and bare callable syntax, so a permissive parse that feeds unsupported nesting into later stages is a plausible upstream cause."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/input_output.rs",
+        "reason": "Although the panic happens earlier, the query stack continues through borrowck and closure signature checking. This file specifically reconciles closure input/output types against signature annotations and opaque-related structure, so it is a plausible place where malformed closure signature types from error recovery are mishandled."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+        "reason": "THIR lowering bridges typeck results into MIR-building inputs. If the closure body or its signature is lowered into THIR with an unsupported anonymous opaque parameter still present as an error-typed or malformed node, this file is a likely contributor to the later MIR construction ICE."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 2146.031,
+    "stage_times_sec": {
+      "checkout": 0.59,
+      "load_bug_context": 0.286,
+      "test_behavior_analysis": 5.776,
+      "test_failure_analysis": 14.189,
+      "load_file_candidates": 1981.782,
+      "search_suspicious_files": 143.408
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 527,
+      "input_tokens": 612602,
+      "output_tokens": 117464,
+      "total_tokens": 730066,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.776,
+          "input_tokens": 349,
+          "output_tokens": 295,
+          "total_tokens": 644
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.188,
+          "input_tokens": 2154,
+          "output_tokens": 805,
+          "total_tokens": 2959
+        },
+        {
+          "stage": "file_summary:compiler_rustc_baked_icu_data_src_data_fallback_likelysubtags_v1_mod_rs",
+          "latency_sec": 3.929,
+          "input_tokens": 328,
+          "output_tokens": 205,
+          "total_tokens": 533
+        },
+        {
+          "stage": "file_summary:compiler_rustc_baked_icu_data_src_data_fallback_mod_rs",
+          "latency_sec": 3.806,
+          "input_tokens": 244,
+          "output_tokens": 155,
+          "total_tokens": 399
+        },
+        {
+          "stage": "file_summary:compiler_rustc_baked_icu_data_src_data_fallback_parents_v1_mod_rs",
+          "latency_sec": 4.449,
+          "input_tokens": 321,
+          "output_tokens": 204,
+          "total_tokens": 525
+        },
+        {
+          "stage": "file_summary:compiler_rustc_baked_icu_data_src_data_fallback_supplement_co_v1_mod_rs",
+          "latency_sec": 5.595,
+          "input_tokens": 326,
+          "output_tokens": 217,
+          "total_tokens": 543
+        },
+        {
+          "stage": "file_summary:compiler_rustc_baked_icu_data_src_data_fallback_supplement_mod_rs",
+          "latency_sec": 3.516,
+          "input_tokens": 236,
+          "output_tokens": 115,
+          "total_tokens": 351
+        },
+        {
+          "stage": "file_summary:compiler_rustc_baked_icu_data_src_data_list_and_v1_mod_rs",
+          "latency_sec": 4.537,
+          "input_tokens": 623,
+          "output_tokens": 220,
+          "total_tokens": 843
+        },
+        {
+          "stage": "file_summary:compiler_rustc_baked_icu_data_src_data_list_and_v1_mod_rs_repair",
+          "latency_sec": 3.396,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_baked_icu_data_src_data_list_mod_rs",
+          "latency_sec": 3.5,
+          "input_tokens": 228,
+          "output_tokens": 115,
+          "total_tokens": 343
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_darwin_rs",
+          "latency_sec": 3.347,
+          "input_tokens": 518,
+          "output_tokens": 220,
+          "total_tokens": 738
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_darwin_rs_repair",
+          "latency_sec": 3.445,
+          "input_tokens": 255,
+          "output_tokens": 203,
+          "total_tokens": 458
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_ios_rs",
+          "latency_sec": 3.956,
+          "input_tokens": 622,
+          "output_tokens": 220,
+          "total_tokens": 842
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_ios_rs_repair",
+          "latency_sec": 3.419,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_ios_macabi_rs",
+          "latency_sec": 5.128,
+          "input_tokens": 617,
+          "output_tokens": 220,
+          "total_tokens": 837
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_ios_macabi_rs_repair",
+          "latency_sec": 3.036,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_ios_sim_rs",
+          "latency_sec": 4.921,
+          "input_tokens": 628,
+          "output_tokens": 220,
+          "total_tokens": 848
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_ios_sim_rs_repair",
+          "latency_sec": 4.211,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_tvos_rs",
+          "latency_sec": 4.592,
+          "input_tokens": 415,
+          "output_tokens": 220,
+          "total_tokens": 635
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_tvos_rs_repair",
+          "latency_sec": 3.961,
+          "input_tokens": 255,
+          "output_tokens": 203,
+          "total_tokens": 458
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_tvos_sim_rs",
+          "latency_sec": 3.682,
+          "input_tokens": 574,
+          "output_tokens": 220,
+          "total_tokens": 794
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_tvos_sim_rs_repair",
+          "latency_sec": 4.468,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_watchos_sim_rs",
+          "latency_sec": 4.5,
+          "input_tokens": 600,
+          "output_tokens": 220,
+          "total_tokens": 820
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_apple_watchos_sim_rs_repair",
+          "latency_sec": 3.526,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_be_unknown_linux_gnu_rs",
+          "latency_sec": 3.716,
+          "input_tokens": 420,
+          "output_tokens": 220,
+          "total_tokens": 640
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_be_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.024,
+          "input_tokens": 255,
+          "output_tokens": 229,
+          "total_tokens": 484
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_be_unknown_linux_gnu_ilp32_rs",
+          "latency_sec": 3.562,
+          "input_tokens": 456,
+          "output_tokens": 220,
+          "total_tokens": 676
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_be_unknown_linux_gnu_ilp32_rs_repair",
+          "latency_sec": 4.121,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_be_unknown_netbsd_rs",
+          "latency_sec": 4.139,
+          "input_tokens": 393,
+          "output_tokens": 220,
+          "total_tokens": 613
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_be_unknown_netbsd_rs_repair",
+          "latency_sec": 3.861,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_fuchsia_rs",
+          "latency_sec": 3.252,
+          "input_tokens": 231,
+          "output_tokens": 168,
+          "total_tokens": 399
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_kmc_solid_asp3_rs",
+          "latency_sec": 4.118,
+          "input_tokens": 439,
+          "output_tokens": 220,
+          "total_tokens": 659
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_kmc_solid_asp3_rs_repair",
+          "latency_sec": 3.771,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_linux_android_rs",
+          "latency_sec": 3.655,
+          "input_tokens": 516,
+          "output_tokens": 220,
+          "total_tokens": 736
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_linux_android_rs_repair",
+          "latency_sec": 3.391,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_nintendo_switch_freestanding_rs",
+          "latency_sec": 4.773,
+          "input_tokens": 538,
+          "output_tokens": 220,
+          "total_tokens": 758
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_nintendo_switch_freestanding_rs_repair",
+          "latency_sec": 3.036,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_pc_windows_gnullvm_rs",
+          "latency_sec": 4.325,
+          "input_tokens": 407,
+          "output_tokens": 220,
+          "total_tokens": 627
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_pc_windows_gnullvm_rs_repair",
+          "latency_sec": 3.086,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_pc_windows_msvc_rs",
+          "latency_sec": 4.308,
+          "input_tokens": 380,
+          "output_tokens": 220,
+          "total_tokens": 600
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_pc_windows_msvc_rs_repair",
+          "latency_sec": 3.213,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_freebsd_rs",
+          "latency_sec": 3.974,
+          "input_tokens": 417,
+          "output_tokens": 220,
+          "total_tokens": 637
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_freebsd_rs_repair",
+          "latency_sec": 3.038,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_fuchsia_rs",
+          "latency_sec": 3.88,
+          "input_tokens": 411,
+          "output_tokens": 187,
+          "total_tokens": 598
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_hermit_rs",
+          "latency_sec": 3.47,
+          "input_tokens": 386,
+          "output_tokens": 220,
+          "total_tokens": 606
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_hermit_rs_repair",
+          "latency_sec": 3.096,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_linux_gnu_rs",
+          "latency_sec": 4.253,
+          "input_tokens": 479,
+          "output_tokens": 220,
+          "total_tokens": 699
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.909,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_linux_gnu_ilp32_rs",
+          "latency_sec": 4.068,
+          "input_tokens": 427,
+          "output_tokens": 220,
+          "total_tokens": 647
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_linux_gnu_ilp32_rs_repair",
+          "latency_sec": 3.471,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_linux_musl_rs",
+          "latency_sec": 4.311,
+          "input_tokens": 466,
+          "output_tokens": 220,
+          "total_tokens": 686
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_linux_musl_rs_repair",
+          "latency_sec": 3.967,
+          "input_tokens": 255,
+          "output_tokens": 206,
+          "total_tokens": 461
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_linux_ohos_rs",
+          "latency_sec": 4.459,
+          "input_tokens": 501,
+          "output_tokens": 220,
+          "total_tokens": 721
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_linux_ohos_rs_repair",
+          "latency_sec": 3.068,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_netbsd_rs",
+          "latency_sec": 3.711,
+          "input_tokens": 387,
+          "output_tokens": 220,
+          "total_tokens": 607
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_netbsd_rs_repair",
+          "latency_sec": 3.104,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_none_rs",
+          "latency_sec": 4.597,
+          "input_tokens": 569,
+          "output_tokens": 220,
+          "total_tokens": 789
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_none_rs_repair",
+          "latency_sec": 2.936,
+          "input_tokens": 254,
+          "output_tokens": 221,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_none_softfloat_rs",
+          "latency_sec": 4.769,
+          "input_tokens": 552,
+          "output_tokens": 220,
+          "total_tokens": 772
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_none_softfloat_rs_repair",
+          "latency_sec": 2.837,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_nto_qnx_710_rs",
+          "latency_sec": 4.274,
+          "input_tokens": 660,
+          "output_tokens": 220,
+          "total_tokens": 880
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_nto_qnx_710_rs_repair",
+          "latency_sec": 3.799,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_openbsd_rs",
+          "latency_sec": 6.03,
+          "input_tokens": 373,
+          "output_tokens": 220,
+          "total_tokens": 593
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_openbsd_rs_repair",
+          "latency_sec": 3.283,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_redox_rs",
+          "latency_sec": 3.633,
+          "input_tokens": 370,
+          "output_tokens": 185,
+          "total_tokens": 555
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_teeos_rs",
+          "latency_sec": 3.755,
+          "input_tokens": 399,
+          "output_tokens": 220,
+          "total_tokens": 619
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_teeos_rs_repair",
+          "latency_sec": 3.246,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_uefi_rs",
+          "latency_sec": 3.523,
+          "input_tokens": 451,
+          "output_tokens": 220,
+          "total_tokens": 671
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_unknown_uefi_rs_repair",
+          "latency_sec": 3.345,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_uwp_windows_msvc_rs",
+          "latency_sec": 4.159,
+          "input_tokens": 379,
+          "output_tokens": 220,
+          "total_tokens": 599
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_uwp_windows_msvc_rs_repair",
+          "latency_sec": 2.476,
+          "input_tokens": 255,
+          "output_tokens": 206,
+          "total_tokens": 461
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_wrs_vxworks_rs",
+          "latency_sec": 3.635,
+          "input_tokens": 378,
+          "output_tokens": 220,
+          "total_tokens": 598
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aarch64_wrs_vxworks_rs_repair",
+          "latency_sec": 3.985,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_abi_rs",
+          "latency_sec": 4.242,
+          "input_tokens": 1491,
+          "output_tokens": 220,
+          "total_tokens": 1711
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_abi_rs_repair",
+          "latency_sec": 3.869,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aix_base_rs",
+          "latency_sec": 4.117,
+          "input_tokens": 575,
+          "output_tokens": 220,
+          "total_tokens": 795
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_aix_base_rs_repair",
+          "latency_sec": 3.286,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_android_base_rs",
+          "latency_sec": 4.418,
+          "input_tokens": 392,
+          "output_tokens": 220,
+          "total_tokens": 612
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_android_base_rs_repair",
+          "latency_sec": 3.233,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_apple_tests_rs",
+          "latency_sec": 4.589,
+          "input_tokens": 589,
+          "output_tokens": 220,
+          "total_tokens": 809
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_apple_tests_rs_repair",
+          "latency_sec": 3.434,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_apple_base_rs",
+          "latency_sec": 4.367,
+          "input_tokens": 1567,
+          "output_tokens": 220,
+          "total_tokens": 1787
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_apple_base_rs_repair",
+          "latency_sec": 3.917,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm64_32_apple_watchos_rs",
+          "latency_sec": 3.789,
+          "input_tokens": 550,
+          "output_tokens": 220,
+          "total_tokens": 770
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm64_32_apple_watchos_rs_repair",
+          "latency_sec": 3.54,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm_linux_androideabi_rs",
+          "latency_sec": 4.537,
+          "input_tokens": 424,
+          "output_tokens": 220,
+          "total_tokens": 644
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm_linux_androideabi_rs_repair",
+          "latency_sec": 3.615,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm_unknown_linux_gnueabi_rs",
+          "latency_sec": 4.345,
+          "input_tokens": 434,
+          "output_tokens": 220,
+          "total_tokens": 654
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm_unknown_linux_gnueabi_rs_repair",
+          "latency_sec": 3.566,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm_unknown_linux_gnueabihf_rs",
+          "latency_sec": 4.572,
+          "input_tokens": 449,
+          "output_tokens": 220,
+          "total_tokens": 669
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm_unknown_linux_gnueabihf_rs_repair",
+          "latency_sec": 3.301,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm_unknown_linux_musleabi_rs",
+          "latency_sec": 4.061,
+          "input_tokens": 484,
+          "output_tokens": 220,
+          "total_tokens": 704
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm_unknown_linux_musleabi_rs_repair",
+          "latency_sec": 3.598,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm_unknown_linux_musleabihf_rs",
+          "latency_sec": 4.863,
+          "input_tokens": 507,
+          "output_tokens": 220,
+          "total_tokens": 727
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_arm_unknown_linux_musleabihf_rs_repair",
+          "latency_sec": 3.158,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armeb_unknown_linux_gnueabi_rs",
+          "latency_sec": 3.791,
+          "input_tokens": 456,
+          "output_tokens": 220,
+          "total_tokens": 676
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armeb_unknown_linux_gnueabi_rs_repair",
+          "latency_sec": 3.076,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armebv7r_none_eabi_rs",
+          "latency_sec": 3.712,
+          "input_tokens": 514,
+          "output_tokens": 220,
+          "total_tokens": 734
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armebv7r_none_eabi_rs_repair",
+          "latency_sec": 2.784,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armebv7r_none_eabihf_rs",
+          "latency_sec": 3.831,
+          "input_tokens": 542,
+          "output_tokens": 220,
+          "total_tokens": 762
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armebv7r_none_eabihf_rs_repair",
+          "latency_sec": 3.482,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv4t_none_eabi_rs",
+          "latency_sec": 5.223,
+          "input_tokens": 831,
+          "output_tokens": 220,
+          "total_tokens": 1051
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv4t_none_eabi_rs_repair",
+          "latency_sec": 8.31,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv4t_unknown_linux_gnueabi_rs",
+          "latency_sec": 4.295,
+          "input_tokens": 463,
+          "output_tokens": 220,
+          "total_tokens": 683
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv4t_unknown_linux_gnueabi_rs_repair",
+          "latency_sec": 3.477,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv5te_none_eabi_rs",
+          "latency_sec": 4.477,
+          "input_tokens": 680,
+          "output_tokens": 220,
+          "total_tokens": 900
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv5te_none_eabi_rs_repair",
+          "latency_sec": 3.177,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv5te_unknown_linux_gnueabi_rs",
+          "latency_sec": 4.144,
+          "input_tokens": 441,
+          "output_tokens": 220,
+          "total_tokens": 661
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv5te_unknown_linux_gnueabi_rs_repair",
+          "latency_sec": 2.975,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv5te_unknown_linux_musleabi_rs",
+          "latency_sec": 3.945,
+          "input_tokens": 509,
+          "output_tokens": 220,
+          "total_tokens": 729
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv5te_unknown_linux_musleabi_rs_repair",
+          "latency_sec": 3.659,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv5te_unknown_linux_uclibceabi_rs",
+          "latency_sec": 4.304,
+          "input_tokens": 448,
+          "output_tokens": 220,
+          "total_tokens": 668
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv5te_unknown_linux_uclibceabi_rs_repair",
+          "latency_sec": 3.41,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv6_unknown_freebsd_rs",
+          "latency_sec": 4.143,
+          "input_tokens": 475,
+          "output_tokens": 220,
+          "total_tokens": 695
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv6_unknown_freebsd_rs_repair",
+          "latency_sec": 3.212,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv6_unknown_netbsd_eabihf_rs",
+          "latency_sec": 4.271,
+          "input_tokens": 448,
+          "output_tokens": 220,
+          "total_tokens": 668
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv6_unknown_netbsd_eabihf_rs_repair",
+          "latency_sec": 2.765,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv6k_nintendo_3ds_rs",
+          "latency_sec": 3.891,
+          "input_tokens": 639,
+          "output_tokens": 220,
+          "total_tokens": 859
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv6k_nintendo_3ds_rs_repair",
+          "latency_sec": 3.167,
+          "input_tokens": 255,
+          "output_tokens": 192,
+          "total_tokens": 447
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_linux_androideabi_rs",
+          "latency_sec": 3.603,
+          "input_tokens": 557,
+          "output_tokens": 220,
+          "total_tokens": 777
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_linux_androideabi_rs_repair",
+          "latency_sec": 3.562,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_sony_vita_newlibeabihf_rs",
+          "latency_sec": 4.035,
+          "input_tokens": 709,
+          "output_tokens": 220,
+          "total_tokens": 929
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_sony_vita_newlibeabihf_rs_repair",
+          "latency_sec": 3.421,
+          "input_tokens": 255,
+          "output_tokens": 208,
+          "total_tokens": 463
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_freebsd_rs",
+          "latency_sec": 3.366,
+          "input_tokens": 459,
+          "output_tokens": 202,
+          "total_tokens": 661
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_gnueabi_rs",
+          "latency_sec": 4.115,
+          "input_tokens": 474,
+          "output_tokens": 220,
+          "total_tokens": 694
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_gnueabi_rs_repair",
+          "latency_sec": 3.316,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_gnueabihf_rs",
+          "latency_sec": 3.875,
+          "input_tokens": 490,
+          "output_tokens": 220,
+          "total_tokens": 710
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_gnueabihf_rs_repair",
+          "latency_sec": 2.548,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_musleabi_rs",
+          "latency_sec": 3.545,
+          "input_tokens": 526,
+          "output_tokens": 220,
+          "total_tokens": 746
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_musleabi_rs_repair",
+          "latency_sec": 3.605,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_musleabihf_rs",
+          "latency_sec": 3.688,
+          "input_tokens": 540,
+          "output_tokens": 220,
+          "total_tokens": 760
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_musleabihf_rs_repair",
+          "latency_sec": 3.216,
+          "input_tokens": 255,
+          "output_tokens": 197,
+          "total_tokens": 452
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_ohos_rs",
+          "latency_sec": 3.951,
+          "input_tokens": 493,
+          "output_tokens": 220,
+          "total_tokens": 713
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_ohos_rs_repair",
+          "latency_sec": 3.528,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_uclibceabi_rs",
+          "latency_sec": 3.943,
+          "input_tokens": 469,
+          "output_tokens": 220,
+          "total_tokens": 689
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_uclibceabi_rs_repair",
+          "latency_sec": 3.7,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_uclibceabihf_rs",
+          "latency_sec": 3.446,
+          "input_tokens": 507,
+          "output_tokens": 220,
+          "total_tokens": 727
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_linux_uclibceabihf_rs_repair",
+          "latency_sec": 3.427,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_netbsd_eabihf_rs",
+          "latency_sec": 3.82,
+          "input_tokens": 454,
+          "output_tokens": 220,
+          "total_tokens": 674
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_unknown_netbsd_eabihf_rs_repair",
+          "latency_sec": 3.915,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_wrs_vxworks_eabihf_rs",
+          "latency_sec": 4.469,
+          "input_tokens": 434,
+          "output_tokens": 220,
+          "total_tokens": 654
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7_wrs_vxworks_eabihf_rs_repair",
+          "latency_sec": 3.755,
+          "input_tokens": 255,
+          "output_tokens": 225,
+          "total_tokens": 480
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7a_kmc_solid_asp3_eabi_rs",
+          "latency_sec": 3.593,
+          "input_tokens": 445,
+          "output_tokens": 220,
+          "total_tokens": 665
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7a_kmc_solid_asp3_eabi_rs_repair",
+          "latency_sec": 3.156,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7a_kmc_solid_asp3_eabihf_rs",
+          "latency_sec": 4.103,
+          "input_tokens": 454,
+          "output_tokens": 220,
+          "total_tokens": 674
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7a_kmc_solid_asp3_eabihf_rs_repair",
+          "latency_sec": 3.681,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7a_none_eabi_rs",
+          "latency_sec": 3.274,
+          "input_tokens": 719,
+          "output_tokens": 220,
+          "total_tokens": 939
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7a_none_eabi_rs_repair",
+          "latency_sec": 3.991,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7a_none_eabihf_rs",
+          "latency_sec": 4.338,
+          "input_tokens": 623,
+          "output_tokens": 220,
+          "total_tokens": 843
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7a_none_eabihf_rs_repair",
+          "latency_sec": 3.01,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7k_apple_watchos_rs",
+          "latency_sec": 4.465,
+          "input_tokens": 542,
+          "output_tokens": 220,
+          "total_tokens": 762
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7k_apple_watchos_rs_repair",
+          "latency_sec": 2.857,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7r_none_eabi_rs",
+          "latency_sec": 4.399,
+          "input_tokens": 499,
+          "output_tokens": 220,
+          "total_tokens": 719
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7r_none_eabi_rs_repair",
+          "latency_sec": 3.51,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7r_none_eabihf_rs",
+          "latency_sec": 4.316,
+          "input_tokens": 529,
+          "output_tokens": 220,
+          "total_tokens": 749
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7r_none_eabihf_rs_repair",
+          "latency_sec": 4.062,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7s_apple_ios_rs",
+          "latency_sec": 3.533,
+          "input_tokens": 411,
+          "output_tokens": 220,
+          "total_tokens": 631
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_armv7s_apple_ios_rs_repair",
+          "latency_sec": 3.642,
+          "input_tokens": 255,
+          "output_tokens": 207,
+          "total_tokens": 462
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_asmjs_unknown_emscripten_rs",
+          "latency_sec": 4.22,
+          "input_tokens": 305,
+          "output_tokens": 220,
+          "total_tokens": 525
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_asmjs_unknown_emscripten_rs_repair",
+          "latency_sec": 4.041,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_avr_gnu_base_rs",
+          "latency_sec": 4.214,
+          "input_tokens": 1636,
+          "output_tokens": 220,
+          "total_tokens": 1856
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_avr_gnu_base_rs_repair",
+          "latency_sec": 3.109,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_avr_unknown_gnu_atmega328_rs",
+          "latency_sec": 4.641,
+          "input_tokens": 265,
+          "output_tokens": 187,
+          "total_tokens": 452
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_bpf_base_rs",
+          "latency_sec": 3.855,
+          "input_tokens": 507,
+          "output_tokens": 220,
+          "total_tokens": 727
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_bpf_base_rs_repair",
+          "latency_sec": 2.798,
+          "input_tokens": 255,
+          "output_tokens": 206,
+          "total_tokens": 461
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_bpfeb_unknown_none_rs",
+          "latency_sec": 4.303,
+          "input_tokens": 338,
+          "output_tokens": 212,
+          "total_tokens": 550
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_bpfel_unknown_none_rs",
+          "latency_sec": 4.734,
+          "input_tokens": 338,
+          "output_tokens": 220,
+          "total_tokens": 558
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_csky_unknown_linux_gnuabiv2_rs",
+          "latency_sec": 4.329,
+          "input_tokens": 587,
+          "output_tokens": 220,
+          "total_tokens": 807
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_csky_unknown_linux_gnuabiv2_rs_repair",
+          "latency_sec": 3.606,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_csky_unknown_linux_gnuabiv2hf_rs",
+          "latency_sec": 4.97,
+          "input_tokens": 620,
+          "output_tokens": 220,
+          "total_tokens": 840
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_csky_unknown_linux_gnuabiv2hf_rs_repair",
+          "latency_sec": 3.204,
+          "input_tokens": 255,
+          "output_tokens": 225,
+          "total_tokens": 480
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_dragonfly_base_rs",
+          "latency_sec": 3.769,
+          "input_tokens": 329,
+          "output_tokens": 220,
+          "total_tokens": 549
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_freebsd_base_rs",
+          "latency_sec": 4.629,
+          "input_tokens": 337,
+          "output_tokens": 220,
+          "total_tokens": 557
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_freebsd_base_rs_repair",
+          "latency_sec": 3.184,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_fuchsia_base_rs",
+          "latency_sec": 3.977,
+          "input_tokens": 688,
+          "output_tokens": 220,
+          "total_tokens": 908
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_fuchsia_base_rs_repair",
+          "latency_sec": 3.785,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_haiku_base_rs",
+          "latency_sec": 4.319,
+          "input_tokens": 300,
+          "output_tokens": 219,
+          "total_tokens": 519
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_hermit_base_rs",
+          "latency_sec": 3.311,
+          "input_tokens": 366,
+          "output_tokens": 187,
+          "total_tokens": 553
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_hexagon_unknown_linux_musl_rs",
+          "latency_sec": 4.305,
+          "input_tokens": 549,
+          "output_tokens": 220,
+          "total_tokens": 769
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_hexagon_unknown_linux_musl_rs_repair",
+          "latency_sec": 2.806,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_hurd_base_rs",
+          "latency_sec": 3.778,
+          "input_tokens": 334,
+          "output_tokens": 220,
+          "total_tokens": 554
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_hurd_base_rs_repair",
+          "latency_sec": 3.088,
+          "input_tokens": 255,
+          "output_tokens": 225,
+          "total_tokens": 480
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_hurd_gnu_base_rs",
+          "latency_sec": 3.471,
+          "input_tokens": 259,
+          "output_tokens": 156,
+          "total_tokens": 415
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i386_apple_ios_rs",
+          "latency_sec": 3.341,
+          "input_tokens": 465,
+          "output_tokens": 220,
+          "total_tokens": 685
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i386_apple_ios_rs_repair",
+          "latency_sec": 2.892,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i386_unknown_linux_gnu_rs",
+          "latency_sec": 4.134,
+          "input_tokens": 290,
+          "output_tokens": 215,
+          "total_tokens": 505
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i486_unknown_linux_gnu_rs",
+          "latency_sec": 3.913,
+          "input_tokens": 290,
+          "output_tokens": 207,
+          "total_tokens": 497
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i586_pc_nto_qnx700_rs",
+          "latency_sec": 4.586,
+          "input_tokens": 495,
+          "output_tokens": 220,
+          "total_tokens": 715
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i586_pc_nto_qnx700_rs_repair",
+          "latency_sec": 2.991,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i586_pc_windows_msvc_rs",
+          "latency_sec": 3.886,
+          "input_tokens": 291,
+          "output_tokens": 207,
+          "total_tokens": 498
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i586_unknown_linux_gnu_rs",
+          "latency_sec": 4.251,
+          "input_tokens": 290,
+          "output_tokens": 186,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i586_unknown_linux_musl_rs",
+          "latency_sec": 3.929,
+          "input_tokens": 293,
+          "output_tokens": 206,
+          "total_tokens": 499
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i586_unknown_netbsd_rs",
+          "latency_sec": 4.255,
+          "input_tokens": 424,
+          "output_tokens": 220,
+          "total_tokens": 644
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i586_unknown_netbsd_rs_repair",
+          "latency_sec": 13.825,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_apple_darwin_rs",
+          "latency_sec": 3.646,
+          "input_tokens": 569,
+          "output_tokens": 220,
+          "total_tokens": 789
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_apple_darwin_rs_repair",
+          "latency_sec": 3.288,
+          "input_tokens": 255,
+          "output_tokens": 201,
+          "total_tokens": 456
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_linux_android_rs",
+          "latency_sec": 3.998,
+          "input_tokens": 505,
+          "output_tokens": 220,
+          "total_tokens": 725
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_linux_android_rs_repair",
+          "latency_sec": 2.76,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_pc_windows_gnu_rs",
+          "latency_sec": 4.231,
+          "input_tokens": 570,
+          "output_tokens": 220,
+          "total_tokens": 790
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_pc_windows_gnu_rs_repair",
+          "latency_sec": 2.619,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_pc_windows_gnullvm_rs",
+          "latency_sec": 3.646,
+          "input_tokens": 539,
+          "output_tokens": 220,
+          "total_tokens": 759
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_pc_windows_gnullvm_rs_repair",
+          "latency_sec": 2.769,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_pc_windows_msvc_rs",
+          "latency_sec": 4.235,
+          "input_tokens": 565,
+          "output_tokens": 220,
+          "total_tokens": 785
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_pc_windows_msvc_rs_repair",
+          "latency_sec": 3.273,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_freebsd_rs",
+          "latency_sec": 4.286,
+          "input_tokens": 454,
+          "output_tokens": 220,
+          "total_tokens": 674
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_freebsd_rs_repair",
+          "latency_sec": 4.623,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_haiku_rs",
+          "latency_sec": 3.461,
+          "input_tokens": 447,
+          "output_tokens": 220,
+          "total_tokens": 667
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_haiku_rs_repair",
+          "latency_sec": 3.205,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_hurd_gnu_rs",
+          "latency_sec": 3.906,
+          "input_tokens": 472,
+          "output_tokens": 220,
+          "total_tokens": 692
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_hurd_gnu_rs_repair",
+          "latency_sec": 3.208,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_linux_gnu_rs",
+          "latency_sec": 3.769,
+          "input_tokens": 468,
+          "output_tokens": 220,
+          "total_tokens": 688
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.57,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_linux_musl_rs",
+          "latency_sec": 4.476,
+          "input_tokens": 633,
+          "output_tokens": 220,
+          "total_tokens": 853
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_linux_musl_rs_repair",
+          "latency_sec": 3.435,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_netbsd_rs",
+          "latency_sec": 3.342,
+          "input_tokens": 465,
+          "output_tokens": 220,
+          "total_tokens": 685
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_netbsd_rs_repair",
+          "latency_sec": 3.061,
+          "input_tokens": 255,
+          "output_tokens": 205,
+          "total_tokens": 460
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_openbsd_rs",
+          "latency_sec": 4.213,
+          "input_tokens": 454,
+          "output_tokens": 217,
+          "total_tokens": 671
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_uefi_rs",
+          "latency_sec": 4.852,
+          "input_tokens": 1379,
+          "output_tokens": 220,
+          "total_tokens": 1599
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_unknown_uefi_rs_repair",
+          "latency_sec": 3.363,
+          "input_tokens": 255,
+          "output_tokens": 241,
+          "total_tokens": 496
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_uwp_windows_gnu_rs",
+          "latency_sec": 4.255,
+          "input_tokens": 554,
+          "output_tokens": 220,
+          "total_tokens": 774
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_uwp_windows_gnu_rs_repair",
+          "latency_sec": 2.8,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_uwp_windows_msvc_rs",
+          "latency_sec": 3.559,
+          "input_tokens": 402,
+          "output_tokens": 220,
+          "total_tokens": 622
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_uwp_windows_msvc_rs_repair",
+          "latency_sec": 3.786,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_wrs_vxworks_rs",
+          "latency_sec": 3.67,
+          "input_tokens": 450,
+          "output_tokens": 220,
+          "total_tokens": 670
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_i686_wrs_vxworks_rs_repair",
+          "latency_sec": 2.842,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_illumos_base_rs",
+          "latency_sec": 4.253,
+          "input_tokens": 873,
+          "output_tokens": 220,
+          "total_tokens": 1093
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_illumos_base_rs_repair",
+          "latency_sec": 3.237,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_l4re_base_rs",
+          "latency_sec": 3.366,
+          "input_tokens": 357,
+          "output_tokens": 191,
+          "total_tokens": 548
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_linux_base_rs",
+          "latency_sec": 4.107,
+          "input_tokens": 392,
+          "output_tokens": 220,
+          "total_tokens": 612
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_linux_base_rs_repair",
+          "latency_sec": 3.391,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_linux_gnu_base_rs",
+          "latency_sec": 3.38,
+          "input_tokens": 256,
+          "output_tokens": 181,
+          "total_tokens": 437
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_linux_musl_base_rs",
+          "latency_sec": 4.516,
+          "input_tokens": 368,
+          "output_tokens": 220,
+          "total_tokens": 588
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_linux_musl_base_rs_repair",
+          "latency_sec": 4.013,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_linux_ohos_base_rs",
+          "latency_sec": 4.543,
+          "input_tokens": 297,
+          "output_tokens": 191,
+          "total_tokens": 488
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_linux_uclibc_base_rs",
+          "latency_sec": 3.956,
+          "input_tokens": 262,
+          "output_tokens": 177,
+          "total_tokens": 439
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_loongarch64_unknown_linux_gnu_rs",
+          "latency_sec": 3.887,
+          "input_tokens": 400,
+          "output_tokens": 220,
+          "total_tokens": 620
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_loongarch64_unknown_none_rs",
+          "latency_sec": 3.866,
+          "input_tokens": 481,
+          "output_tokens": 220,
+          "total_tokens": 701
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_loongarch64_unknown_none_rs_repair",
+          "latency_sec": 3.265,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_loongarch64_unknown_none_softfloat_rs",
+          "latency_sec": 3.609,
+          "input_tokens": 497,
+          "output_tokens": 220,
+          "total_tokens": 717
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_loongarch64_unknown_none_softfloat_rs_repair",
+          "latency_sec": 3.918,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_m68k_unknown_linux_gnu_rs",
+          "latency_sec": 4.552,
+          "input_tokens": 420,
+          "output_tokens": 220,
+          "total_tokens": 640
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_m68k_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.348,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips64_openwrt_linux_musl_rs",
+          "latency_sec": 3.653,
+          "input_tokens": 495,
+          "output_tokens": 220,
+          "total_tokens": 715
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips64_openwrt_linux_musl_rs_repair",
+          "latency_sec": 3.772,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips64_unknown_linux_gnuabi64_rs",
+          "latency_sec": 3.745,
+          "input_tokens": 457,
+          "output_tokens": 220,
+          "total_tokens": 677
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips64_unknown_linux_gnuabi64_rs_repair",
+          "latency_sec": 5.271,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips64_unknown_linux_muslabi64_rs",
+          "latency_sec": 4.347,
+          "input_tokens": 464,
+          "output_tokens": 220,
+          "total_tokens": 684
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips64_unknown_linux_muslabi64_rs_repair",
+          "latency_sec": 3.242,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips64el_unknown_linux_gnuabi64_rs",
+          "latency_sec": 3.869,
+          "input_tokens": 443,
+          "output_tokens": 220,
+          "total_tokens": 663
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips64el_unknown_linux_gnuabi64_rs_repair",
+          "latency_sec": 3.562,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips64el_unknown_linux_muslabi64_rs",
+          "latency_sec": 3.385,
+          "input_tokens": 440,
+          "output_tokens": 220,
+          "total_tokens": 660
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips64el_unknown_linux_muslabi64_rs_repair",
+          "latency_sec": 3.148,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips_unknown_linux_gnu_rs",
+          "latency_sec": 4.488,
+          "input_tokens": 430,
+          "output_tokens": 220,
+          "total_tokens": 650
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.653,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips_unknown_linux_musl_rs",
+          "latency_sec": 4.337,
+          "input_tokens": 438,
+          "output_tokens": 220,
+          "total_tokens": 658
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips_unknown_linux_musl_rs_repair",
+          "latency_sec": 2.856,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips_unknown_linux_uclibc_rs",
+          "latency_sec": 3.803,
+          "input_tokens": 433,
+          "output_tokens": 220,
+          "total_tokens": 653
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mips_unknown_linux_uclibc_rs_repair",
+          "latency_sec": 6.004,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_sony_psp_rs",
+          "latency_sec": 3.784,
+          "input_tokens": 615,
+          "output_tokens": 220,
+          "total_tokens": 835
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_sony_psp_rs_repair",
+          "latency_sec": 3.756,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_sony_psx_rs",
+          "latency_sec": 3.934,
+          "input_tokens": 648,
+          "output_tokens": 220,
+          "total_tokens": 868
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_sony_psx_rs_repair",
+          "latency_sec": 3.476,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_unknown_linux_gnu_rs",
+          "latency_sec": 4.357,
+          "input_tokens": 417,
+          "output_tokens": 220,
+          "total_tokens": 637
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.218,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_unknown_linux_musl_rs",
+          "latency_sec": 3.812,
+          "input_tokens": 426,
+          "output_tokens": 220,
+          "total_tokens": 646
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_unknown_linux_musl_rs_repair",
+          "latency_sec": 3.378,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_unknown_linux_uclibc_rs",
+          "latency_sec": 4.156,
+          "input_tokens": 420,
+          "output_tokens": 220,
+          "total_tokens": 640
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_unknown_linux_uclibc_rs_repair",
+          "latency_sec": 4.08,
+          "input_tokens": 254,
+          "output_tokens": 215,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_unknown_netbsd_rs",
+          "latency_sec": 4.154,
+          "input_tokens": 425,
+          "output_tokens": 220,
+          "total_tokens": 645
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_unknown_netbsd_rs_repair",
+          "latency_sec": 3.437,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_unknown_none_rs",
+          "latency_sec": 5.333,
+          "input_tokens": 520,
+          "output_tokens": 220,
+          "total_tokens": 740
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsel_unknown_none_rs_repair",
+          "latency_sec": 3.387,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsisa32r6_unknown_linux_gnu_rs",
+          "latency_sec": 4.188,
+          "input_tokens": 436,
+          "output_tokens": 220,
+          "total_tokens": 656
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsisa32r6_unknown_linux_gnu_rs_repair",
+          "latency_sec": 5.45,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsisa32r6el_unknown_linux_gnu_rs",
+          "latency_sec": 5.287,
+          "input_tokens": 423,
+          "output_tokens": 220,
+          "total_tokens": 643
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsisa32r6el_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.222,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsisa64r6_unknown_linux_gnuabi64_rs",
+          "latency_sec": 4.038,
+          "input_tokens": 465,
+          "output_tokens": 220,
+          "total_tokens": 685
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsisa64r6_unknown_linux_gnuabi64_rs_repair",
+          "latency_sec": 3.537,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsisa64r6el_unknown_linux_gnuabi64_rs",
+          "latency_sec": 5.341,
+          "input_tokens": 451,
+          "output_tokens": 220,
+          "total_tokens": 671
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_mipsisa64r6el_unknown_linux_gnuabi64_rs_repair",
+          "latency_sec": 3.687,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_msp430_none_elf_rs",
+          "latency_sec": 4.595,
+          "input_tokens": 840,
+          "output_tokens": 220,
+          "total_tokens": 1060
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_msp430_none_elf_rs_repair",
+          "latency_sec": 4.273,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_msvc_base_rs",
+          "latency_sec": 4.319,
+          "input_tokens": 490,
+          "output_tokens": 220,
+          "total_tokens": 710
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_msvc_base_rs_repair",
+          "latency_sec": 3.39,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_netbsd_base_rs",
+          "latency_sec": 3.793,
+          "input_tokens": 345,
+          "output_tokens": 197,
+          "total_tokens": 542
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_nto_qnx_base_rs",
+          "latency_sec": 4.377,
+          "input_tokens": 372,
+          "output_tokens": 220,
+          "total_tokens": 592
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_nto_qnx_base_rs_repair",
+          "latency_sec": 3.071,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_nvptx64_nvidia_cuda_rs",
+          "latency_sec": 3.889,
+          "input_tokens": 726,
+          "output_tokens": 220,
+          "total_tokens": 946
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_nvptx64_nvidia_cuda_rs_repair",
+          "latency_sec": 3.432,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_openbsd_base_rs",
+          "latency_sec": 3.838,
+          "input_tokens": 362,
+          "output_tokens": 220,
+          "total_tokens": 582
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_openbsd_base_rs_repair",
+          "latency_sec": 4.306,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_ibm_aix_rs",
+          "latency_sec": 4.12,
+          "input_tokens": 433,
+          "output_tokens": 220,
+          "total_tokens": 653
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_ibm_aix_rs_repair",
+          "latency_sec": 3.205,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_unknown_freebsd_rs",
+          "latency_sec": 3.85,
+          "input_tokens": 447,
+          "output_tokens": 220,
+          "total_tokens": 667
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_unknown_freebsd_rs_repair",
+          "latency_sec": 3.43,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_unknown_linux_gnu_rs",
+          "latency_sec": 4.113,
+          "input_tokens": 464,
+          "output_tokens": 220,
+          "total_tokens": 684
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_unknown_linux_gnu_rs_repair",
+          "latency_sec": 2.902,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_unknown_linux_musl_rs",
+          "latency_sec": 4.516,
+          "input_tokens": 467,
+          "output_tokens": 220,
+          "total_tokens": 687
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_unknown_linux_musl_rs_repair",
+          "latency_sec": 3.056,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_unknown_openbsd_rs",
+          "latency_sec": 3.528,
+          "input_tokens": 447,
+          "output_tokens": 220,
+          "total_tokens": 667
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_unknown_openbsd_rs_repair",
+          "latency_sec": 3.167,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_wrs_vxworks_rs",
+          "latency_sec": 4.52,
+          "input_tokens": 454,
+          "output_tokens": 220,
+          "total_tokens": 674
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64_wrs_vxworks_rs_repair",
+          "latency_sec": 4.5,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64le_unknown_freebsd_rs",
+          "latency_sec": 5.202,
+          "input_tokens": 436,
+          "output_tokens": 220,
+          "total_tokens": 656
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64le_unknown_freebsd_rs_repair",
+          "latency_sec": 3.367,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64le_unknown_linux_gnu_rs",
+          "latency_sec": 4.24,
+          "input_tokens": 454,
+          "output_tokens": 220,
+          "total_tokens": 674
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64le_unknown_linux_gnu_rs_repair",
+          "latency_sec": 9.625,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64le_unknown_linux_musl_rs",
+          "latency_sec": 4.15,
+          "input_tokens": 457,
+          "output_tokens": 220,
+          "total_tokens": 677
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc64le_unknown_linux_musl_rs_repair",
+          "latency_sec": 4.891,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_freebsd_rs",
+          "latency_sec": 4.321,
+          "input_tokens": 500,
+          "output_tokens": 220,
+          "total_tokens": 720
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_freebsd_rs_repair",
+          "latency_sec": 3.174,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_linux_gnu_rs",
+          "latency_sec": 3.665,
+          "input_tokens": 436,
+          "output_tokens": 220,
+          "total_tokens": 656
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.61,
+          "input_tokens": 255,
+          "output_tokens": 207,
+          "total_tokens": 462
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_linux_gnuspe_rs",
+          "latency_sec": 3.744,
+          "input_tokens": 460,
+          "output_tokens": 220,
+          "total_tokens": 680
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_linux_gnuspe_rs_repair",
+          "latency_sec": 3.974,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_linux_musl_rs",
+          "latency_sec": 4.092,
+          "input_tokens": 439,
+          "output_tokens": 220,
+          "total_tokens": 659
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_linux_musl_rs_repair",
+          "latency_sec": 3.197,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_netbsd_rs",
+          "latency_sec": 3.865,
+          "input_tokens": 432,
+          "output_tokens": 220,
+          "total_tokens": 652
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_netbsd_rs_repair",
+          "latency_sec": 3.38,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_openbsd_rs",
+          "latency_sec": 3.65,
+          "input_tokens": 378,
+          "output_tokens": 220,
+          "total_tokens": 598
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_unknown_openbsd_rs_repair",
+          "latency_sec": 3.576,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_wrs_vxworks_rs",
+          "latency_sec": 4.11,
+          "input_tokens": 443,
+          "output_tokens": 220,
+          "total_tokens": 663
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_wrs_vxworks_rs_repair",
+          "latency_sec": 3.097,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_wrs_vxworks_spe_rs",
+          "latency_sec": 3.723,
+          "input_tokens": 496,
+          "output_tokens": 220,
+          "total_tokens": 716
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_powerpc_wrs_vxworks_spe_rs_repair",
+          "latency_sec": 3.532,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_redox_base_rs",
+          "latency_sec": 4.406,
+          "input_tokens": 355,
+          "output_tokens": 220,
+          "total_tokens": 575
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_redox_base_rs_repair",
+          "latency_sec": 2.796,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32gc_unknown_linux_gnu_rs",
+          "latency_sec": 3.717,
+          "input_tokens": 421,
+          "output_tokens": 220,
+          "total_tokens": 641
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32gc_unknown_linux_gnu_rs_repair",
+          "latency_sec": 4.022,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32gc_unknown_linux_musl_rs",
+          "latency_sec": 4.668,
+          "input_tokens": 424,
+          "output_tokens": 220,
+          "total_tokens": 644
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32gc_unknown_linux_musl_rs_repair",
+          "latency_sec": 3.611,
+          "input_tokens": 255,
+          "output_tokens": 208,
+          "total_tokens": 463
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32i_unknown_none_elf_rs",
+          "latency_sec": 3.918,
+          "input_tokens": 461,
+          "output_tokens": 220,
+          "total_tokens": 681
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32i_unknown_none_elf_rs_repair",
+          "latency_sec": 3.352,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32im_unknown_none_elf_rs",
+          "latency_sec": 4.253,
+          "input_tokens": 473,
+          "output_tokens": 220,
+          "total_tokens": 693
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32im_unknown_none_elf_rs_repair",
+          "latency_sec": 3.544,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32imac_esp_espidf_rs",
+          "latency_sec": 4.377,
+          "input_tokens": 540,
+          "output_tokens": 220,
+          "total_tokens": 760
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32imac_esp_espidf_rs_repair",
+          "latency_sec": 3.06,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32imac_unknown_none_elf_rs",
+          "latency_sec": 4.078,
+          "input_tokens": 471,
+          "output_tokens": 220,
+          "total_tokens": 691
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32imac_unknown_none_elf_rs_repair",
+          "latency_sec": 3.103,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32imac_unknown_xous_elf_rs",
+          "latency_sec": 3.723,
+          "input_tokens": 467,
+          "output_tokens": 220,
+          "total_tokens": 687
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32imac_unknown_xous_elf_rs_repair",
+          "latency_sec": 3.448,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32imc_esp_espidf_rs",
+          "latency_sec": 4.875,
+          "input_tokens": 616,
+          "output_tokens": 220,
+          "total_tokens": 836
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32imc_esp_espidf_rs_repair",
+          "latency_sec": 3.346,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32imc_unknown_none_elf_rs",
+          "latency_sec": 5.388,
+          "input_tokens": 477,
+          "output_tokens": 220,
+          "total_tokens": 697
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv32imc_unknown_none_elf_rs_repair",
+          "latency_sec": 4.057,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64_linux_android_rs",
+          "latency_sec": 4.273,
+          "input_tokens": 444,
+          "output_tokens": 220,
+          "total_tokens": 664
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64_linux_android_rs_repair",
+          "latency_sec": 2.72,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_freebsd_rs",
+          "latency_sec": 3.823,
+          "input_tokens": 422,
+          "output_tokens": 220,
+          "total_tokens": 642
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_freebsd_rs_repair",
+          "latency_sec": 3.635,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_fuchsia_rs",
+          "latency_sec": 4.041,
+          "input_tokens": 442,
+          "output_tokens": 220,
+          "total_tokens": 662
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_fuchsia_rs_repair",
+          "latency_sec": 3.369,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_hermit_rs",
+          "latency_sec": 3.825,
+          "input_tokens": 455,
+          "output_tokens": 220,
+          "total_tokens": 675
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_hermit_rs_repair",
+          "latency_sec": 2.787,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_linux_gnu_rs",
+          "latency_sec": 3.914,
+          "input_tokens": 426,
+          "output_tokens": 220,
+          "total_tokens": 646
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.058,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_linux_musl_rs",
+          "latency_sec": 5.861,
+          "input_tokens": 429,
+          "output_tokens": 220,
+          "total_tokens": 649
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_linux_musl_rs_repair",
+          "latency_sec": 3.171,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_netbsd_rs",
+          "latency_sec": 4.348,
+          "input_tokens": 436,
+          "output_tokens": 220,
+          "total_tokens": 656
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_netbsd_rs_repair",
+          "latency_sec": 3.309,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_none_elf_rs",
+          "latency_sec": 3.934,
+          "input_tokens": 541,
+          "output_tokens": 220,
+          "total_tokens": 761
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_none_elf_rs_repair",
+          "latency_sec": 3.079,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64gc_unknown_openbsd_rs",
+          "latency_sec": 4.008,
+          "input_tokens": 422,
+          "output_tokens": 203,
+          "total_tokens": 625
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64imac_unknown_none_elf_rs",
+          "latency_sec": 3.643,
+          "input_tokens": 518,
+          "output_tokens": 220,
+          "total_tokens": 738
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_riscv64imac_unknown_none_elf_rs_repair",
+          "latency_sec": 2.543,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_s390x_unknown_linux_gnu_rs",
+          "latency_sec": 3.889,
+          "input_tokens": 565,
+          "output_tokens": 220,
+          "total_tokens": 785
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_s390x_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.222,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_s390x_unknown_linux_musl_rs",
+          "latency_sec": 4.115,
+          "input_tokens": 581,
+          "output_tokens": 220,
+          "total_tokens": 801
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_s390x_unknown_linux_musl_rs_repair",
+          "latency_sec": 2.856,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_solaris_base_rs",
+          "latency_sec": 3.47,
+          "input_tokens": 351,
+          "output_tokens": 220,
+          "total_tokens": 571
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_solaris_base_rs_repair",
+          "latency_sec": 4.269,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_solid_base_rs",
+          "latency_sec": 3.964,
+          "input_tokens": 311,
+          "output_tokens": 218,
+          "total_tokens": 529
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparc64_unknown_linux_gnu_rs",
+          "latency_sec": 4.364,
+          "input_tokens": 377,
+          "output_tokens": 220,
+          "total_tokens": 597
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparc64_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.391,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparc64_unknown_netbsd_rs",
+          "latency_sec": 3.773,
+          "input_tokens": 428,
+          "output_tokens": 220,
+          "total_tokens": 648
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparc64_unknown_netbsd_rs_repair",
+          "latency_sec": 3.268,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparc64_unknown_openbsd_rs",
+          "latency_sec": 4.345,
+          "input_tokens": 413,
+          "output_tokens": 220,
+          "total_tokens": 633
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparc64_unknown_openbsd_rs_repair",
+          "latency_sec": 2.72,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparc_unknown_linux_gnu_rs",
+          "latency_sec": 3.581,
+          "input_tokens": 421,
+          "output_tokens": 220,
+          "total_tokens": 641
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparc_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.382,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparc_unknown_none_elf_rs",
+          "latency_sec": 3.668,
+          "input_tokens": 504,
+          "output_tokens": 220,
+          "total_tokens": 724
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparc_unknown_none_elf_rs_repair",
+          "latency_sec": 3.218,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparcv9_sun_solaris_rs",
+          "latency_sec": 3.941,
+          "input_tokens": 493,
+          "output_tokens": 220,
+          "total_tokens": 713
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_sparcv9_sun_solaris_rs_repair",
+          "latency_sec": 3.125,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_teeos_base_rs",
+          "latency_sec": 4.445,
+          "input_tokens": 597,
+          "output_tokens": 220,
+          "total_tokens": 817
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_teeos_base_rs_repair",
+          "latency_sec": 3.372,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumb_base_rs",
+          "latency_sec": 3.885,
+          "input_tokens": 1021,
+          "output_tokens": 220,
+          "total_tokens": 1241
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumb_base_rs_repair",
+          "latency_sec": 3.648,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv4t_none_eabi_rs",
+          "latency_sec": 4.211,
+          "input_tokens": 857,
+          "output_tokens": 220,
+          "total_tokens": 1077
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv4t_none_eabi_rs_repair",
+          "latency_sec": 3.073,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv5te_none_eabi_rs",
+          "latency_sec": 4.145,
+          "input_tokens": 678,
+          "output_tokens": 220,
+          "total_tokens": 898
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv5te_none_eabi_rs_repair",
+          "latency_sec": 3.064,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv6m_none_eabi_rs",
+          "latency_sec": 4.167,
+          "input_tokens": 503,
+          "output_tokens": 220,
+          "total_tokens": 723
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv6m_none_eabi_rs_repair",
+          "latency_sec": 3.584,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7a_pc_windows_msvc_rs",
+          "latency_sec": 4.439,
+          "input_tokens": 563,
+          "output_tokens": 220,
+          "total_tokens": 783
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7a_pc_windows_msvc_rs_repair",
+          "latency_sec": 3.093,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7a_uwp_windows_msvc_rs",
+          "latency_sec": 3.635,
+          "input_tokens": 431,
+          "output_tokens": 220,
+          "total_tokens": 651
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7a_uwp_windows_msvc_rs_repair",
+          "latency_sec": 3.158,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7em_none_eabi_rs",
+          "latency_sec": 4.434,
+          "input_tokens": 523,
+          "output_tokens": 220,
+          "total_tokens": 743
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7em_none_eabi_rs_repair",
+          "latency_sec": 4.395,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7em_none_eabihf_rs",
+          "latency_sec": 4.693,
+          "input_tokens": 667,
+          "output_tokens": 220,
+          "total_tokens": 887
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7em_none_eabihf_rs_repair",
+          "latency_sec": 3.419,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7m_none_eabi_rs",
+          "latency_sec": 4.462,
+          "input_tokens": 386,
+          "output_tokens": 209,
+          "total_tokens": 595
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7neon_linux_androideabi_rs",
+          "latency_sec": 3.999,
+          "input_tokens": 577,
+          "output_tokens": 220,
+          "total_tokens": 797
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7neon_linux_androideabi_rs_repair",
+          "latency_sec": 3.472,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7neon_unknown_linux_gnueabihf_rs",
+          "latency_sec": 3.912,
+          "input_tokens": 545,
+          "output_tokens": 220,
+          "total_tokens": 765
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7neon_unknown_linux_gnueabihf_rs_repair",
+          "latency_sec": 3.413,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7neon_unknown_linux_musleabihf_rs",
+          "latency_sec": 3.975,
+          "input_tokens": 632,
+          "output_tokens": 220,
+          "total_tokens": 852
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv7neon_unknown_linux_musleabihf_rs_repair",
+          "latency_sec": 3.888,
+          "input_tokens": 255,
+          "output_tokens": 207,
+          "total_tokens": 462
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv8m_base_none_eabi_rs",
+          "latency_sec": 4.672,
+          "input_tokens": 430,
+          "output_tokens": 220,
+          "total_tokens": 650
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv8m_base_none_eabi_rs_repair",
+          "latency_sec": 3.663,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv8m_main_none_eabi_rs",
+          "latency_sec": 4.764,
+          "input_tokens": 402,
+          "output_tokens": 220,
+          "total_tokens": 622
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv8m_main_none_eabi_rs_repair",
+          "latency_sec": 3.553,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv8m_main_none_eabihf_rs",
+          "latency_sec": 4.869,
+          "input_tokens": 498,
+          "output_tokens": 220,
+          "total_tokens": 718
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_thumbv8m_main_none_eabihf_rs_repair",
+          "latency_sec": 3.327,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_uefi_msvc_base_rs",
+          "latency_sec": 3.633,
+          "input_tokens": 859,
+          "output_tokens": 220,
+          "total_tokens": 1079
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_uefi_msvc_base_rs_repair",
+          "latency_sec": 3.421,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_unikraft_linux_musl_base_rs",
+          "latency_sec": 3.673,
+          "input_tokens": 356,
+          "output_tokens": 220,
+          "total_tokens": 576
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_unikraft_linux_musl_base_rs_repair",
+          "latency_sec": 2.874,
+          "input_tokens": 255,
+          "output_tokens": 197,
+          "total_tokens": 452
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_vxworks_base_rs",
+          "latency_sec": 4.226,
+          "input_tokens": 407,
+          "output_tokens": 220,
+          "total_tokens": 627
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_vxworks_base_rs_repair",
+          "latency_sec": 2.909,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm32_unknown_emscripten_rs",
+          "latency_sec": 3.194,
+          "input_tokens": 615,
+          "output_tokens": 220,
+          "total_tokens": 835
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm32_unknown_emscripten_rs_repair",
+          "latency_sec": 10.08,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm32_unknown_unknown_rs",
+          "latency_sec": 3.761,
+          "input_tokens": 812,
+          "output_tokens": 220,
+          "total_tokens": 1032
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm32_unknown_unknown_rs_repair",
+          "latency_sec": 3.199,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm32_wasi_rs",
+          "latency_sec": 4.485,
+          "input_tokens": 1275,
+          "output_tokens": 220,
+          "total_tokens": 1495
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm32_wasi_rs_repair",
+          "latency_sec": 3.253,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm32_wasi_preview1_threads_rs",
+          "latency_sec": 4.69,
+          "input_tokens": 1256,
+          "output_tokens": 220,
+          "total_tokens": 1476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm32_wasi_preview1_threads_rs_repair",
+          "latency_sec": 3.182,
+          "input_tokens": 255,
+          "output_tokens": 212,
+          "total_tokens": 467
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm64_unknown_unknown_rs",
+          "latency_sec": 4.613,
+          "input_tokens": 707,
+          "output_tokens": 220,
+          "total_tokens": 927
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm64_unknown_unknown_rs_repair",
+          "latency_sec": 3.502,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm_base_rs",
+          "latency_sec": 5.344,
+          "input_tokens": 1137,
+          "output_tokens": 220,
+          "total_tokens": 1357
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_wasm_base_rs_repair",
+          "latency_sec": 3.338,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_windows_gnu_base_rs",
+          "latency_sec": 4.312,
+          "input_tokens": 1379,
+          "output_tokens": 220,
+          "total_tokens": 1599
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_windows_gnu_base_rs_repair",
+          "latency_sec": 3.185,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_windows_gnullvm_base_rs",
+          "latency_sec": 4.113,
+          "input_tokens": 795,
+          "output_tokens": 220,
+          "total_tokens": 1015
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_windows_gnullvm_base_rs_repair",
+          "latency_sec": 3.378,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_windows_msvc_base_rs",
+          "latency_sec": 4.293,
+          "input_tokens": 557,
+          "output_tokens": 220,
+          "total_tokens": 777
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_windows_msvc_base_rs_repair",
+          "latency_sec": 2.632,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_windows_uwp_gnu_base_rs",
+          "latency_sec": 4.026,
+          "input_tokens": 568,
+          "output_tokens": 220,
+          "total_tokens": 788
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_windows_uwp_gnu_base_rs_repair",
+          "latency_sec": 3.808,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_windows_uwp_msvc_base_rs",
+          "latency_sec": 4.105,
+          "input_tokens": 328,
+          "output_tokens": 220,
+          "total_tokens": 548
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_windows_uwp_msvc_base_rs_repair",
+          "latency_sec": 3.235,
+          "input_tokens": 255,
+          "output_tokens": 225,
+          "total_tokens": 480
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_apple_darwin_rs",
+          "latency_sec": 5.622,
+          "input_tokens": 590,
+          "output_tokens": 220,
+          "total_tokens": 810
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_apple_darwin_rs_repair",
+          "latency_sec": 3.636,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_apple_ios_rs",
+          "latency_sec": 4.793,
+          "input_tokens": 447,
+          "output_tokens": 220,
+          "total_tokens": 667
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_apple_ios_rs_repair",
+          "latency_sec": 4.295,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_apple_ios_macabi_rs",
+          "latency_sec": 4.323,
+          "input_tokens": 510,
+          "output_tokens": 220,
+          "total_tokens": 730
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_apple_ios_macabi_rs_repair",
+          "latency_sec": 3.473,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_apple_tvos_rs",
+          "latency_sec": 3.784,
+          "input_tokens": 418,
+          "output_tokens": 220,
+          "total_tokens": 638
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_apple_tvos_rs_repair",
+          "latency_sec": 3.112,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_apple_watchos_sim_rs",
+          "latency_sec": 3.782,
+          "input_tokens": 562,
+          "output_tokens": 220,
+          "total_tokens": 782
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_apple_watchos_sim_rs_repair",
+          "latency_sec": 3.78,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_fortanix_unknown_sgx_rs",
+          "latency_sec": 4.366,
+          "input_tokens": 1006,
+          "output_tokens": 220,
+          "total_tokens": 1226
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_fortanix_unknown_sgx_rs_repair",
+          "latency_sec": 3.759,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_fuchsia_rs",
+          "latency_sec": 3.382,
+          "input_tokens": 234,
+          "output_tokens": 150,
+          "total_tokens": 384
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_linux_android_rs",
+          "latency_sec": 3.98,
+          "input_tokens": 548,
+          "output_tokens": 220,
+          "total_tokens": 768
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_linux_android_rs_repair",
+          "latency_sec": 3.252,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_pc_nto_qnx710_rs",
+          "latency_sec": 4.332,
+          "input_tokens": 487,
+          "output_tokens": 220,
+          "total_tokens": 707
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_pc_nto_qnx710_rs_repair",
+          "latency_sec": 4.175,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_pc_solaris_rs",
+          "latency_sec": 4.515,
+          "input_tokens": 492,
+          "output_tokens": 220,
+          "total_tokens": 712
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_pc_solaris_rs_repair",
+          "latency_sec": 3.944,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_pc_windows_gnu_rs",
+          "latency_sec": 5.896,
+          "input_tokens": 543,
+          "output_tokens": 220,
+          "total_tokens": 763
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_pc_windows_gnu_rs_repair",
+          "latency_sec": 3.877,
+          "input_tokens": 255,
+          "output_tokens": 208,
+          "total_tokens": 463
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_pc_windows_gnullvm_rs",
+          "latency_sec": 4.765,
+          "input_tokens": 469,
+          "output_tokens": 220,
+          "total_tokens": 689
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_pc_windows_gnullvm_rs_repair",
+          "latency_sec": 3.681,
+          "input_tokens": 255,
+          "output_tokens": 202,
+          "total_tokens": 457
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_pc_windows_msvc_rs",
+          "latency_sec": 4.5,
+          "input_tokens": 401,
+          "output_tokens": 220,
+          "total_tokens": 621
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_pc_windows_msvc_rs_repair",
+          "latency_sec": 3.864,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_sun_solaris_rs",
+          "latency_sec": 4.093,
+          "input_tokens": 462,
+          "output_tokens": 220,
+          "total_tokens": 682
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_sun_solaris_rs_repair",
+          "latency_sec": 3.146,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unikraft_linux_musl_rs",
+          "latency_sec": 4.137,
+          "input_tokens": 471,
+          "output_tokens": 220,
+          "total_tokens": 691
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unikraft_linux_musl_rs_repair",
+          "latency_sec": 2.736,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_dragonfly_rs",
+          "latency_sec": 4.87,
+          "input_tokens": 457,
+          "output_tokens": 220,
+          "total_tokens": 677
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_dragonfly_rs_repair",
+          "latency_sec": 3.672,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_freebsd_rs",
+          "latency_sec": 4.625,
+          "input_tokens": 506,
+          "output_tokens": 220,
+          "total_tokens": 726
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_freebsd_rs_repair",
+          "latency_sec": 3.351,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_fuchsia_rs",
+          "latency_sec": 4.94,
+          "input_tokens": 442,
+          "output_tokens": 220,
+          "total_tokens": 662
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_fuchsia_rs_repair",
+          "latency_sec": 5.887,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_haiku_rs",
+          "latency_sec": 4.841,
+          "input_tokens": 486,
+          "output_tokens": 220,
+          "total_tokens": 706
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_haiku_rs_repair",
+          "latency_sec": 4.024,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_hermit_rs",
+          "latency_sec": 4.762,
+          "input_tokens": 433,
+          "output_tokens": 220,
+          "total_tokens": 653
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_hermit_rs_repair",
+          "latency_sec": 3.209,
+          "input_tokens": 255,
+          "output_tokens": 224,
+          "total_tokens": 479
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_illumos_rs",
+          "latency_sec": 4.24,
+          "input_tokens": 492,
+          "output_tokens": 220,
+          "total_tokens": 712
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_illumos_rs_repair",
+          "latency_sec": 3.612,
+          "input_tokens": 254,
+          "output_tokens": 221,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_l4re_uclibc_rs",
+          "latency_sec": 4.23,
+          "input_tokens": 429,
+          "output_tokens": 220,
+          "total_tokens": 649
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_l4re_uclibc_rs_repair",
+          "latency_sec": 2.912,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_linux_gnu_rs",
+          "latency_sec": 3.843,
+          "input_tokens": 546,
+          "output_tokens": 220,
+          "total_tokens": 766
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_linux_gnu_rs_repair",
+          "latency_sec": 3.322,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_linux_gnux32_rs",
+          "latency_sec": 5.13,
+          "input_tokens": 534,
+          "output_tokens": 220,
+          "total_tokens": 754
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_linux_gnux32_rs_repair",
+          "latency_sec": 3.817,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_linux_musl_rs",
+          "latency_sec": 4.125,
+          "input_tokens": 538,
+          "output_tokens": 220,
+          "total_tokens": 758
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_linux_musl_rs_repair",
+          "latency_sec": 3.398,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_linux_ohos_rs",
+          "latency_sec": 4.42,
+          "input_tokens": 546,
+          "output_tokens": 220,
+          "total_tokens": 766
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_linux_ohos_rs_repair",
+          "latency_sec": 3.663,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_netbsd_rs",
+          "latency_sec": 4.166,
+          "input_tokens": 537,
+          "output_tokens": 220,
+          "total_tokens": 757
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_netbsd_rs_repair",
+          "latency_sec": 3.126,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_none_rs",
+          "latency_sec": 5.157,
+          "input_tokens": 684,
+          "output_tokens": 220,
+          "total_tokens": 904
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_none_rs_repair",
+          "latency_sec": 3.151,
+          "input_tokens": 255,
+          "output_tokens": 210,
+          "total_tokens": 465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_openbsd_rs",
+          "latency_sec": 4.734,
+          "input_tokens": 464,
+          "output_tokens": 220,
+          "total_tokens": 684
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_openbsd_rs_repair",
+          "latency_sec": 3.572,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_redox_rs",
+          "latency_sec": 4.159,
+          "input_tokens": 454,
+          "output_tokens": 220,
+          "total_tokens": 674
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_redox_rs_repair",
+          "latency_sec": 5.801,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_uefi_rs",
+          "latency_sec": 4.028,
+          "input_tokens": 753,
+          "output_tokens": 220,
+          "total_tokens": 973
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_unknown_uefi_rs_repair",
+          "latency_sec": 3.439,
+          "input_tokens": 255,
+          "output_tokens": 193,
+          "total_tokens": 448
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_uwp_windows_gnu_rs",
+          "latency_sec": 4.866,
+          "input_tokens": 525,
+          "output_tokens": 220,
+          "total_tokens": 745
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_uwp_windows_gnu_rs_repair",
+          "latency_sec": 3.923,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_uwp_windows_msvc_rs",
+          "latency_sec": 4.182,
+          "input_tokens": 408,
+          "output_tokens": 220,
+          "total_tokens": 628
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_uwp_windows_msvc_rs_repair",
+          "latency_sec": 3.409,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_wrs_vxworks_rs",
+          "latency_sec": 4.187,
+          "input_tokens": 468,
+          "output_tokens": 220,
+          "total_tokens": 688
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64_wrs_vxworks_rs_repair",
+          "latency_sec": 3.076,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64h_apple_darwin_rs",
+          "latency_sec": 4.504,
+          "input_tokens": 903,
+          "output_tokens": 220,
+          "total_tokens": 1123
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_x86_64h_apple_darwin_rs_repair",
+          "latency_sec": 3.257,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.351,
+          "input_tokens": 27665,
+          "output_tokens": 380,
+          "total_tokens": 28045
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.354,
+          "input_tokens": 27895,
+          "output_tokens": 305,
+          "total_tokens": 28200
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.614,
+          "input_tokens": 27430,
+          "output_tokens": 281,
+          "total_tokens": 27711
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.895,
+          "input_tokens": 27703,
+          "output_tokens": 372,
+          "total_tokens": 28075
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.931,
+          "input_tokens": 27633,
+          "output_tokens": 349,
+          "total_tokens": 27982
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.143,
+          "input_tokens": 28051,
+          "output_tokens": 347,
+          "total_tokens": 28398
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.235,
+          "input_tokens": 27847,
+          "output_tokens": 372,
+          "total_tokens": 28219
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.537,
+          "input_tokens": 27837,
+          "output_tokens": 329,
+          "total_tokens": 28166
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.296,
+          "input_tokens": 27847,
+          "output_tokens": 379,
+          "total_tokens": 28226
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.66,
+          "input_tokens": 27694,
+          "output_tokens": 402,
+          "total_tokens": 28096
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.76,
+          "input_tokens": 28043,
+          "output_tokens": 375,
+          "total_tokens": 28418
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.777,
+          "input_tokens": 27783,
+          "output_tokens": 171,
+          "total_tokens": 27954
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.227,
+          "input_tokens": 28068,
+          "output_tokens": 345,
+          "total_tokens": 28413
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 10.198,
+          "input_tokens": 27913,
+          "output_tokens": 348,
+          "total_tokens": 28261
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.54,
+          "input_tokens": 6978,
+          "output_tokens": 398,
+          "total_tokens": 7376
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.863,
+          "input_tokens": 15079,
+          "output_tokens": 764,
+          "total_tokens": 15843
+        }
+      ]
+    }
+  }
+}

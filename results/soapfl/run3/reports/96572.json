@@ -1,0 +1,232 @@
+{
+  "bug_id": "96572",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-04-29",
+    "resolved": "e85edd9a844b523a02dbd89f3c02cd13e4c9fe46"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_typeck/src/check/pat.rs",
+    "compiler/rustc_typeck/src/check/writeback.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_typeck/src/check/fn_ctxt/_impl.rs",
+    "compiler/rustc_infer/src/infer/equate.rs",
+    "compiler/rustc_infer/src/infer/combine.rs",
+    "compiler/rustc_typeck/src/check/fallback.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `type_alias_impl_trait`, allowing a local type alias `T = impl Copy` inside `main`.",
+        "Defines opaque type alias `T` constrained only by the `Copy` trait; its concrete type is inferred from later assignments.",
+        "Initializes `foo: T` with `(1u32, 2u32)`, so the hidden concrete type behind `T` becomes the tuple `(u32, u32)`.",
+        "Uses tuple destructuring by assigning `foo` to `(a, b): (u32, u32)`, requiring `T` to match that exact tuple type.",
+        "Exercises opaque type inference within function scope rather than item scope, a sensitive area for `impl Trait` handling.",
+        "Checks that trait-bound erasure does not lose the concrete layout needed for pattern-compatible tuple assignment.",
+        "Relies on `Copy` semantics so moving `foo` into destructuring is trivially permitted without ownership complications.",
+        "Stresses compiler type checking and normalization of hidden opaque types under nightly feature-gated behavior."
+      ],
+      "summary": "The reproducer uses nightly `type_alias_impl_trait` to define a local opaque alias `T` in `main`. `T` is constrained as `Copy`, then inferred from assigning a `(u32, u32)` tuple to `foo: T`. The code immediately destructures `foo` into `(u32, u32)`, testing whether rustc correctly infers, normalizes, and type-checks the hidden concrete type of a function-local opaque alias."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer consistently points to a compiler ICE in handling function-local `type_alias_impl_trait` opaque types during type checking/normalization. The common pattern is: a local opaque alias `type T = impl Copy` is defined inside `main`, its hidden type is inferred from `let foo: T = (1u32, 2u32)`, and then the value is immediately used in a context requiring its full structural type `(u32, u32)` via tuple destructuring. This stresses the compiler path that must register, infer, reveal, and normalize the hidden type of a local opaque alias, not merely check its trait bound. Since the code is simple, ownership-neutral (`Copy`), and uses a concrete tuple that should type-check cleanly, the panic strongly suggests an internal inconsistency in opaque type inference or reveal logic rather than a user-facing type error. The empty query stack and ICE behavior further suggest a direct compiler assertion/unreachable path in HIR/typeck rather than a normal diagnostic. The most likely bug area is production code that handles local opaque type declarations introduced by `type_alias_impl_trait`, especially when such aliases are unified with a concrete tuple type and then pattern-matched/destructured in the same function scope.",
+      "possible_causes": [
+        "Bug in type checking/inference for function-local `type_alias_impl_trait` opaque aliases, where the hidden type is not correctly recorded or resolved after `let foo: T = (u32, u32)`.",
+        "Defect in opaque type normalization/reveal logic causing rustc to treat local alias `T` as still opaque when tuple destructuring requires the concrete `(u32, u32)` shape.",
+        "Missing or incorrect support in compiler code for local-scope opaque type aliases, as opposed to item-scope aliases, leading to an ICE when later uses require structural matching.",
+        "Compiler assumes an invalid invariant for `impl Trait` aliases during pattern/type ascription checking, hitting an assertion or `bug!()` when destructuring `foo` as `(u32, u32)`.",
+        "Fault in the interaction between hidden-type inference and pattern checking, where tuple layout/arity extraction is attempted before the opaque type has been fully normalized to its inferred concrete type.",
+        "Defect in feature-gated `type_alias_impl_trait` handling on nightly around local HIR/typeck lowering, causing the opaque alias definition inside a function body to enter an unsupported compiler path."
+      ],
+      "evidence": [
+        "The reproducer uses `#![feature(type_alias_impl_trait)]`, directly exercising unstable opaque type alias machinery.",
+        "The alias is local to `main` (`type T = impl Copy;`), which is a more fragile and less common path than item-scope opaque aliases.",
+        "`foo: T` is initialized with `(1u32, 2u32)`, so the compiler must infer and store the hidden concrete type for `T`.",
+        "The next statement destructures `foo` into `(a, b): (u32, u32)`, forcing structural type compatibility rather than only trait-bound checking.",
+        "`Copy` removes ownership/borrow complexity, isolating the failure to type-system handling rather than move semantics.",
+        "The compiler output says it unexpectedly panicked and labels it as a bug, indicating an internal compiler defect rather than valid rejection of the program.",
+        "The query stack is empty, consistent with a direct internal assertion/panic in compiler production code during type checking or normalization.",
+        "The behavior summary explicitly stresses inference, normalization, and type checking of a hidden opaque type under function scope, matching the likely failing subsystem."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1417,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "Per the delayed ICE, the failure originates in this file, and the broken MIR in the message shows tuple field projections being attempted on `PlaceTy { ty: main::T }` during borrowck MIR type checking while the opaque hidden type was never revealed. That squarely implicates the MIR type verifier/checker in this file."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Most directly responsible for inference-time handling of opaque types and TAIT-like aliases. The reproducer hinges on a function-local `type_alias_impl_trait` alias whose hidden type must be replaced, inferred, and later resolved correctly; an ICE here strongly suggests mishandling in the core opaque-type inference path."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "This file reconstructs and validates the hidden type of an opaque alias from its inferred instantiation. The bug pattern involves inferring `(u32, u32)` for a local opaque alias and then needing to reveal that structure, which matches this reverse-mapping/validation logic closely."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/pat.rs",
+        "reason": "The crash is triggered when `foo: T` is destructured as `(a, b): (u32, u32)`, so pattern type checking is the immediate consumer that requires the opaque alias to normalize to tuple structure. A bad assumption or missing normalization step here could produce an ICE."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/writeback.rs",
+        "reason": "After body type checking, writeback resolves inference results and explicitly writes back opaque types. Function-local opaque aliases are especially fragile here, and an unresolved or inconsistently written-back hidden type could lead to a panic during or after tuple-pattern checking."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The reproducer depends on proper normalization/reveal of an opaque alias to its concrete tuple type in the same function body. If normalization leaves the alias opaque or hits an unsupported local-opaque case, downstream pattern checking can ICE."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/fn_ctxt/_impl.rs",
+        "reason": "This is central function-body type-checking infrastructure, including resolution of inference variables and obligations. Since the failure arises in a small function body using local TAIT inference, a bug in per-body inference resolution is plausible here."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/equate.rs",
+        "reason": "The code effectively equates `T` with `(u32, u32)` and later with the annotated destructuring type. If equality/unification involving opaque aliases is mishandled, this file is a likely spot for invalid assumptions leading to ICEs."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "reason": "Shared type relation infrastructure mediates equality and structural relations under `DefineOpaqueTypes` modes. Since the issue is about unifying and structurally matching an opaque alias with a tuple type, a bug in common combine logic is credible."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/fallback.rs",
+        "reason": "Opaque-type inference and fallback interact delicately, and this file explicitly mentions avoiding premature fallback for opaque `impl Trait` variables. A local opaque alias left in a bad unresolved state could manifest as an ICE in later checking."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 124.064,
+    "stage_times_sec": {
+      "checkout": 1.113,
+      "load_bug_context": 0.037,
+      "test_behavior_analysis": 5.339,
+      "test_failure_analysis": 12.475,
+      "load_file_candidates": 0.075,
+      "search_suspicious_files": 105.026
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 340902,
+      "output_tokens": 5879,
+      "total_tokens": 346781,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.339,
+          "input_tokens": 374,
+          "output_tokens": 323,
+          "total_tokens": 697
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.475,
+          "input_tokens": 2260,
+          "output_tokens": 726,
+          "total_tokens": 2986
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.57,
+          "input_tokens": 27998,
+          "output_tokens": 369,
+          "total_tokens": 28367
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.444,
+          "input_tokens": 27591,
+          "output_tokens": 301,
+          "total_tokens": 27892
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.782,
+          "input_tokens": 27751,
+          "output_tokens": 292,
+          "total_tokens": 28043
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.842,
+          "input_tokens": 27765,
+          "output_tokens": 375,
+          "total_tokens": 28140
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.963,
+          "input_tokens": 27814,
+          "output_tokens": 388,
+          "total_tokens": 28202
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.978,
+          "input_tokens": 27776,
+          "output_tokens": 335,
+          "total_tokens": 28111
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.549,
+          "input_tokens": 27852,
+          "output_tokens": 372,
+          "total_tokens": 28224
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.556,
+          "input_tokens": 27483,
+          "output_tokens": 360,
+          "total_tokens": 27843
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.084,
+          "input_tokens": 27116,
+          "output_tokens": 343,
+          "total_tokens": 27459
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.502,
+          "input_tokens": 27613,
+          "output_tokens": 295,
+          "total_tokens": 27908
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.063,
+          "input_tokens": 27425,
+          "output_tokens": 339,
+          "total_tokens": 27764
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.695,
+          "input_tokens": 23237,
+          "output_tokens": 372,
+          "total_tokens": 23609
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 8.979,
+          "input_tokens": 10847,
+          "output_tokens": 689,
+          "total_tokens": 11536
+        }
+      ]
+    }
+  }
+}

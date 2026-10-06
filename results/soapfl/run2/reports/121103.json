@@ -1,0 +1,248 @@
+{
+  "bug_id": "121103",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-15",
+    "resolved": "ee9c7c940c07d8b67c9a6b2ec930db70dcd23a46"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/lib.rs",
+    "compiler/rustc_const_eval/src/transform/check_consts/mod.rs",
+    "compiler/rustc_const_eval/src/transform/check_consts/qualifs.rs",
+    "compiler/rustc_mir_transform/src/promote_consts.rs",
+    "compiler/rustc_borrowck/src/lib.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_middle/src/middle/resolve_bound_vars.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a macro generating const functions that convert a generic closure type into a plain function pointer.",
+        "Uses optional generic parameters and optional `extern ABI` fragments, exercising complex `macro_rules!` parsing and expansion.",
+        "Constrains `F` as `Fn(...) -> R + Copy`, then asserts `size_of::<F>() == 0` to require a zero-sized callable.",
+        "Creates an ABI-matching nested `wrapper` function generic over `F`, returning that monomorphized function item as a function pointer.",
+        "Inside `wrapper`, fabricates an `F` with `MaybeUninit::uninit().assume_init()`, relying on zero-sized types to avoid runtime storage.",
+        "The `let _f_proof = f;` binding forces the input closure value into the type-checking path without using it at runtime.",
+        "Generates both a normal extern-C unary reifier and one using `BridgeConfig<'_>`, exercising higher-ranked/anonymous lifetime handling in function-pointer types.",
+        "Even unused generated items still require parsing, name resolution, type checking, const-checking, and ABI validation by rustc."
+      ],
+      "summary": "The reproducer macro builds const helpers that reify zero-sized `Fn + Copy` closures into `extern \"C\"` function pointers via a generic wrapper. It stresses macro expansion, nested generic functions, ABI-qualified function pointers, unsafe `MaybeUninit` construction, and a parameter type containing `'_`. The bug is likely triggered during rustc’s handling of lifetimes or type checking for the generated extern function signature."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern shows an ICE during MIR-based const qualification/promotion/borrowck of the generated const function `reify_to_extern_c_fn_hrt_bridge`, even though the source also contains a normal user-facing name-resolution error (`E0433`) for `super::BridgeConfig<'_>`. This indicates rustc continues far enough on an invalid item to run MIR const analysis on a malformed/errored type. The triggering item is the macro-generated const fn returning an `extern \"C\"` function pointer and containing a nested generic `extern \"C\" fn wrapper`, with the problematic argument type using an anonymous lifetime `'_` inside a function-pointer signature. The common pattern is interaction between macro expansion, nested generic function items, const checking, extern ABI function-pointer types, and an unresolved path/lifetime-bearing parameter type. The most plausible compiler defect is insufficient error recovery or invalid-type guarding in MIR const qualification for const fns whose signature/body still contains unresolved or erroneous types from name resolution/HRTB/late-bound lifetime lowering.",
+      "possible_causes": [
+        "Missing error-recovery guard in MIR const qualification/promotion for const functions with `TyKind::Error` or unresolved path types, causing analysis to panic instead of bailing out after the `E0433` resolution error.",
+        "Bug in lowering/checking anonymous lifetime `'_` within a macro-generated `extern \"C\" fn(...)` function-pointer type, especially when nested inside a const fn and generic wrapper, producing malformed regions/binders consumed later by MIR passes.",
+        "Incorrect handling of nested generic function items returned as function pointers from const fns when the signature includes extern ABI plus higher-ranked or late-bound lifetime data, leading MIR borrowck/const qualif to assume invariants that do not hold for erroneous signatures.",
+        "A compiler bug in typeck-to-MIR transition where unresolved types inside macro-expanded function signatures are not fully replaced with error types before const-checking, allowing later queries (`mir_const_qualif`, `mir_promoted`, `mir_borrowck`) to operate on inconsistent MIR/type information."
+      ],
+      "evidence": [
+        "Query stack pinpoints the panic in `mir_const_qualif` for `reify_to_extern_c_fn_hrt_bridge`, then `mir_promoted` and `mir_borrowck`, so the crash happens in compiler analysis of MIR for that generated const fn.",
+        "Compiler also emits `error[E0433]: failed to resolve: there are too many leading super keywords` at the `super::BridgeConfig<'_>` type, showing the item is already invalid before the ICE.",
+        "Only the second generated function differs materially from the non-crashing unary case: it uses `super::BridgeConfig<'_>` in an `extern \"C\"` fn signature, implicating lifetime/path handling in that signature.",
+        "The reproducer stresses macro expansion plus nested generic `extern` wrapper inside a const fn, a pattern that can expose bugs when erroneous types are propagated into MIR construction/const analysis.",
+        "The item is unused, yet rustc still performs parsing, resolution, type checking, const-checking, and ABI validation, confirming this is a front-/mid-end compiler robustness issue rather than runtime behavior."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1742,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_transform/src/lib.rs",
+        "reason": "The panic is raised in this file itself: `mir_const_qualif: MIR had errors` while const-checking `reify_to_extern_c_fn_hrt_bridge`. The likely flaw is in the `mir_const_qualif` query provider or its gating - const qualification proceeds on a body already tainted by the earlier resolution error (`too many leading super keywords`) when it should bail out cleanly."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/check_consts/mod.rs",
+        "reason": "The query stack pinpoints the ICE at `mir_const_qualif` while const-checking the generated `const fn reify_to_extern_c_fn_hrt_bridge`. This module owns the top-level const-checking context and query coordination, so a missing early bailout for bodies/signatures already tainted by resolution/type errors is highly suspicious."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/check_consts/qualifs.rs",
+        "reason": "`mir_const_qualif` specifically computes const qualifications. The reproducer mixes an invalid unresolved path with a macro-generated const fn and extern fn-pointer signature containing `'_`; if qualif computation assumes well-formed types and does not tolerate `TyKind::Error` or malformed binders, it could panic here."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/promote_consts.rs",
+        "reason": "The query stack includes `mir_promoted` immediately after const qualification. Promotion logic shares the const-checking context and traverses MIR/types looking for promotable values; erroneous or unresolved types leaking into MIR for this const fn could trip assumptions in promotion candidate collection or validation."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/lib.rs",
+        "reason": "`mir_borrowck` appears in the query stack after promotion. Even if the root cause is earlier, this entry point is where errored/promoted MIR is fetched and analyzed; inadequate guarding against already-invalid MIR bodies can surface as ICEs during analysis."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "The generated item stresses nested generic extern wrapper functions and lifetime-bearing fn-pointer types. MIR type checking inside borrowck is known to ICE when MIR invariants are broken; if unresolved/lowered error types from the invalid `super::BridgeConfig<'_>` signature reach MIR, this module is a plausible crash site."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "The only semantically unusual difference in the crashing item is `BridgeConfig<'_>` inside an `extern \"C\" fn(...)` signature. This file handles lifetime resolution and late-/early-bound variable classification for fn pointers and signatures, making it a strong suspect for malformed binder/region data that later const/MIR passes cannot handle."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "AST/HIR-to-ty lowering of the macro-generated extern fn-pointer type with anonymous lifetime `'_` and an unresolved path is central to this bug pattern. If astconv produces an inconsistent error type or mishandles elided lifetimes in fn-pointer position, later MIR const analysis could ICE."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The compiler correctly emits `E0433` for `super::BridgeConfig`, but still proceeds far enough to ICE on the same item. That suggests late resolution may leave behind partially resolved type/lifetime structures that downstream phases mishandle, especially in macro-expanded function signatures."
+      },
+      {
+        "path": "compiler/rustc_middle/src/middle/resolve_bound_vars.rs",
+        "reason": "This file stores the resolved bound-variable results consumed by later HIR/typeck stages. If erroneous resolution of `'_` in the extern fn-pointer argument is recorded inconsistently, downstream MIR/const qualification could observe invalid binder metadata and panic."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 165.679,
+    "stage_times_sec": {
+      "checkout": 0.166,
+      "load_bug_context": 0.074,
+      "test_behavior_analysis": 7.456,
+      "test_failure_analysis": 13.791,
+      "load_file_candidates": 0.091,
+      "search_suspicious_files": 144.1
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 423217,
+      "output_tokens": 6941,
+      "total_tokens": 430158,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.456,
+          "input_tokens": 663,
+          "output_tokens": 330,
+          "total_tokens": 993
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.791,
+          "input_tokens": 2416,
+          "output_tokens": 652,
+          "total_tokens": 3068
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.531,
+          "input_tokens": 28014,
+          "output_tokens": 343,
+          "total_tokens": 28357
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.005,
+          "input_tokens": 28018,
+          "output_tokens": 347,
+          "total_tokens": 28365
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 11.472,
+          "input_tokens": 27537,
+          "output_tokens": 317,
+          "total_tokens": 27854
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.102,
+          "input_tokens": 27774,
+          "output_tokens": 357,
+          "total_tokens": 28131
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.037,
+          "input_tokens": 27747,
+          "output_tokens": 336,
+          "total_tokens": 28083
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.745,
+          "input_tokens": 28156,
+          "output_tokens": 344,
+          "total_tokens": 28500
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.927,
+          "input_tokens": 27906,
+          "output_tokens": 350,
+          "total_tokens": 28256
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.611,
+          "input_tokens": 27897,
+          "output_tokens": 373,
+          "total_tokens": 28270
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.914,
+          "input_tokens": 28021,
+          "output_tokens": 380,
+          "total_tokens": 28401
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 10.011,
+          "input_tokens": 27780,
+          "output_tokens": 394,
+          "total_tokens": 28174
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.184,
+          "input_tokens": 28129,
+          "output_tokens": 300,
+          "total_tokens": 28429
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.808,
+          "input_tokens": 28034,
+          "output_tokens": 290,
+          "total_tokens": 28324
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.794,
+          "input_tokens": 28168,
+          "output_tokens": 335,
+          "total_tokens": 28503
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.482,
+          "input_tokens": 27947,
+          "output_tokens": 364,
+          "total_tokens": 28311
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.382,
+          "input_tokens": 16031,
+          "output_tokens": 350,
+          "total_tokens": 16381
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.063,
+          "input_tokens": 12979,
+          "output_tokens": 779,
+          "total_tokens": 13758
+        }
+      ]
+    }
+  }
+}

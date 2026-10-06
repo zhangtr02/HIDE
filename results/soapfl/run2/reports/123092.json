@@ -1,0 +1,279 @@
+{
+  "bug_id": "123092",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-03-25",
+    "resolved": "0824b300eb0dae5d9ed59719d3f2732016683d66"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/thir/pattern/check_match.rs",
+    "compiler/rustc_mir_build/src/thir/pattern/mod.rs",
+    "compiler/rustc_mir_build/src/thir/pattern/const_to_pat.rs",
+    "compiler/rustc_pattern_analysis/src/rustc.rs",
+    "compiler/rustc_pattern_analysis/src/constructor.rs",
+    "compiler/rustc_hir_typeck/src/pat.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_parse/src/parser/item.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_ast_lowering/src/pat.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with associated constants, exercising trait items used as compile-time values in later expressions.",
+        "Implements the trait for `TwoDigits`, but `const FIRST: = 10;` omits its type, creating malformed associated-const syntax.",
+        "Uses associated constants through the implementing type path (`TwoDigits::FIRST`, `TwoDigits::LAST`) inside a pattern range.",
+        "The `match` arm uses an inclusive range pattern (`..=`), exercising pattern checking and constant evaluation for bounds.",
+        "The function matches on `u8`, so the compiler must type-check associated constants against the scrutinee type.",
+        "The single-arm match only covers `10..=99`, leaving `0..=9` and `100..=255` uncovered, which triggers exhaustiveness analysis.",
+        "Because the associated-const declaration is syntactically invalid, parsing and recovery may affect later name resolution and diagnostics.",
+        "This reproducer targets compiler behavior around invalid associated constants used in range patterns, likely stressing error recovery paths."
+      ],
+      "summary": "The reproducer defines a trait with associated constants, implements it for a type, and then uses those constants as inclusive range-pattern bounds in a `match` on `u8`. The key fault is the malformed associated constant `const FIRST: = 10;`, which forces parser recovery while later compiler stages still analyze pattern typing, constant resolution, and match exhaustiveness."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in the match-checking pipeline after earlier compilation stages recovered from malformed syntax in an associated const declaration. The reproducer combines three stressors: (1) an invalid associated const impl item (`const FIRST: = 10;`) that likely produces an error node or partially-typed item during recovery, (2) use of that associated const through a type-qualified path (`TwoDigits::FIRST`) as a range-pattern bound, and (3) match exhaustiveness/range analysis on a `u8` scrutinee. The query stack shows the panic occurs specifically in `check_match`, which suggests the parser and earlier analysis tolerated the malformed const enough to continue, but match checking assumed the pattern bounds had valid, fully-typed constants. The common pattern is therefore an error-recovery gap: invalid associated-const syntax is not being converted into a safe error placeholder before range-pattern constant evaluation or usefulness/exhaustiveness checking. A likely defect is that pattern-range lowering or match exhaustiveness code unwraps or normalizes a constant/type result for associated const paths without guarding against `Err`/error types introduced by parser recovery, leading to an ICE instead of a normal diagnostic.",
+      "possible_causes": [
+        "Bug in parser recovery / AST lowering for malformed associated const impl items: `const FIRST: = 10;` may produce an incomplete associated-const node that later stages treat as well-formed.",
+        "Bug in name resolution or type checking for associated const paths used in patterns: `TwoDigits::FIRST` in pattern position may resolve to an error or partially-defined const, but match checking does not recognize and short-circuit on that error.",
+        "Bug in constant-evaluation/lowering for pattern range bounds: inclusive range patterns may assume both endpoints are valid constants of the scrutinee type and panic when one endpoint comes from a malformed associated const.",
+        "Bug in match exhaustiveness/usefulness analysis: `check_match` may be attempting to construct integer ranges from pattern bounds and unwrapping an invalid constant/type instead of propagating an `ErrorGuaranteed`.",
+        "Missing error-type propagation in THIR/MIR pattern construction for range patterns involving associated consts, allowing an erroneous pattern to reach `check_match` in an inconsistent state.",
+        "Defect in handling trait-associated constants accessed via implementing-type paths during error recovery; compiler may not correctly distinguish invalid associated item definitions from valid const values when used as pattern bounds."
+      ],
+      "evidence": [
+        "Query stack ends at `#0 [check_match] match-checking digits`, directly localizing the ICE to match analysis rather than parsing alone.",
+        "The reproducer uses `TwoDigits::FIRST..=TwoDigits::LAST` in a match pattern, which forces range-pattern constant handling and exhaustiveness checking.",
+        "`const FIRST: = 10;` is malformed syntax, so any successful progression to match checking implies parser/type recovery occurred and may have left invalid intermediate state.",
+        "The scrutinee is `u8`, so match checking must compare/range-normalize the associated const bounds against an integer type, increasing the chance of a panic if one bound has an error type.",
+        "The behavior summary explicitly highlights invalid associated constants used in range patterns and notes parser recovery affecting later name resolution and diagnostics.",
+        "The single-arm match is non-exhaustive, guaranteeing `check_match` usefulness/exhaustiveness logic runs; this matches the query stack showing the crash during match checking."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1765,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/thir/pattern/check_match.rs",
+        "reason": "The query stack ends directly in `check_match`, making this the most likely crash site. The reproducer reaches match checking with an erroneous range pattern bound (`TwoDigits::FIRST`) coming from malformed associated-const syntax, so this file is a prime place for an unchecked assumption about already-valid pattern constants or types during exhaustiveness/usefulness processing."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/pattern/mod.rs",
+        "reason": "This module lowers typed HIR patterns into THIR patterns before `check_match` consumes them. A malformed associated const used as a range bound may be turned into an inconsistent THIR pattern instead of an error pattern, allowing bad state to propagate into match checking."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/pattern/const_to_pat.rs",
+        "reason": "Range-pattern bounds and constant patterns rely on converting constants into THIR pattern forms. If `TwoDigits::FIRST` resolves to an error or partially-recovered associated const, this file may be failing to gracefully convert that failure into an error pattern, leading to the later ICE in match analysis."
+      },
+      {
+        "path": "compiler/rustc_pattern_analysis/src/rustc.rs",
+        "reason": "This is the rustc integration layer for usefulness/exhaustiveness analysis and handles Rust-specific constructors, ranges, and diagnostics. Since the crash occurs during match checking on an inclusive integer range with erroneous constant endpoints, this adapter layer is highly suspicious for mishandling invalid or error-tainted range bounds."
+      },
+      {
+        "path": "compiler/rustc_pattern_analysis/src/constructor.rs",
+        "reason": "The reproducer specifically stresses integer range-pattern handling (`..=`) on `u8`. This file owns constructor and integer-range modeling, so an invalid or error-valued endpoint could trigger an unchecked conversion or invalid range construction here during usefulness analysis."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/pat.rs",
+        "reason": "Pattern type checking must resolve and type associated const paths used as pattern bounds. If this stage permits an error-typed or unresolved associated const in a range pattern without producing a safe sentinel, downstream match checking could ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "The malformed impl item is `const FIRST: = 10;`, i.e. an associated const with missing type syntax. This file computes declared types for associated items and is a plausible source of bad recovery for an impl-associated const whose missing type later causes downstream pattern-constant logic to see inconsistent metadata."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/item.rs",
+        "reason": "The root invalid construct is malformed associated-const item syntax inside an impl. If parser recovery for impl items constructs an incomplete AST node instead of a robust error placeholder, later phases could incorrectly treat `FIRST` as a usable associated const, eventually crashing in match checking."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "AST validation is an early stage that can reject malformed AST shapes before lowering. If the recovered associated-const item with a missing type is not being rejected or normalized here, invalid structure may leak into later type and pattern analysis."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/pat.rs",
+        "reason": "Although the malformed syntax is in an impl item, the failing use is specifically a pattern range bound. This file lowers AST patterns to HIR and may mishandle recovered path/range-pattern forms involving erroneous associated const references, contributing to invalid HIR/THIR state consumed by `check_match`."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 177.225,
+    "stage_times_sec": {
+      "checkout": 0.603,
+      "load_bug_context": 0.199,
+      "test_behavior_analysis": 6.759,
+      "test_failure_analysis": 11.311,
+      "load_file_candidates": 18.184,
+      "search_suspicious_files": 140.169
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 22,
+      "input_tokens": 426184,
+      "output_tokens": 7502,
+      "total_tokens": 433686,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.759,
+          "input_tokens": 393,
+          "output_tokens": 288,
+          "total_tokens": 681
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.31,
+          "input_tokens": 2180,
+          "output_tokens": 692,
+          "total_tokens": 2872
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_typeck_src_inherited_rs",
+          "latency_sec": 6.147,
+          "input_tokens": 1418,
+          "output_tokens": 220,
+          "total_tokens": 1638
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_typeck_src_inherited_rs_repair",
+          "latency_sec": 3.081,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ty_binding_rs",
+          "latency_sec": 5.622,
+          "input_tokens": 369,
+          "output_tokens": 220,
+          "total_tokens": 589
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_ty_binding_rs_repair",
+          "latency_sec": 3.239,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.573,
+          "input_tokens": 27884,
+          "output_tokens": 337,
+          "total_tokens": 28221
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.841,
+          "input_tokens": 27752,
+          "output_tokens": 330,
+          "total_tokens": 28082
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.253,
+          "input_tokens": 27371,
+          "output_tokens": 319,
+          "total_tokens": 27690
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.516,
+          "input_tokens": 27558,
+          "output_tokens": 308,
+          "total_tokens": 27866
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.731,
+          "input_tokens": 27569,
+          "output_tokens": 339,
+          "total_tokens": 27908
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.128,
+          "input_tokens": 27954,
+          "output_tokens": 329,
+          "total_tokens": 28283
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 10.856,
+          "input_tokens": 27718,
+          "output_tokens": 408,
+          "total_tokens": 28126
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.196,
+          "input_tokens": 27703,
+          "output_tokens": 346,
+          "total_tokens": 28049
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.899,
+          "input_tokens": 27797,
+          "output_tokens": 365,
+          "total_tokens": 28162
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.399,
+          "input_tokens": 27637,
+          "output_tokens": 334,
+          "total_tokens": 27971
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.928,
+          "input_tokens": 27924,
+          "output_tokens": 339,
+          "total_tokens": 28263
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.503,
+          "input_tokens": 27760,
+          "output_tokens": 166,
+          "total_tokens": 27926
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.724,
+          "input_tokens": 28013,
+          "output_tokens": 305,
+          "total_tokens": 28318
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.394,
+          "input_tokens": 27752,
+          "output_tokens": 372,
+          "total_tokens": 28124
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.191,
+          "input_tokens": 20631,
+          "output_tokens": 302,
+          "total_tokens": 20933
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.008,
+          "input_tokens": 12291,
+          "output_tokens": 745,
+          "total_tokens": 13036
+        }
+      ]
+    }
+  }
+}

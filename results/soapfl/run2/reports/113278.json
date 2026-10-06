@@ -1,0 +1,251 @@
+{
+  "bug_id": "113278",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-07-02",
+    "resolved": "6162f6f12339aa81fe16b8a64644ead497e411b2"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_infer/src/infer/projection.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_monomorphize/src/collector.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly features `type_alias_impl_trait` and `trivial_bounds`, testing unstable opaque type aliases and permissive where-clause bounds.",
+        "Defines opaque alias `Sep = impl Sized` and fixes its hidden concrete type through `define_sep()`, exercising TAIT hidden-type inference.",
+        "Declares opaque alias `Tait = impl Mk`, requiring the compiler to infer a concrete hidden type satisfying trait `Mk`.",
+        "Trait `Mk` inherits from `Proj` and returns the projected associated type `<Self as Proj>::Assoc`, stressing trait-supertrait projection.",
+        "Blanket impl `impl<T> Mk for T where T: Proj<Assoc = ()>` ties `Mk` implementation validity to an associated-type equality constraint.",
+        "Implements `Proj` for `()` with `Assoc = Sep`, creating tension with the later bound `(): Proj<Assoc = ()>` because `Sep` is opaque.",
+        "Function `define() -> Tait where (): Proj<Assoc = ()>` has an impossible/trivial-looking bound and no body expression, probing opaque type definition and bound checking.",
+        "`main` calls `<sus::Tait as sus::Mk>::mk()`, forcing normalization of the inferred opaque `Tait`, trait selection, and associated-type resolution."
+      ],
+      "summary": "The reproducer stresses nightly opaque type aliases, associated-type projection, and trait solving. It defines two TAITs, makes `Mk` depend on `Proj::Assoc`, then introduces a contradictory bound equating `()`’s associated type with `()`, even though it is the opaque `Sep`. The final UFCS call forces rustc to infer `Tait`, normalize projections, and validate the impossible bound, exposing a compiler bug in opaque-type/trait-resolution handling."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failing reproducer consistently stresses the interaction of type_alias_impl_trait (TAIT) with trait solving and associated-type projection. The key pattern is that an opaque type alias is used as an associated type (`Proj for () { type Assoc = Sep; }`), while another opaque alias (`Tait = impl Mk`) must satisfy a supertrait-based projection (`Mk: Proj`, `fn mk() -> <Self as Proj>::Assoc`). The function defining `Tait` adds a contradictory equality bound `(): Proj<Assoc = ()>`, even though the only visible impl gives `Assoc = Sep`. The final UFCS call forces the compiler to resolve the hidden type of `Tait`, apply the blanket `Mk` impl requiring `T: Proj<Assoc = ()>`, and normalize `<Tait as Proj>::Assoc`. Instead of rejecting the impossible constraints cleanly, rustc ICEs during `collect_and_partition_mono_items`, which suggests the compiler allowed an invalid or unresolved opaque/projection state to survive into monomorphization/codegen. The commonality across the reproducer behavior and query stack is incomplete validation/normalization of TAIT hidden types under associated-type equality constraints, especially when supertraits and blanket impl selection are involved.",
+      "possible_causes": [
+        "A defect in opaque type alias hidden-type inference/registration for `type_alias_impl_trait`, where `Tait = impl Mk` is accepted without fully resolving or rejecting the contradictory trait obligations induced by `Mk` and `Proj<Assoc = ()>`.",
+        "A bug in trait solver / projection normalization handling associated-type equality constraints involving opaque aliases, incorrectly treating `Sep` as compatible with `()` or leaving the equality obligation unsafely deferred.",
+        "A compiler defect in well-formedness or item type-checking for TAIT-defining functions, where `fn define() -> Tait where (): Proj<Assoc = ()>` is not rejected before later stages despite the only impl providing `Assoc = Sep`.",
+        "A monomorphization collector (`collect_and_partition_mono_items`) assumption violation: codegen reaches a state with an unconstrained/errorful opaque type or projection obligation, leading to an ICE instead of graceful error propagation.",
+        "A bug in obligation fulfillment across supertrait projections (`Mk: Proj`) combined with blanket impl selection (`impl<T> Mk for T where T: Proj<Assoc = ()>`), causing rustc to pick or normalize an impl for an opaque hidden type before proving the required associated-type equality."
+      ],
+      "evidence": [
+        "The reproducer uses two TAITs (`Sep`, `Tait`) and forces hidden-type inference through function definitions, a known sensitive compiler area.",
+        "`Mk` depends on `Proj` via a supertrait and returns `<Self as Proj>::Assoc`, so successful compilation requires correct projection normalization.",
+        "The blanket impl `impl<T> Mk for T where T: Proj<Assoc = ()>` introduces a strict associated-type equality requirement.",
+        "`Proj` is implemented for `()` with `Assoc = Sep`, which conflicts with the bound `(): Proj<Assoc = ()>` appearing in `define()`.",
+        "`main` calls `<sus::Tait as sus::Mk>::mk()`, forcing trait selection and normalization for the opaque alias `Tait`.",
+        "The compiler ICE occurs in query `collect_and_partition_mono_items`, indicating invalid type/obligation state escaped earlier semantic checking and reached monomorphization.",
+        "The test summary explicitly highlights contradictory opaque-type and projection constraints, matching a compiler-side failure in opaque-type/trait-resolution handling rather than a reproducer logic bug."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1639,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "Most directly responsible for collecting TAIT hidden types from defining uses. This reproducer hinges on `type_alias_impl_trait` with `Tait = impl Mk` and a malformed/contradictory defining function `define() -> Tait where (): Proj<Assoc = ()>`. If hidden-type collection accepts or records an invalid opaque definition instead of rejecting it, bad state can escape into later monomorphization and cause the ICE."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Central inference-layer machinery for replacing and resolving opaque aliases during type checking. The bug description strongly suggests an unresolved or incorrectly unified opaque hidden type survived trait solving, especially with `Sep` appearing as an associated type and `Tait` constrained through `Mk: Proj`. This file is a prime suspect for mishandling opaque inference obligations."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The reproducer forces normalization of `<sus::Tait as sus::Mk>::mk()` and therefore `<Self as Proj>::Assoc`, with an associated-type equality constraint that conflicts through the opaque alias `Sep`. Classic projection/normalization logic is very likely involved if rustc incorrectly normalizes or defers the `Proj<Assoc = ()>` obligation."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The function defining `Tait` carries an impossible-looking bound `(): Proj<Assoc = ()>` while the only visible impl gives `Assoc = Sep`. If well-formedness checking fails to reject this defining use early, later phases may operate on an invalid opaque setup. This matches the symptom of an ICE only surfacing during mono-item collection."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "Fulfillment is responsible for driving pending obligations to completion under the legacy solver used by this nightly. A bug here could leave the contradictory projection/equality obligations involving opaque types ambiguously or erroneously satisfied, allowing codegen-facing queries to see inconsistent state."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/projection.rs",
+        "reason": "This helper creates deferred projection obligations when associated types cannot be normalized immediately. The reproducer specifically stresses deferred projection of `<Self as Proj>::Assoc` through a blanket impl and opaque aliases, so incorrect deferral or later resolution here could explain how invalid obligations survive too long."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "Inference-layer projection cache and normalization support can mis-handle projection results involving aliases and opaque types. Since the failure pattern is about associated-type equality with opaque aliases, a bad cached or ambiguous projection result here is plausible."
+      },
+      {
+        "path": "compiler/rustc_monomorphize/src/collector.rs",
+        "reason": "The ICE is reported during `collect_and_partition_mono_items`, making this the immediate crash site. While likely not the root semantic bug, this file is suspicious because mono-item collection may assume all trait/opaque normalization is settled and then panic when encountering an invalid or unrevealed instance stemming from earlier TAIT/projection handling."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Provides core remapping machinery for opaque type keys and generic arguments. This reproducer mixes local TAIT definitions, associated types, and hidden-type extraction, so an argument-remapping bug could cause the compiler to compare or register the wrong opaque hidden type under contradictory bounds."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "`Mk` depends on `Proj` as a supertrait, and the reproducer relies on the compiler correctly propagating those predicates when analyzing `Tait = impl Mk`. If predicate collection around supertraits or opaque items is incomplete or wrong, the compiler could accept an invalid hidden type and later ICE when the UFCS call forces normalization."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 157.157,
+    "stage_times_sec": {
+      "checkout": 3.223,
+      "load_bug_context": 0.267,
+      "test_behavior_analysis": 6.343,
+      "test_failure_analysis": 14.057,
+      "load_file_candidates": 4.493,
+      "search_suspicious_files": 128.774
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 402063,
+      "output_tokens": 7514,
+      "total_tokens": 409577,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.343,
+          "input_tokens": 541,
+          "output_tokens": 363,
+          "total_tokens": 904
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.057,
+          "input_tokens": 2464,
+          "output_tokens": 741,
+          "total_tokens": 3205
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_inspect_dump_rs",
+          "latency_sec": 4.39,
+          "input_tokens": 256,
+          "output_tokens": 184,
+          "total_tokens": 440
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.426,
+          "input_tokens": 27953,
+          "output_tokens": 355,
+          "total_tokens": 28308
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.323,
+          "input_tokens": 28074,
+          "output_tokens": 328,
+          "total_tokens": 28402
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.387,
+          "input_tokens": 27543,
+          "output_tokens": 368,
+          "total_tokens": 27911
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.107,
+          "input_tokens": 27974,
+          "output_tokens": 348,
+          "total_tokens": 28322
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.248,
+          "input_tokens": 27853,
+          "output_tokens": 406,
+          "total_tokens": 28259
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.249,
+          "input_tokens": 28267,
+          "output_tokens": 365,
+          "total_tokens": 28632
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.49,
+          "input_tokens": 28083,
+          "output_tokens": 399,
+          "total_tokens": 28482
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.272,
+          "input_tokens": 28095,
+          "output_tokens": 320,
+          "total_tokens": 28415
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.039,
+          "input_tokens": 28076,
+          "output_tokens": 448,
+          "total_tokens": 28524
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.838,
+          "input_tokens": 27860,
+          "output_tokens": 352,
+          "total_tokens": 28212
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 10.01,
+          "input_tokens": 28162,
+          "output_tokens": 506,
+          "total_tokens": 28668
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.376,
+          "input_tokens": 28157,
+          "output_tokens": 379,
+          "total_tokens": 28536
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.213,
+          "input_tokens": 28282,
+          "output_tokens": 421,
+          "total_tokens": 28703
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.945,
+          "input_tokens": 19579,
+          "output_tokens": 397,
+          "total_tokens": 19976
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.825,
+          "input_tokens": 14844,
+          "output_tokens": 834,
+          "total_tokens": 15678
+        }
+      ]
+    }
+  }
+}

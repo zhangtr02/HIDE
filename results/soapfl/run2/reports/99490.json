@@ -1,0 +1,237 @@
+{
+  "bug_id": "99490",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-07-19",
+    "resolved": "f8588549c3c3d45c32b404210cada01e2a45def3"
+  },
+  "final_top10": [
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types/table.rs",
+    "compiler/rustc_typeck/src/check/writeback.rs",
+    "compiler/rustc_typeck/src/check/check.rs",
+    "compiler/rustc_typeck/src/check/wfcheck.rs",
+    "compiler/rustc_infer/src/infer/at.rs",
+    "compiler/rustc_infer/src/infer/combine.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_typeck/src/check/fallback.rs",
+    "compiler/rustc_middle/src/infer/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `type_alias_impl_trait`, defining `type Tait = impl Sized;` as an opaque alias whose concrete type is inferred by the compiler.",
+        "Function `one() -> Tait` constrains the opaque alias to the concrete hidden type `One` through its returned value.",
+        "Function `two() -> Tait` returns `Two<()>`, introducing a conflicting hidden type for the same opaque alias.",
+        "`todo!()` supplies a diverging expression of type `!`, which coerces to `()`, allowing construction of `Two::<()>(todo!())` during type checking.",
+        "The reproducer exercises opaque type unification rules: every defining use of one type alias `impl Trait` must resolve to one identical concrete type.",
+        "It tests compiler checking across multiple item-level functions sharing the same opaque alias, not separate `impl Trait` return types.",
+        "`Sized` is a minimal trait bound, so the failure is about hidden-type consistency rather than trait satisfaction complexity.",
+        "`main` is empty; the bug is triggered during compilation, especially opaque type inference and mismatch diagnostics."
+      ],
+      "summary": "This reproducer defines one opaque type alias and uses it as the return type of two functions that produce different concrete types, `One` and `Two<()>`. The `todo!()` expression relies on never-type coercion to fit `()`. The key behavior under test is rustc’s handling of `type_alias_impl_trait`: all defining uses of the same alias must agree on one hidden concrete type, so compilation should detect or mishandle that mismatch."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is a single `type_alias_impl_trait` opaque alias (`type Tait = impl Sized`) being defined by multiple item-level functions that return different concrete hidden types. `one()` fixes the hidden type to `One`, while `two()` fixes the same alias to `Two<()>`. Because both are defining uses of the same opaque alias, rustc should enforce hidden-type equality across them. The build instead succeeds with only warnings, so the compiler is failing to record, compare, or reject conflicting hidden types for the same TAIT. The presence of `todo!()`/never-type coercion in `two()` is incidental but important: it shows type checking accepted `Two::<()>(todo!())` and therefore the missing error is specifically in opaque type hidden-type consistency checking rather than ordinary expression typing. This points to a defect in the TAIT opaque type inference/unification or in the validation pass that checks all defining uses of an opaque alias agree on one concrete type.",
+      "possible_causes": [
+        "Bug in `type_alias_impl_trait` hidden-type collection: rustc may be storing only one defining use of the opaque alias and not merging/checking subsequent definitions from other functions.",
+        "Missing or incorrect equality check for hidden types of the same opaque type alias across separate item bodies, causing `One` and `Two<()>` to be treated as independently acceptable.",
+        "Defect in opaque type inference/constraint solving where the compiler accepts incompatible hidden types as long as each individually satisfies the alias bounds (`Sized`), instead of enforcing exact concrete-type identity.",
+        "A validation pass for TAIT defining uses may be skipped or incomplete for item-level function return positions, so cross-function consistency diagnostics are never emitted.",
+        "Incorrect handling of divergent-expression coercion during opaque type inference may allow `two()` to avoid contributing a concrete hidden type conflict, masking the mismatch with `one()`.",
+        "Possible regression in the feature-gated TAIT implementation around `handle_opaque_type` / hidden-type registration logic, especially for aliases whose bounds are trivial and whose conflicting definitions occur in separate functions."
+      ],
+      "evidence": [
+        "The reproducer uses one shared opaque alias `type Tait = impl Sized;` rather than separate `impl Trait` return types, so all defining uses must resolve to one hidden type.",
+        "`one() -> Tait { One }` and `two() -> Tait { Two::<()>(todo!()) }` clearly produce different concrete types: `One` vs `Two<()>`.",
+        "Compiler output shows successful compilation (`Return code: 0`) with only warnings, but no error about conflicting hidden types for the same opaque alias.",
+        "The test behavior explicitly targets opaque type unification rules and states that every defining use of one type alias `impl Trait` must resolve to one identical concrete type.",
+        "`Sized` is satisfied by both `One` and `Two<()>`, so the missing rejection cannot be explained by trait-bound checking; it specifically implicates hidden-type consistency enforcement.",
+        "`todo!()` is accepted via never-type coercion to `()`, indicating normal expression/type coercion worked and the defect lies later in opaque type checking or validation."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1459,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Most directly matches the failure mode: this file tracks and resolves opaque/TAIT hidden types during inference. The reproducer shows two defining uses of the same type alias `impl Trait` producing different hidden types, yet compilation succeeds, which strongly suggests hidden-type registration/merging or conflict detection for the same `OpaqueTypeKey` is missing or incorrect here."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types/table.rs",
+        "reason": "This file manages the inference-time storage for opaque type declarations keyed by `OpaqueTypeKey`. If conflicting definitions from `one()` and `two()` are overwriting each other, not being compared, or being transactionally mishandled, the bug could live in this table layer."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/writeback.rs",
+        "reason": "Writeback finalizes body type-check results and explicitly writes back opaque types. Since the bug involves multiple item bodies defining the same TAIT across separate functions, an error could stem from opaque type information not being propagated or consolidated correctly during finalization."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/check.rs",
+        "reason": "This is core body/item type-checking coordination. If TAIT defining uses in separate functions are supposed to trigger cross-item consistency checks, the orchestration or invocation of those checks may be missing here, leading to successful compilation instead of a mismatch error."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "Well-formedness checking for item signatures/definitions is a plausible place for enforcing that all defining uses of a type alias `impl Trait` agree on one hidden type. The absence of any diagnostic suggests this validation may be skipped or incomplete here for TAITs."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/at.rs",
+        "reason": "This file exposes the `DefineOpaqueTypes` policy used during equality/relating operations. A wrong policy choice when comparing return expressions against TAITs could allow each function body to define the opaque independently without enforcing global equality."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "reason": "If hidden-type equality is enforced through general type relation/unification machinery, a bug in combining types while `DefineOpaqueTypes` is enabled could cause incompatible concrete hidden types like `One` and `Two<()>` to be treated as acceptable."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "This file performs post-inference handling of opaque types and produces resolved hidden types for opaque declarations. Although the reproducer is primarily about type identity rather than regions, TAIT resolution bugs can surface here if only one hidden type is retained or if cross-definition consistency is not checked after inference."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/fallback.rs",
+        "reason": "The comments explicitly mention special care around opaque `impl Trait` inference variables and conflicting hidden types. Since `todo!()` introduces divergence/never-type coercion, an interaction with fallback could incorrectly avoid forcing or comparing the conflicting hidden type from `two()`."
+      },
+      {
+        "path": "compiler/rustc_middle/src/infer/mod.rs",
+        "reason": "This file contains shared inference data structures around opaque types, especially member constraints tied to `OpaqueTypeKey`. If the bug is rooted in a shared representation or missing constraint needed to connect multiple defining uses of the same TAIT, this is a plausible underlying source."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 149.776,
+    "stage_times_sec": {
+      "checkout": 24.167,
+      "load_bug_context": 0.194,
+      "test_behavior_analysis": 6.356,
+      "test_failure_analysis": 9.636,
+      "load_file_candidates": 0.092,
+      "search_suspicious_files": 109.33
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 337740,
+      "output_tokens": 5884,
+      "total_tokens": 343624,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.356,
+          "input_tokens": 378,
+          "output_tokens": 323,
+          "total_tokens": 701
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 9.636,
+          "input_tokens": 1254,
+          "output_tokens": 640,
+          "total_tokens": 1894
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.169,
+          "input_tokens": 26896,
+          "output_tokens": 301,
+          "total_tokens": 27197
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.383,
+          "input_tokens": 26466,
+          "output_tokens": 339,
+          "total_tokens": 26805
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.794,
+          "input_tokens": 26495,
+          "output_tokens": 262,
+          "total_tokens": 26757
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.684,
+          "input_tokens": 26733,
+          "output_tokens": 350,
+          "total_tokens": 27083
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.536,
+          "input_tokens": 26654,
+          "output_tokens": 313,
+          "total_tokens": 26967
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.256,
+          "input_tokens": 26718,
+          "output_tokens": 350,
+          "total_tokens": 27068
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.172,
+          "input_tokens": 26727,
+          "output_tokens": 326,
+          "total_tokens": 27053
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.739,
+          "input_tokens": 26601,
+          "output_tokens": 379,
+          "total_tokens": 26980
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 10.242,
+          "input_tokens": 25462,
+          "output_tokens": 327,
+          "total_tokens": 25789
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.626,
+          "input_tokens": 26481,
+          "output_tokens": 251,
+          "total_tokens": 26732
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.181,
+          "input_tokens": 26775,
+          "output_tokens": 358,
+          "total_tokens": 27133
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.142,
+          "input_tokens": 26459,
+          "output_tokens": 307,
+          "total_tokens": 26766
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.243,
+          "input_tokens": 5910,
+          "output_tokens": 332,
+          "total_tokens": 6242
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.138,
+          "input_tokens": 11731,
+          "output_tokens": 726,
+          "total_tokens": 12457
+        }
+      ]
+    }
+  }
+}

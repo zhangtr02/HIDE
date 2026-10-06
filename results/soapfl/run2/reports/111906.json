@@ -1,0 +1,258 @@
+{
+  "bug_id": "111906",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-08-19",
+    "resolved": "d06ca0ffaf4ac72732665f99dd9ad962194cd0b3"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_typeck/src/check.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/equate.rs",
+    "compiler/rustc_infer/src/infer/generalize.rs",
+    "compiler/rustc_trait_selection/src/solve/opaques.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a generic function with an unusual lifetime bound `'a: 'a`, exercising lifetime parsing and well-formedness checks on self-outlives constraints.",
+        "Uses `impl Sized` as an opaque return type, forcing the compiler to infer a concrete hidden type from the function body.",
+        "Inside `foo`, assigns `foo::<'a>()` to `let _: ()`, requiring type checking of a recursive call against the concrete unit type.",
+        "The recursive call is monomorphized with an explicit lifetime argument, exercising generic substitution for lifetime-only instantiations.",
+        "`loop {}` makes the function body diverge, introducing the never type behavior and coercion from divergence to the declared return type.",
+        "Because divergence can satisfy any return type, the recursive call is used only for type checking, not for producing a runtime value.",
+        "The combination of opaque return inference, recursive self-reference, and divergence stresses compiler normalization and cycle handling during type checking.",
+        "`main` is empty, so the reproducer targets compile-time analysis only rather than runtime behavior."
+      ],
+      "summary": "This reproducer is a compile-only test centered on `foo`, a lifetime-generic function returning `impl Sized`. Its body recursively calls itself, forces that result to type `()`, and then diverges with `loop {}`. The code stresses Rust’s handling of self-outlives lifetime bounds, opaque return type inference, recursive type checking, never-type coercions, and compiler cycle detection/normalization in a divergent context."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on type checking a recursive function that returns an opaque type (`impl Sized`) while its body contains a self-call forced to the concrete type `()`, followed by divergence (`loop {}`). This combines several compiler-sensitive mechanisms: opaque type hidden-type inference, recursive self-reference during body checking, lifetime-only generic substitution (`foo::<'a>()`), and coercion/typing in a diverging context. The crash is reported during crate analysis/type checking (`check_mod_item_types` / `check_crate`), with the highlighted span at `let _: () = foo::<'a>();`, which indicates the ICE happens while validating the call expression against the annotated local type. A likely common pattern is that the compiler tries to reveal or equate the opaque return type of `foo` with `()` while simultaneously inferring that same opaque type from `foo`'s own body, creating a self-referential normalization/inference path that is not handled gracefully. The unusual but legal lifetime bound `'a: 'a` and explicit lifetime instantiation likely contribute by exercising generic argument substitution in this recursive opaque-type context, but they are probably only triggers rather than the root issue.",
+      "possible_causes": [
+        "A defect in opaque return type (`impl Trait`) hidden-type inference during type checking of recursive functions, where the compiler does not correctly detect or reject a self-referential inference cycle when the function body calls itself.",
+        "A bug in normalization/equation of an opaque type against a concrete expected type (`()`) at a call site inside the defining function, causing an ICE instead of producing a proper type error or cycle diagnostic.",
+        "Incorrect cycle handling in `check_mod_item_types`/HIR type checking for recursive use of a function's own opaque return type, especially when the body later diverges and the hidden type may be inferred from unreachable or diverging control flow.",
+        "A compiler defect in handling diverging bodies (`loop {}` / never-type coercion) together with opaque return inference, where the hidden type fallback or coercion logic leaves inconsistent obligations that trigger a panic during type checking.",
+        "A bug in generic substitution or region handling for lifetime-only instantiations of a recursively defined function with an opaque return type, potentially exposed by the explicit `foo::<'a>()` call and the self-outlives bound `'a: 'a`.",
+        "Missing validation path for recursive opaque type use in local variable type ascription (`let _: () = ...`), leading to an internal assertion failure when the compiler attempts to resolve the callee return type before the defining opaque type is fully established."
+      ],
+      "evidence": [
+        "The highlighted source location is the recursive call assigned to a concrete type: `let _: () = foo::<'a>();`, showing the crash is triggered when checking the call result against `()`.",
+        "The function returns `impl Sized`, so the compiler must infer a hidden concrete type from the body; recursive self-calls make that inference self-referential.",
+        "The body ends with `loop {}`, so the function diverges and never returns a runtime value, meaning the recursive call is present primarily to stress compile-time type checking rather than runtime semantics.",
+        "The reproducer specifically combines recursive self-reference, opaque return type inference, and divergence, which is a classic pattern for normalization/cycle-detection bugs in compiler type systems.",
+        "The stack trace shows the ICE during analysis/type-checking phases (`check_mod_item_types`, `check_crate`) rather than code generation, matching a frontend type inference/normalization defect.",
+        "The explicit lifetime instantiation `foo::<'a>()` and unusual bound `'a: 'a` indicate the compiler is also exercising generic/lifetime substitution while resolving the recursive opaque return type."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1656,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "A delayed ICE is raised directly here (`opaque type with non-universal region args`, line 95), with `RegionInferenceContext::infer_opaque_types` sitting at the top of the failing stack. The reproducer is built around RPIT hidden-type inference combined with lifetime substitution - precisely the invariants this file checks and rewrites once region inference finishes - so the bug most plausibly lives in this post-inference opaque-type rewrite."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "Most suspicious because the ICE is triggered exactly at `let _: () = foo::<'a>();`, which is expression checking of a call under an expected type. This file handles call expressions, expected-type-driven checking, coercions, diverging expressions, and never-type behavior. The reproducer stresses recursive self-calls plus `impl Trait` return normalization against a concrete `()` expectation, which is the kind of interaction expression type checking directly orchestrates."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/check.rs",
+        "reason": "This file drives function body type checking and sets up return-type handling by replacing opaque return types with inference variables. Since the bug involves a function returning `impl Sized` whose body recursively references itself and then diverges, the issue may stem from body-level setup for opaque return inference and divergence tracking before or during expression checking."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Highly relevant because the likely root cause is self-referential opaque type inference for `impl Sized` inside the defining function body. This file is responsible for replacing opaque types with inference vars and tracking hidden types during inference, exactly the machinery that could mishandle a recursive call forcing the opaque return to equal `()`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "Opaque hidden-type collection is a prime suspect whenever `impl Trait` inference ICEs instead of producing a cycle or type error. The reproducer likely causes the compiler to try to derive the hidden type of `foo` from a body that itself depends on `foo`'s opaque return, and this file contains the logic for locating and extracting those hidden types."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The failure pattern strongly suggests bad normalization/cycle handling while relating the opaque return type of `foo` to the expected concrete type `()`. This query-based normalization layer is heavily used by type checking and could ICE if recursive normalization of the opaque alias is not properly rejected or delayed."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "This file provides the core remapping machinery for opaque type generic arguments, including region/lifetime handling. Because the reproducer uses explicit lifetime substitution `foo::<'a>()` and the unusual `'a: 'a` bound, a bug in generic-arg remapping for the defining opaque type could be exposed in this recursive context."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/equate.rs",
+        "reason": "The statement `let _: () = foo::<'a>();` forces equality or strong compatibility between the call result and `()`. If the compiler attempts to equate the function’s own opaque return with `()` while that opaque is still being inferred from the same body, equality/unification logic here could hit an unhandled recursive case."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/generalize.rs",
+        "reason": "Recursive opaque inference often fails when inference variables are assigned self-referential terms. This file is responsible for generalization and cycle detection when solving inference variables, so it is a plausible location if the compiler fails to detect that the hidden type inference path refers back to itself."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/solve/opaques.rs",
+        "reason": "If normalization of the opaque return is going through solver-side opaque handling, this file is relevant because it unifies existing opaque hidden types or inserts new ones. A recursive defining-use inside the same function could expose missing ambiguity or cycle handling here."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 186.976,
+    "stage_times_sec": {
+      "checkout": 1.79,
+      "load_bug_context": 0.626,
+      "test_behavior_analysis": 6.789,
+      "test_failure_analysis": 11.512,
+      "load_file_candidates": 10.872,
+      "search_suspicious_files": 155.385
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 394170,
+      "output_tokens": 7444,
+      "total_tokens": 401614,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.789,
+          "input_tokens": 350,
+          "output_tokens": 308,
+          "total_tokens": 658
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.512,
+          "input_tokens": 1935,
+          "output_tokens": 757,
+          "total_tokens": 2692
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_inherent_projection_rs",
+          "latency_sec": 6.913,
+          "input_tokens": 723,
+          "output_tokens": 220,
+          "total_tokens": 943
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_inherent_projection_rs_repair",
+          "latency_sec": 3.818,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.994,
+          "input_tokens": 27396,
+          "output_tokens": 375,
+          "total_tokens": 27771
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.393,
+          "input_tokens": 27648,
+          "output_tokens": 369,
+          "total_tokens": 28017
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.111,
+          "input_tokens": 27035,
+          "output_tokens": 339,
+          "total_tokens": 27374
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 11.492,
+          "input_tokens": 27533,
+          "output_tokens": 437,
+          "total_tokens": 27970
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.308,
+          "input_tokens": 27384,
+          "output_tokens": 395,
+          "total_tokens": 27779
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.71,
+          "input_tokens": 27761,
+          "output_tokens": 405,
+          "total_tokens": 28166
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.322,
+          "input_tokens": 27551,
+          "output_tokens": 393,
+          "total_tokens": 27944
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 10.732,
+          "input_tokens": 27615,
+          "output_tokens": 330,
+          "total_tokens": 27945
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.838,
+          "input_tokens": 27560,
+          "output_tokens": 394,
+          "total_tokens": 27954
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 10.586,
+          "input_tokens": 27328,
+          "output_tokens": 352,
+          "total_tokens": 27680
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 10.11,
+          "input_tokens": 27657,
+          "output_tokens": 343,
+          "total_tokens": 28000
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.577,
+          "input_tokens": 27583,
+          "output_tokens": 232,
+          "total_tokens": 27815
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.82,
+          "input_tokens": 27838,
+          "output_tokens": 347,
+          "total_tokens": 28185
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 10.372,
+          "input_tokens": 22567,
+          "output_tokens": 383,
+          "total_tokens": 22950
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 16.0,
+          "input_tokens": 10451,
+          "output_tokens": 850,
+          "total_tokens": 11301
+        }
+      ]
+    }
+  }
+}

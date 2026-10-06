@@ -1,0 +1,12 @@
+{
+  "title": "AFIT no longer seems to play nice with lifetime GATs",
+  "labels": [
+    "A-lifetimes",
+    "C-bug",
+    "A-async-await",
+    "requires-nightly",
+    "F-async_fn_in_trait",
+    "A-implied-bounds"
+  ],
+  "body": "Tracking issue: https://github.com/rust-lang/rust/issues/91611\r\n\r\nA few months ago I authored a [complete example for a possible `AsyncIterator::lend` method](https://play.rust-lang.org/?version=nightly&mode=debug&edition=2021&gist=92cb8f410bf782c3c9e59c47c947a0bc). This used to compile fine on `rustc 1.71.0-nightly (f5559e338 2023-04-24)`, but it no longer does on the latest nightly. Here is a minimized repro:\r\n\r\n```rust\r\n#![allow(incomplete_features)]\r\n#![feature(async_fn_in_trait)]\r\n\r\ntrait AsyncLendingIterator {\r\n    type Item<'a>\r\n    where\r\n        Self: 'a;\r\n\r\n    async fn next(&mut self) -> Option<Self::Item<'_>>;\r\n}\r\n\r\nstruct Lend<I>(I);\r\nimpl<I> AsyncLendingIterator for Lend<I> {\r\n    type Item<'a> = &'a I\r\n    where\r\n        Self: 'a;\r\n\r\n    async fn next(&mut self) -> Option<Self::Item<'_>> {\r\n        todo!()\r\n    }\r\n}\r\n```\r\n\r\nThis gives the following error:\r\n\r\n```text\r\nCompiling playground v0.0.1 (/playground)\r\nerror[[E0311]](https://doc.rust-lang.org/nightly/error_codes/E0311.html): the parameter type `T` may not live long enough\r\n  --> src/main.rs:29:5\r\n   |\r\n29 |     async fn next(&mut self) -> Option<Self::Item<'_>> {\r\n   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\r\n   |\r\nnote: the parameter type `T` must be valid for the anonymous lifetime as defined here...\r\n  --> src/main.rs:9:19\r\n   |\r\n9  |     async fn next(&mut self) -> Option<Self::Item<'_>>;\r\n   |                   ^\r\nnote: ...so that the type `LendingIter<T>` will meet its required lifetime bounds\r\n  --> src/main.rs:29:5\r\n   |\r\n29 |     async fn next(&mut self) -> Option<Self::Item<'_>> {\r\n   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\r\n\r\nFor more information about this error, try `rustc --explain E0311`.\r\nerror: could not compile `playground` (bin \"playground\") due to previous error\r\n```\r\n\r\nI have a feeling async traits no longer play nice with lifetime GATs?\r\n\r\n### Meta\r\nTested on the [playground](https://play.rust-lang.org/?version=nightly&mode=debug&edition=2021&gist=65ebfd25e9d6acf289466066a007eb64) using the current nightly:\r\n```\r\nnightly-2023-07-16 0e8e857b11f60a785aea\r\n```\r\n\r\n---\r\n\r\ncc/ @rust-lang/wg-async, @compiler-errors"
+}

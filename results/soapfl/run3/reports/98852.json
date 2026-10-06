@@ -1,0 +1,237 @@
+{
+  "bug_id": "98852",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-07-01",
+    "resolved": "7425fb293f510a6f138e82a963a3bc599a5b9e1c"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+    "compiler/rustc_infer/src/infer/outlives/env.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_infer/src/infer/outlives/verify.rs",
+    "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+    "compiler/rustc_borrowck/src/universal_regions.rs",
+    "compiler/rustc_builtin_macros/src/deriving/generic/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `Ty<'a, 'b>(&'a &'b ())`, where well-formedness implies the nested-reference outlives relation `'b: 'a`.",
+        "Creates an inherent `impl<'a, 'b> Ty<'a, 'b>` without explicitly repeating the implied lifetime bound in the `where` clause.",
+        "Declares `fn f()` as an associated function with no receiver and no `Self` appearing in its signature.",
+        "Uses a bare `Self;` expression inside `f` to force the compiler to resolve and type-check the impl’s self type.",
+        "Exercises Rust’s well-formedness checking for generic ADTs, specifically whether implied outlives bounds are available inside impl items.",
+        "Triggers a compiler error because proving `Ty<'a, 'b>` is well formed requires `'b: 'a`, but that relation is not assumed in this context.",
+        "Shows that adding an explicit `where 'b: 'a` on the impl makes the code compile, demonstrating the missing bound propagation.",
+        "Targets compiler behavior around lifetime implied bounds in inherent impls on nightly, especially handling of `Self` in body-only contexts."
+      ],
+      "summary": "The reproducer defines a type whose nested references imply `'b: 'a`, then writes an inherent impl that omits that bound. An associated function with no `Self` in its signature uses `Self` only in the body, forcing rustc to validate the impl self type. Nightly rejects it because the compiler does not carry the implied outlives bound into this context, revealing a well-formedness/lifetime-bound propagation bug."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on implied lifetime outlives bounds for an ADT self type inside an inherent impl. The type `Ty<'a, 'b>(&'a &'b ())` is only well formed when `'b: 'a` holds, because `&'a &'b ()` requires the inner reference to outlive the outer one. The impl header `impl<'a, 'b> Ty<'a, 'b>` omits an explicit `where 'b: 'a`, so the compiler must rely on implied well-formedness bounds derived from the self type. The reproducer shows that these implied bounds are not available inside an associated function `fn f()` when `Self` appears only in the body (`Self;`) and not in the item signature. Since adding `where 'b: 'a` fixes the issue, the likely bug is not in borrow checking of the body itself, but in propagation/registration of implied outlives predicates for impl items, especially body-only `Self` uses in inherent impls. In short, rustc appears to validate or instantiate the impl self type for the method body without carrying the implied WF environment that should make `Ty<'a, 'b>` usable.",
+      "possible_causes": [
+        "Bug in compiler well-formedness environment construction for inherent impl items: implied outlives bounds from the impl self type (`Ty<'a, 'b>` implying `'b: 'a`) are not propagated into associated item bodies.",
+        "Incorrect handling of `Self` in associated functions with no receiver/signature mention of `Self`: rustc likely treats body-only `Self` references without importing the impl's implied predicates, causing a spurious lifetime obligation failure.",
+        "Defect in outlives/implied-bounds elaboration for generic ADTs in impl contexts, where the compiler fails to derive or retain required region relations from nested reference fields when type-checking impl item bodies.",
+        "Possible mismatch between impl header WF checking and method body type checking: the compiler may check the impl self type in one context, but later re-type-check `Self` inside the body under a reduced parameter environment missing implied bounds.",
+        "Bug in parameter-environment (`ParamEnv`) creation for inherent associated items, specifically omission of implied `where` predicates originating from the impl self type unless they are written explicitly."
+      ],
+      "evidence": [
+        "The type definition `struct Ty<'a, 'b>(&'a &'b ());` inherently requires `'b: 'a` for well-formedness.",
+        "The impl omits an explicit `where 'b: 'a`, yet the reproducer expects the compiler to use the implied bound from the self type.",
+        "The associated function `fn f()` has no receiver and no `Self` in its signature, isolating the issue to body-time handling of `Self`.",
+        "The triggering expression is exactly `Self;`, which forces resolution/type-checking of the impl self type inside the method body.",
+        "Compiler error says `Self` requires that `'b` must outlive `'a`, proving rustc is trying to validate `Ty<'a, 'b>` but does not have the needed implied bound in scope.",
+        "The diagnostic help explicitly suggests adding `where 'b: 'a`, and the test notes that doing so fixes compilation, strongly indicating missing bound propagation rather than invalid user code.",
+        "Behavior summary explicitly targets implied lifetime bounds in inherent impls and states the issue appears when `Self` is used only in a body-only context on nightly."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1447,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "Most directly matches the bug: this file builds and checks well-formedness environments for impls and impl items. The reproducer shows the impl self type's implied outlives bound (`'b: 'a`) is not available inside an associated item body when `Self` appears only in the body, which strongly suggests a WF/parameter-environment propagation issue here."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+        "reason": "This file computes implied outlives bounds from requiring a type to be well formed. Since `Ty<'a, 'b>` should imply `'b: 'a`, a bug in deriving or exposing those implied bounds for the impl self type is a very plausible root cause."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/env.rs",
+        "reason": "Holds the inference-layer outlives environment, combining explicit and implied bounds into the facts available during checking. If the impl item's environment is missing the implied self-type relation, the omission could originate in how this environment is populated."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Generates WF obligations for types and predicates. The failing case is specifically about proving `Self`/`Ty<'a, 'b>` well formed inside an impl item, so incorrect WF obligation generation or extraction of the resulting region relation could stem from here."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+        "reason": "Responsible for turning type-outlives obligations into concrete verifiable region conditions. A mismatch between generated WF obligations and the region facts available when validating `Self` inside the method body could surface here as the missing `'b: 'a` proof."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/constraint_conversion.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/universal_regions.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_builtin_macros/src/deriving/generic/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 143.924,
+    "stage_times_sec": {
+      "checkout": 1.335,
+      "load_bug_context": 0.07,
+      "test_behavior_analysis": 5.481,
+      "test_failure_analysis": 12.622,
+      "load_file_candidates": 0.106,
+      "search_suspicious_files": 124.309
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 334433,
+      "output_tokens": 5828,
+      "total_tokens": 340261,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.48,
+          "input_tokens": 444,
+          "output_tokens": 340,
+          "total_tokens": 784
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.622,
+          "input_tokens": 1121,
+          "output_tokens": 715,
+          "total_tokens": 1836
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.908,
+          "input_tokens": 26842,
+          "output_tokens": 312,
+          "total_tokens": 27154
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.96,
+          "input_tokens": 26412,
+          "output_tokens": 426,
+          "total_tokens": 26838
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.25,
+          "input_tokens": 26441,
+          "output_tokens": 277,
+          "total_tokens": 26718
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.578,
+          "input_tokens": 26681,
+          "output_tokens": 340,
+          "total_tokens": 27021
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.465,
+          "input_tokens": 26586,
+          "output_tokens": 348,
+          "total_tokens": 26934
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 10.471,
+          "input_tokens": 26660,
+          "output_tokens": 368,
+          "total_tokens": 27028
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.665,
+          "input_tokens": 26689,
+          "output_tokens": 352,
+          "total_tokens": 27041
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.643,
+          "input_tokens": 26406,
+          "output_tokens": 348,
+          "total_tokens": 26754
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.783,
+          "input_tokens": 25540,
+          "output_tokens": 295,
+          "total_tokens": 25835
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.847,
+          "input_tokens": 26429,
+          "output_tokens": 258,
+          "total_tokens": 26687
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.77,
+          "input_tokens": 26466,
+          "output_tokens": 354,
+          "total_tokens": 26820
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.1,
+          "input_tokens": 26678,
+          "output_tokens": 374,
+          "total_tokens": 27052
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.556,
+          "input_tokens": 3355,
+          "output_tokens": 330,
+          "total_tokens": 3685
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 7.288,
+          "input_tokens": 11683,
+          "output_tokens": 391,
+          "total_tokens": 12074
+        }
+      ]
+    }
+  }
+}

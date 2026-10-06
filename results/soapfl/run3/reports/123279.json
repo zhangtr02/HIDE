@@ -1,0 +1,250 @@
+{
+  "bug_id": "123279",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-06",
+    "resolved": "f067fd6084d750f3797f54b71771c5dbc149726f"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/bounds.rs",
+    "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+    "compiler/rustc_hir_typeck/src/method/probe.rs",
+    "compiler/rustc_hir_typeck/src/method/confirm.rs",
+    "compiler/rustc_middle/src/traits/select.rs",
+    "compiler/rustc_infer/src/infer/canonical/canonicalizer.rs",
+    "compiler/rustc_infer/src/traits/util.rs",
+    "compiler/rustc_data_structures/src/obligation_forest/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines supertrait recursion: `Job: AsJob`, so every `Job` must also implement `AsJob`.",
+        "Blanket impl `impl<F: Fn()> Job for F` makes all zero-arg closures/functions implement `Job`.",
+        "Blanket impl `impl<T: Job + Sized> AsJob for T` tries to satisfy the supertrait for all sized `Job` types.",
+        "The specific bound ordering `Job + Sized` triggers the bug; rewriting as `Sized + Job` or just `Job` avoids it.",
+        "`LoopingJobService` stores `Box<dyn Job>`, exercising trait objects and object-safe dynamic dispatch through `run_once`.",
+        "Implementing `Job` for `LoopingJobService` forwards `run_once` to the boxed trait object, forcing trait obligation resolution.",
+        "Compiler must prove `LoopingJobService: AsJob` from the blanket impl while handling supertrait obligations and `Sized` predicates.",
+        "The reproducer targets trait solving/coherence behavior on nightly, specifically normalization and obligation ordering around blanket impls."
+      ],
+      "summary": "This reproducer isolates a rustc trait-resolution bug. It combines a supertrait (`Job: AsJob`), blanket impls, a `Sized` bound, and a trait object field. The key trigger is the blanket implementation written as `T: Job + Sized`; merely reordering bounds or removing `Sized` makes compilation succeed, indicating incorrect compiler handling of equivalent trait obligations."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to a trait-solver bug, not a user-code type error. The program defines a supertrait relation `Job: AsJob` and a blanket impl `impl<T: Job + Sized> AsJob for T`, which should allow any sized `Job` type such as `LoopingJobService` to satisfy the `AsJob` supertrait. However, when `LoopingJobService` implements `Job` and calls `self.job.run_once()` on `Box<dyn Job>`, rustc reports that `dyn Job` does not implement `Job`. That diagnostic is inconsistent with normal trait-object behavior, because calling a trait method through `dyn Job` should not require proving a fresh impl of `Job` for `dyn Job`; it should use object-safe dispatch once the receiver coerces appropriately. The decisive clue is that merely changing the bound order from `Job + Sized` to `Sized + Job` makes the error disappear. Since those bounds are semantically equivalent, this strongly suggests an internal defect in obligation construction, canonicalization, or selection that depends on predicate ordering. The likely bug area is trait resolution / fulfillment around supertrait elaboration and blanket impl matching, especially when `Sized` and a self-referential supertrait obligation interact with trait objects. rustc likely fails to elaborate or cache the `AsJob` obligation correctly for `LoopingJobService`, causing downstream method lookup on `Box<dyn Job>` to wrongly conclude that the underlying `dyn Job` does not implement `Job`.",
+      "possible_causes": [
+        "Bug in trait obligation ordering/canonicalization: rustc treats `T: Job + Sized` differently from `T: Sized + Job`, even though they are equivalent, causing blanket impl selection for `AsJob` to fail or be delayed incorrectly.",
+        "Defect in supertrait elaboration/fulfillment: while proving `LoopingJobService: Job`, the compiler incorrectly handles the required supertrait obligation `LoopingJobService: AsJob` from `impl<T: Job + Sized> AsJob for T`, likely due to recursive obligation resolution involving `Job: AsJob`.",
+        "Incorrect interaction between trait-object method lookup and failed supertrait resolution: method dispatch on `Box<dyn Job>` falls back to an erroneous obligation requiring `(dyn Job): Job`, producing a misleading E0277 instead of using object-safe dispatch.",
+        "Possible normalization or projection bug in the new trait solver / fulfillment engine where `Sized` predicates are processed in an order-sensitive way, affecting cache keys or cycle detection for blanket impls involving supertraits.",
+        "Potential coherence/selection bug for blanket impl matching on `impl<T: Job + Sized> AsJob for T`, where the presence and position of `Sized` causes the impl candidate to be discarded or not applied for a concrete sized type that implements `Job`."
+      ],
+      "evidence": [
+        "Reproducer summary explicitly states the only trigger is the bound ordering: `Job + Sized` fails, while `Sized + Job` or just `Job` succeeds, indicating semantic equivalence is broken by compiler internals.",
+        "`Job` has supertrait `AsJob`, so implementing `Job` for `LoopingJobService` forces rustc to prove `LoopingJobService: AsJob`; the blanket impl should satisfy this for any sized `Job` type.",
+        "`LoopingJobService` is structurally `Sized`, so `impl<T: Job + Sized> AsJob for T` should apply trivially once `LoopingJobService: Job` is being checked.",
+        "The emitted error is `the trait bound (dyn Job + 'static): Job is not satisfied` at `self.job.run_once()`, which is suspicious because the code is calling an object-safe trait method through `Box<dyn Job>` and should not need an explicit impl of `Job` for `dyn Job`.",
+        "The behavior involves supertrait recursion, blanket impls, `Sized`, and trait objects, matching known fragile areas of rustc trait solving, obligation elaboration, and method resolution.",
+        "No change in user semantics occurs when reordering `Job + Sized` to `Sized + Job`, so the difference in compiler behavior is strong evidence of a production compiler bug in trait predicate handling."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1741,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/bounds.rs",
+        "reason": "Most suspicious because the bug is triggered solely by reordering equivalent bounds (`Job + Sized` vs `Sized + Job`). This file explicitly lowers and orders bounds, and its documentation even notes special ordering that inserts `Sized` first as a compatibility hack. A defect here could easily make predicate order observable in later trait solving."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/fulfill.rs",
+        "reason": "The reproducer strongly points to fulfillment/obligation processing being order-sensitive during recursive proof of `Job: AsJob` via the blanket impl `impl<T: Job + Sized> AsJob for T`. This file drives pending obligations and can mis-handle recursive or delayed obligations depending on predicate ordering."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "Candidate confirmation is where a selected blanket impl is instantiated and nested obligations like `T: Job` and `T: Sized` are emitted. Since the failure depends on the exact bound list order and later produces an incorrect trait-object-related error, confirmation of impl candidates is a likely place for the bad obligation set or recursion behavior to originate."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs",
+        "reason": "If the blanket impl `impl<T: Job + Sized> AsJob for T` is sometimes not considered or is considered ambiguously depending on bound ordering/canonical form, candidate assembly is implicated. The reproducer’s mismatch between semantically equivalent bounds suggests candidate collection or filtering may be sensitive to predicate shape/order."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/probe.rs",
+        "reason": "The visible error occurs at method call resolution on `self.job.run_once()`, where rustc incorrectly claims `dyn Job` does not implement `Job`. Even if the root cause is in trait solving, this file is directly responsible for probing methods on trait-object receivers and may be triggering or misreporting the bad obligation path."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+        "reason": "After probing, method confirmation applies receiver adjustments and registers the actual obligations for the call. Because the bad diagnostic appears during method invocation on `Box<dyn Job>`, and trait-object/sized-supertrait interactions are involved, this stage is a plausible contributor."
+      },
+      {
+        "path": "compiler/rustc_middle/src/traits/select.rs",
+        "reason": "This file contains the selection/evaluation caches keyed by trait predicates and environments. An order-sensitive canonicalization or caching issue could explain why equivalent bounds lead to different downstream behavior, especially in recursive trait obligations."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/canonical/canonicalizer.rs",
+        "reason": "The failure pattern suggests canonicalization may preserve or mishandle semantically irrelevant predicate ordering, affecting cache keys or recursive solving. Since the bug disappears when bounds are reordered, canonicalization of query inputs/results is a credible source."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/util.rs",
+        "reason": "This utility code handles predicate normalization/anonymization and elaboration helpers. A bug in predicate deduplication or normalization that accidentally depends on clause ordering could produce exactly this sort of order-sensitive trait-resolution failure."
+      },
+      {
+        "path": "compiler/rustc_data_structures/src/obligation_forest/mod.rs",
+        "reason": "The recursive supertrait/blanket-impl setup may be going wrong in the obligation dependency engine itself. If obligation forest state transitions, deduplication, or parent/child processing are order-sensitive, equivalent bound lists could lead to different completion behavior and a misleading final E0277."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 160.13,
+    "stage_times_sec": {
+      "checkout": 2.999,
+      "load_bug_context": 0.059,
+      "test_behavior_analysis": 4.465,
+      "test_failure_analysis": 12.263,
+      "load_file_candidates": 7.58,
+      "search_suspicious_files": 132.765
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 403651,
+      "output_tokens": 7041,
+      "total_tokens": 410692,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 4.464,
+          "input_tokens": 441,
+          "output_tokens": 304,
+          "total_tokens": 745
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.263,
+          "input_tokens": 1090,
+          "output_tokens": 866,
+          "total_tokens": 1956
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.828,
+          "input_tokens": 26902,
+          "output_tokens": 408,
+          "total_tokens": 27310
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.238,
+          "input_tokens": 26906,
+          "output_tokens": 318,
+          "total_tokens": 27224
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.186,
+          "input_tokens": 26425,
+          "output_tokens": 324,
+          "total_tokens": 26749
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.55,
+          "input_tokens": 26662,
+          "output_tokens": 374,
+          "total_tokens": 27036
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.411,
+          "input_tokens": 26635,
+          "output_tokens": 333,
+          "total_tokens": 26968
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.109,
+          "input_tokens": 27044,
+          "output_tokens": 347,
+          "total_tokens": 27391
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.932,
+          "input_tokens": 26805,
+          "output_tokens": 368,
+          "total_tokens": 27173
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.613,
+          "input_tokens": 26785,
+          "output_tokens": 331,
+          "total_tokens": 27116
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.604,
+          "input_tokens": 26915,
+          "output_tokens": 329,
+          "total_tokens": 27244
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.303,
+          "input_tokens": 26672,
+          "output_tokens": 336,
+          "total_tokens": 27008
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.323,
+          "input_tokens": 27018,
+          "output_tokens": 251,
+          "total_tokens": 27269
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.448,
+          "input_tokens": 26920,
+          "output_tokens": 353,
+          "total_tokens": 27273
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.214,
+          "input_tokens": 27050,
+          "output_tokens": 286,
+          "total_tokens": 27336
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.382,
+          "input_tokens": 26835,
+          "output_tokens": 426,
+          "total_tokens": 27261
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.866,
+          "input_tokens": 14704,
+          "output_tokens": 332,
+          "total_tokens": 15036
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.724,
+          "input_tokens": 11842,
+          "output_tokens": 755,
+          "total_tokens": 12597
+        }
+      ]
+    }
+  }
+}

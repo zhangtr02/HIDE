@@ -1,0 +1,228 @@
+{
+  "bug_id": "98117",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-06-14",
+    "resolved": "ca122c7ebb3ab50149c9d3d24ddb59c252b32272"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_infer/src/infer/outlives/verify.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+    "compiler/rustc_infer/src/infer/outlives/env.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_typeck/src/check/coercion.rs",
+    "compiler/rustc_infer/src/infer/sub.rs",
+    "compiler/rustc_borrowck/src/type_check/free_region_relations.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a marker trait `Static: 'static` and implements it only for references of the form `&'static T`.",
+        "`foo` is generic over `S: Display` and returns `Box<dyn Display>`, exercising trait-object coercion from a concrete generic type.",
+        "The where-clause `&'static S: Static` is effectively a hidden requirement that `S: 'static`, via the blanket impl for `&'static T`.",
+        "Calling `foo(&String::from(\"...\") )` makes `S` an `&String`, a non-`'static` borrowed type tied to a temporary local value.",
+        "The compiler must reason about higher-level lifetime obligations created indirectly through trait implementation lookup and `'static` bounds.",
+        "`Box<dyn Display>` defaults to `Box<dyn Display + 'static>`, so boxing `x` also requires the passed value to satisfy a `'static` object lifetime.",
+        "The reproducer checks whether rustc incorrectly accepts or mishandles this implied `'static` requirement during borrow checking or trait solving.",
+        "`println!` uses the boxed trait object, ensuring the value escapes `foo` and making any unsound lifetime acceptance observable at compile time."
+      ],
+      "summary": "This reproducer probes rustc’s handling of implied `'static` requirements hidden behind trait bounds and trait-object boxing. A generic function accepts `S: Display`, but its where-clause and `Box<dyn Display>` return type together require `S` to be `'static`. The call passes a reference to a temporary `String`, so the compiler must reject it if lifetime and trait solving are handled correctly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is an implied `'static` requirement that is not written directly as `S: 'static` but arises from two interacting compiler obligations: (1) the where-clause `&'static S: Static` together with `trait Static: 'static {}` and `impl<T> Static for &'static T {}` forces `S` to satisfy constraints compatible with `'static`, and (2) returning `Box<dyn Display>` defaults the trait object lifetime to `'static`, so `Box::new(x)` requires the concrete `S` placed into the object to be valid for `'static`. The call site instantiates `S = &String`, where the reference points to a temporary local `String`, so this should not satisfy the hidden `'static` requirement. However, the compiler accepted the program, which indicates unsound handling of implied outlives requirements during generic obligation solving and/or trait-object lifetime coercion. The failure pattern suggests rustc is incorrectly proving or dropping a `'static` obligation when it is mediated through trait impl selection on `&'static S` rather than a direct `S: 'static` bound.",
+      "possible_causes": [
+        "Bug in trait/obligation solver where the bound `&'static S: Static` is considered satisfied by the impl `impl<T> Static for &'static T` without correctly propagating the implied outlives requirement needed for `S` when `S` itself contains non-`'static` references.",
+        "Incorrect computation of well-formedness or outlives obligations for reference types of the form `&'static S`, especially failure to enforce that `S: 'static` for the type to be usable under a `'static` reference-based trait bound.",
+        "Bug in trait object coercion/default object lifetime handling: conversion of `Box<S>` to `Box<dyn Display>` may be skipping or weakening the required `S: 'static` check for generic `S`.",
+        "Region inference / borrow checker integration defect where hidden lifetime constraints derived from trait predicates are not fed into borrow checking, allowing a reference to a temporary to escape behind `Box<dyn Display + 'static>`.",
+        "Normalization or implied-bounds bug in the compiler’s handling of supertrait bound `Static: 'static`, causing the `'static` requirement attached to the trait itself to be lost during impl matching or predicate elaboration."
+      ],
+      "evidence": [
+        "The program compiles successfully with return code 0, even though `foo(&String::from(\"blah blah blah\"))` passes a borrow of a temporary local value that should not satisfy a `'static` requirement.",
+        "`Box<dyn Display>` elides to `Box<dyn Display + 'static>`, so storing generic `x: S` in the box should require the erased value type to be `'static`.",
+        "The where-clause does not state `S: 'static` directly; instead it encodes the requirement indirectly through `&'static S: Static`, making this a strong indicator of a compiler bug in implied-bound propagation rather than user-code misuse.",
+        "The marker trait setup `trait Static: 'static {}` plus `impl<T> Static for &'static T {}` forces rustc to derive lifetime constraints through trait implementation lookup, matching the reproducer’s stated goal of testing hidden `'static` obligations.",
+        "The accepted instantiation `S = &String` is precisely the problematic shape: a reference type containing a non-`'static` borrow, which should be rejected if outlives and object lifetime checks are enforced correctly."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1435,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/confirmation.rs",
+        "reason": "Most suspicious because the bug centers on accepting `&'static S: Static` via impl matching without preserving the implied `S: 'static` requirement. Confirmation is where selected impls generate nested obligations from trait refs, impl headers, and supertraits; losing the supertrait `Static: 'static` or the WF/outlives obligations for `&'static S` here would explain why the call is accepted."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "This reproducer relies on hidden well-formedness/outlives consequences of the type `&'static S` and the trait bound `Static: 'static`. If WF obligation generation fails to emit the needed `S: 'static`-like constraints for the where-clause or for boxing into `dyn Display + 'static`, rustc would incorrectly accept a non-`'static` borrowed type."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "Directly responsible for lowering type-outlives obligations such as those induced by `&'static S` into region constraints and deferred checks. A bug here could cause the compiler to treat the reference type as sufficient without decomposing and enforcing the outlives requirements on `S` when `S` itself contains a borrowed reference."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+        "reason": "This file implements the verification logic for proving `T: 'a` from region-bound information. The reproducer specifically suggests an implied `'static` obligation is being weakened or dropped; that matches a verifier bug where `S: 'static` is not demanded strongly enough when derived indirectly through trait predicates and supertraits."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+        "reason": "Computes implied outlives bounds from well-formedness, exactly the mechanism likely needed to infer hidden lifetime constraints from `&'static S: Static`. If this query misses relevant bounds for generic types or trait-mediated obligations, later borrowck/typeck phases would never see the necessary `'static` requirement."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/env.rs",
+        "reason": "The outlives environment aggregates explicit and implied bounds used during type checking. If the hidden `'static` fact from the where-clause or supertrait elaboration is not inserted into `region_bound_pairs`, subsequent verification and borrow checking would proceed without the crucial constraint."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Candidate assembly/evaluation may be incorrectly judging the obligation as satisfiable modulo regions and selecting the impl too eagerly. Since the failure looks like an obligation-solver soundness issue rather than a pure borrowck error, the main selection logic remains highly suspicious."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/coercion.rs",
+        "reason": "`Box<dyn Display>` defaults to `Box<dyn Display + 'static>`, and `Box::new(x)` requires coercion/unsizing from `Box<S>` to the trait object. If coercion logic fails to enforce the default object lifetime and required `S: 'static` bound for generic `S`, the invalid temporary-backed reference could escape."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/sub.rs",
+        "reason": "Subtyping is involved in coercing a concrete boxed type into a boxed trait object with default `'static` object lifetime. A bug in subtype/outlives obligation generation could let `&String` flow into `dyn Display + 'static` without producing the necessary lifetime constraints."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+        "reason": "Less likely than trait solving, but still plausible if implied bounds from the param environment and normalization are not propagated into borrow checking’s universal region relations. Then borrowck would not know that the boxed value must satisfy a hidden `'static` requirement and would miss the escaping temporary borrow."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 159.873,
+    "stage_times_sec": {
+      "checkout": 1.392,
+      "load_bug_context": 0.057,
+      "test_behavior_analysis": 6.074,
+      "test_failure_analysis": 25.552,
+      "load_file_candidates": 0.089,
+      "search_suspicious_files": 126.709
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 328594,
+      "output_tokens": 5950,
+      "total_tokens": 334544,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.074,
+          "input_tokens": 412,
+          "output_tokens": 340,
+          "total_tokens": 752
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 25.552,
+          "input_tokens": 979,
+          "output_tokens": 726,
+          "total_tokens": 1705
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.767,
+          "input_tokens": 26702,
+          "output_tokens": 356,
+          "total_tokens": 27058
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.747,
+          "input_tokens": 26273,
+          "output_tokens": 338,
+          "total_tokens": 26611
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.209,
+          "input_tokens": 26297,
+          "output_tokens": 363,
+          "total_tokens": 26660
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.844,
+          "input_tokens": 26566,
+          "output_tokens": 348,
+          "total_tokens": 26914
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 11.228,
+          "input_tokens": 26444,
+          "output_tokens": 367,
+          "total_tokens": 26811
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.345,
+          "input_tokens": 26526,
+          "output_tokens": 348,
+          "total_tokens": 26874
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.013,
+          "input_tokens": 26536,
+          "output_tokens": 309,
+          "total_tokens": 26845
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 10.095,
+          "input_tokens": 26255,
+          "output_tokens": 341,
+          "total_tokens": 26596
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.28,
+          "input_tokens": 25778,
+          "output_tokens": 323,
+          "total_tokens": 26101
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.747,
+          "input_tokens": 26325,
+          "output_tokens": 323,
+          "total_tokens": 26648
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.877,
+          "input_tokens": 26280,
+          "output_tokens": 286,
+          "total_tokens": 26566
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.843,
+          "input_tokens": 25566,
+          "output_tokens": 326,
+          "total_tokens": 25892
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 18.691,
+          "input_tokens": 11655,
+          "output_tokens": 856,
+          "total_tokens": 12511
+        }
+      ]
+    }
+  }
+}

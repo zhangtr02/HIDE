@@ -1,0 +1,243 @@
+{
+  "bug_id": "106419",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-01-02",
+    "resolved": "77429957a0e9c90a26c89def061ffdd4bae5ccb9"
+  },
+  "final_top10": [
+    "compiler/rustc_builtin_macros/src/deriving/clone.rs",
+    "compiler/rustc_builtin_macros/src/deriving/generic/mod.rs",
+    "compiler/rustc_builtin_macros/src/deriving/generic/ty.rs",
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+    "compiler/rustc_middle/src/ty/generics.rs",
+    "compiler/rustc_middle/src/ty/subst.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_middle/src/ty/abstract_const.rs",
+    "compiler/rustc_ty_utils/src/consts.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `generic_const_exprs`, exercising unstable generic constant expressions in type/where contexts.",
+        "Defines `Bar` with two const generic `usize` parameters, testing multiple const generics on a struct.",
+        "Uses a `where` clause with `[(); A as usize]:` and `[(); B as usize]:` to force const expressions into type-level array lengths.",
+        "Casts const generic `usize` values with `as usize` inside array lengths, exercising redundant const casts during type checking.",
+        "Employs empty array-type bounds as well-formedness constraints rather than trait requirements, probing compiler validation of const expressions.",
+        "Derives `Clone` for a const-generic struct with no fields, checking derive handling on parameterized zero-sized types.",
+        "Contains no runtime logic; the reproducer is compile-time only, focusing on parsing, const-eval, and trait/where-clause analysis.",
+        "Targets a pinned nightly toolchain, indicating the behavior depends on unstable compiler internals around const generics support."
+      ],
+      "summary": "This reproducer is a minimal compile-time test for unstable const generics handling. It defines a fieldless struct with two const `usize` parameters and uses array-length expressions in `where` clauses to force generic const evaluation and well-formedness checks. The code primarily exercises nightly `generic_const_exprs`, const casts, derive expansion, and compiler analysis of type-level constant expressions."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on derive expansion for a fieldless struct with multiple const generics under `generic_const_exprs`. The user code is structurally trivial: `Bar<const A, const B>` has no fields, so a synthesized `Clone` impl should simply return `Bar`/`Self` without needing to relate `A` and `B`. However, the compiler reports `expected A, found B` originating inside `#[derive(Clone)]`, which strongly suggests the generated impl or subsequent type checking/substitution is mixing up const generic parameters. The where-clause uses two generic const expressions `[(); A as usize]:` and `[(); B as usize]:`, adding anonymous const/type-level obligations that may perturb generic parameter indexing or substitution during derive/typeck. A common thread across the reproducer behavior and error is interaction between: (a) derived trait impl generation, (b) multiple const generic parameters, and (c) generic const exprs in where clauses with casts. Since the struct has no fields, any type mismatch between `Bar<A, B>` and `Bar<B, _>` is artificial and points to a compiler-side defect in generic argument ordering, identity substitution, or parameter mapping when constructing/checking the derived `Clone` body or impl header.",
+      "possible_causes": [
+        "Bug in built-in derive (`Clone`) expansion for const-generic ADTs where the generated impl/body reconstructs `Self` with const generic arguments in the wrong order or with an incorrect substitution, causing `A` and `B` to be swapped.",
+        "Defect in generic argument substitution/indexing for multiple const generics when `generic_const_exprs` introduces additional anonymous const/well-formedness predicates from the where-clause, leading derive/typeck to associate the second const parameter (`B`) where the first (`A`) is expected.",
+        "Compiler type-checking bug in normalization or identity mapping of const generic arguments for fieldless structs: while checking the derive-generated return expression, rustc may incorrectly infer `Bar<B, _>` instead of `Bar<A, B>` due to mishandling const generic placeholders.",
+        "Issue in handling redundant cast expressions (`A as usize`, `B as usize`) inside array-length well-formedness constraints, possibly corrupting the generic parameter environment or parameter numbering used later by derive-generated impls.",
+        "Problem in comparison/equality of generic const expressions or ADT arguments during trait derivation/type validation, where structurally unrelated const params are unified or reordered incorrectly after elaborating the where-clause obligations."
+      ],
+      "evidence": [
+        "Error originates in the derive macro `Clone`, not in user-written runtime code, so the failure is in compiler-generated impl expansion or its checking.",
+        "The struct is fieldless; deriving `Clone` should be trivial and should not require any relationship between `A` and `B`, making `expected A, found B` highly indicative of compiler mishandling.",
+        "Diagnostic specifically says `expected struct Bar<A, _> found struct Bar<B, _>`, which points to swapped/mis-substituted const generic arguments rather than a semantic error in the source.",
+        "The reproducer uses two const generic parameters plus `where` constraints with generic const expressions, a pattern likely to stress generic parameter indexing/substitution internals.",
+        "The unstable feature `generic_const_exprs` is enabled, and the warning notes incompleteness; this aligns with a compiler-internals defect around const-generic expression handling rather than invalid user code.",
+        "The where-clause expressions `[(); A as usize]:` and `[(); B as usize]:` create type-level const obligations without fields or runtime logic, isolating the failure to compile-time analysis, derive handling, and const-generic type checking."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1573,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_builtin_macros/src/deriving/clone.rs",
+        "reason": "The error originates directly in `#[derive(Clone)]`, and this file contains the trait-specific expansion logic for Clone. For a fieldless const-generic struct, the generated `clone` body should be trivial, so an `expected A, found B` mismatch strongly suggests Clone derive is constructing or referencing `Self`/the ADT with misordered const generic arguments."
+      },
+      {
+        "path": "compiler/rustc_builtin_macros/src/deriving/generic/mod.rs",
+        "reason": "This is the shared derive machinery that builds impl headers, generic parameter lists, substitutions, and method bodies for built-in derives. Since the bug looks like a generic-argument ordering/substitution issue triggered during derive expansion, the generic derive framework is highly suspicious."
+      },
+      {
+        "path": "compiler/rustc_builtin_macros/src/deriving/generic/ty.rs",
+        "reason": "This file is responsible for synthesizing AST types/paths for derived impls using the derived type’s generics. If const generic arguments are emitted in the wrong order or mapped incorrectly when constructing `Bar<A, B>` versus `Bar<B, _>`, the fault could live here."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "The reproducer specifically stresses multiple const generics plus anonymous consts from `where [(); A as usize]:, [(); B as usize]:`. If generic parameter indices are computed incorrectly once these extra compiler-generated defs are present, derive-generated code could later see `A`/`B` swapped."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/generics.rs",
+        "reason": "The symptom points to wrong const-parameter identity or indexing. This file defines the core representation of generic parameters and their indices, so any bug in const generic ordering or lookup could manifest as `Bar<A, _>` being treated as `Bar<B, _>`."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/subst.rs",
+        "reason": "Derived code ultimately depends on correct generic argument substitution. A bug in generic-arg packing, ordering, comparison, or substitution handling—especially for const args—could explain the mismatch between expected and found const parameters."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The reproducer’s only nontrivial structure beyond derive is the `where` clause with generic const expressions. If predicate collection injects or orders the resulting obligations/anonymous const contexts incorrectly, it could perturb generic environments used when type-checking the derived impl."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "`generic_const_exprs` is central to the reproducer, and this file handles const-evaluatability under that feature. Mishandling abstract consts or param-env matching for `A as usize` and `B as usize` could corrupt or confuse the const-generic environment seen during derive/type checking."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/abstract_const.rs",
+        "reason": "The where-clause expressions use abstract const machinery under `generic_const_exprs`. If expansion/instantiation of abstract consts preserves the wrong parameter identity or ordering, that could indirectly produce the observed `A` vs `B` swap in the derived impl."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This file constructs abstract const representations from THIR for anonymous consts and generic const expressions. Since the reproducer relies on two separate const expressions in the where-clause, a bug here could misassociate one const parameter with another and later surface during Clone derive checking."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 167.249,
+    "stage_times_sec": {
+      "checkout": 3.52,
+      "load_bug_context": 0.046,
+      "test_behavior_analysis": 6.155,
+      "test_failure_analysis": 16.592,
+      "load_file_candidates": 0.137,
+      "search_suspicious_files": 140.8
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 365329,
+      "output_tokens": 6828,
+      "total_tokens": 372157,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.155,
+          "input_tokens": 373,
+          "output_tokens": 292,
+          "total_tokens": 665
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 16.591,
+          "input_tokens": 1172,
+          "output_tokens": 757,
+          "total_tokens": 1929
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.624,
+          "input_tokens": 26669,
+          "output_tokens": 359,
+          "total_tokens": 27028
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.798,
+          "input_tokens": 26812,
+          "output_tokens": 374,
+          "total_tokens": 27186
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.43,
+          "input_tokens": 26200,
+          "output_tokens": 344,
+          "total_tokens": 26544
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 10.845,
+          "input_tokens": 26774,
+          "output_tokens": 428,
+          "total_tokens": 27202
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.477,
+          "input_tokens": 26740,
+          "output_tokens": 377,
+          "total_tokens": 27117
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.021,
+          "input_tokens": 26930,
+          "output_tokens": 322,
+          "total_tokens": 27252
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.009,
+          "input_tokens": 26839,
+          "output_tokens": 339,
+          "total_tokens": 27178
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.745,
+          "input_tokens": 26753,
+          "output_tokens": 316,
+          "total_tokens": 27069
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.865,
+          "input_tokens": 26808,
+          "output_tokens": 341,
+          "total_tokens": 27149
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.652,
+          "input_tokens": 25391,
+          "output_tokens": 350,
+          "total_tokens": 25741
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.128,
+          "input_tokens": 26935,
+          "output_tokens": 351,
+          "total_tokens": 27286
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.164,
+          "input_tokens": 26972,
+          "output_tokens": 317,
+          "total_tokens": 27289
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.971,
+          "input_tokens": 26598,
+          "output_tokens": 406,
+          "total_tokens": 27004
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.341,
+          "input_tokens": 4681,
+          "output_tokens": 388,
+          "total_tokens": 5069
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.706,
+          "input_tokens": 12682,
+          "output_tokens": 767,
+          "total_tokens": 13449
+        }
+      ]
+    }
+  }
+}

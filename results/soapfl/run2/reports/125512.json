@@ -1,0 +1,370 @@
+{
+  "bug_id": "125512",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-05-24",
+    "resolved": "8679004993f08807289911d9f400f4ac4391d2bc"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/object_safety.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/object_safety.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/lint.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_ty_utils/src/implied_bounds.rs",
+    "compiler/rustc_ty_utils/src/sig_types.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+    "compiler/rustc_infer/src/traits/error_reporting/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/engine.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly feature `object_safe_for_dispatch`, exercising unstable compiler logic for trait-object dispatch checks.",
+        "Defines trait `B` with method `fn f(a: A) -> A;`, using another trait directly as parameter and return type.",
+        "Defines trait `A` with method `fn concrete(b: B) -> B;`, symmetrically using trait `B` as parameter and return type.",
+        "Uses bare trait names in function signatures, which are interpreted as trait objects in edition 2021 and trigger dyn-compatibility/object-safety analysis.",
+        "Methods have no `self` receiver, so they are associated functions; this stresses object-safety rules distinct from instance-method dispatch.",
+        "Creates a cyclic dependency between traits `A` and `B`, forcing the compiler to reason about each trait’s object safety through the other.",
+        "Exercises type checking of unsized trait-object-like types in argument and return positions, which is normally restricted and compiler-validated.",
+        "`main` is empty, so the reproducer isolates front-end compilation behavior rather than runtime execution."
+      ],
+      "summary": "This reproducer is a compile-only test for nightly trait-object dispatch checks. It defines two traits whose associated functions use each other directly as argument and return types, creating a cyclic object-safety/dyn-compatibility scenario. The code primarily stresses parsing, trait-object interpretation of bare traits, unsized type validation, and unstable `object_safe_for_dispatch` compiler behavior."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in the compiler's well-formedness/object-safety checking pipeline rather than a normal user-facing type error. The reproducer uses the unstable `object_safe_for_dispatch` feature and defines two traits whose associated functions mention each other as bare trait types in both parameter and return positions. In edition 2021, these bare trait occurrences are interpreted through trait-object/dyn-compatibility logic, and the compiler even emits an object-safety style help message (`A` is not object safe, use `impl A`). The stack trace shows the crash occurs during `check_mod_type_wf` inside `rustc_hir_analysis::check_crate`, indicating the ICE is triggered while validating item signatures for well-formedness. A key common pattern is the mutual recursion between traits `A` and `B`, which likely forces the compiler to compute dyn-compatibility/object-safety for one trait while already evaluating the other, exposing missing cycle handling or invalid assumptions in signature WF checks for associated functions without `self`. The likely bug is that the compiler's object-safety/dyn-compatibility validation for bare trait types in fn signatures does not gracefully reject this cyclic case and instead panics during type WF analysis.",
+      "possible_causes": [
+        "A defect in `check_mod_type_wf`/HIR analysis where well-formedness checking of trait method signatures containing bare trait types incorrectly enters dyn-compatibility/object-safety evaluation and panics instead of emitting a regular diagnostic.",
+        "Missing cycle detection or improper recursion breaking in object-safety/dyn-compatibility computation when two traits reference each other in associated function parameter/return types.",
+        "Incorrect handling of the unstable `object_safe_for_dispatch` feature for associated functions without a `self` receiver, especially when bare traits are used directly in argument and return positions.",
+        "A compiler bug in trait-object lowering or signature validation that assumes non-cyclic object-safety queries, causing an ICE when `A` requires checking `B` and `B` simultaneously requires checking `A`.",
+        "An inconsistency between the diagnostic path and the internal validation path: the compiler recognizes the non-object-safe return type enough to suggest `impl A`, but the underlying WF/object-safety code does not robustly handle the same case and crashes."
+      ],
+      "evidence": [
+        "The reproducer enables `#![feature(object_safe_for_dispatch)]`, explicitly exercising unstable object-safety dispatch logic.",
+        "Both traits use the other trait directly in parameter and return positions (`fn f(a: A) -> A;` and `fn concrete(b: B) -> B;`), creating a symmetric cyclic dependency.",
+        "The methods are associated functions without `self`, which stresses object-safety rules differently from normal trait-object method dispatch.",
+        "Compiler output highlights `fn f(a: A) -> A;` and says `A` is not object safe, showing the failure is tied to object-safety/dyn-compatibility analysis.",
+        "The stack trace includes `rustc_query_impl::query_impl::check_mod_type_wf` and `rustc_hir_analysis::check_crate`, indicating the ICE happens during front-end well-formedness/type checking rather than later codegen phases.",
+        "The query stack is empty at panic time, consistent with an unexpected internal panic/assertion rather than a normal reported trait error.",
+        "`main` is empty, so no runtime or borrow-check behavior is involved; the failure is isolated to compilation of trait signatures."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1788,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The ICE occurs in `check_mod_type_wf` during `rustc_hir_analysis::check_crate`, directly implicating item signature well-formedness checking. This reproducer is purely about validating trait method signatures containing bare trait types in parameter/return position, so the WF checker is the most likely place where cyclic object-safety/dyn-compatibility validation is triggered incorrectly and panics instead of emitting a normal error."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/object_safety.rs",
+        "reason": "The diagnostic explicitly says `A` is not object safe and suggests `impl A`, showing the compiler is deep in object-safety analysis. The mutually recursive traits `A` and `B` strongly suggest a bug in object-safety violation computation or vtable-safety checks when traits reference each other through associated function signatures, especially under the unstable `object_safe_for_dispatch` feature."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/object_safety.rs",
+        "reason": "Bare trait names in type position are lowered through HIR type lowering logic that enforces trait-object/object-safety constraints early. Since the reproducer uses bare traits directly in fn signatures and triggers an object-safety-flavored help message, this lowering path is a strong suspect for mishandling cyclic trait-object formation or feeding malformed state into later WF checking."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/lint.rs",
+        "reason": "The emitted help text about replacing the return type with `impl A` matches the kind of tailored diagnostics produced when bare trait objects are processed during HIR lowering. Even if the ICE happens later, this file is plausibly involved in the path that recognizes the invalid bare trait/object-safe case and may interact incorrectly with the unstable feature or recursive trait references."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "This file generates well-formedness obligations for types and predicates. A cyclic pair of trait object-like references in associated function signatures could produce recursive WF obligations involving object-safety checks, so a missing recursion break or bad obligation construction here could explain a panic during module WF analysis."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/implied_bounds.rs",
+        "reason": "`check_mod_type_wf` commonly relies on assumed WF types extracted from item signatures. Since the reproducer is entirely about trait method signature types, this query implementation is a plausible participant in assembling the problematic types and spans that lead to the crash when mutual bare-trait references are encountered."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/sig_types.rs",
+        "reason": "This utility walks all types in an item's signature with spans, which is exactly the sort of traversal exercised by the reproducer’s trait method declarations. If the ICE is triggered while traversing or classifying signature types for WF checking, this file could be part of the buggy path, especially for bare trait types in associated functions."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+        "reason": "This is the central HIR-to-type lowering entry point used by the object-safety-specific lowering helpers. Because the reproducer depends on how bare trait syntax in signatures is interpreted and lowered before WF checking, a bug in the core lowering flow or predicate filtering around these helper modules remains plausible."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/error_reporting/mod.rs",
+        "reason": "The compiler successfully reaches object-safety-style diagnostic generation before ultimately ICEing. While this file is primarily diagnostic, it contains `report_object_safety_error` and related logic that may expose assumptions broken by cyclic object-safety computation, making it a secondary suspect in the failing path."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/engine.rs",
+        "reason": "WF checking uses an `ObligationCtxt` backed by the trait engine. If the crash is caused by recursive obligation evaluation arising from mutual object-safety/WF dependencies between `A` and `B`, the engine abstraction used during these checks could be implicated, though it is less direct than the dedicated WF and object-safety modules."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 227.691,
+    "stage_times_sec": {
+      "checkout": 1.051,
+      "load_bug_context": 0.365,
+      "test_behavior_analysis": 6.428,
+      "test_failure_analysis": 10.609,
+      "load_file_candidates": 76.491,
+      "search_suspicious_files": 132.746
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 35,
+      "input_tokens": 434427,
+      "output_tokens": 10629,
+      "total_tokens": 445056,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.428,
+          "input_tokens": 339,
+          "output_tokens": 298,
+          "total_tokens": 637
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.609,
+          "input_tokens": 1900,
+          "output_tokens": 704,
+          "total_tokens": 2604
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_check_rs",
+          "latency_sec": 4.566,
+          "input_tokens": 1351,
+          "output_tokens": 220,
+          "total_tokens": 1571
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_check_rs_repair",
+          "latency_sec": 3.115,
+          "input_tokens": 255,
+          "output_tokens": 207,
+          "total_tokens": 462
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_mod_rs",
+          "latency_sec": 4.288,
+          "input_tokens": 1427,
+          "output_tokens": 220,
+          "total_tokens": 1647
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_mod_rs_repair",
+          "latency_sec": 3.541,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_ops_rs",
+          "latency_sec": 5.187,
+          "input_tokens": 1438,
+          "output_tokens": 220,
+          "total_tokens": 1658
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_ops_rs_repair",
+          "latency_sec": 3.582,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_post_drop_elaboration_rs",
+          "latency_sec": 4.842,
+          "input_tokens": 1355,
+          "output_tokens": 220,
+          "total_tokens": 1575
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_post_drop_elaboration_rs_repair",
+          "latency_sec": 3.441,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_qualifs_rs",
+          "latency_sec": 4.971,
+          "input_tokens": 1338,
+          "output_tokens": 220,
+          "total_tokens": 1558
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_qualifs_rs_repair",
+          "latency_sec": 8.047,
+          "input_tokens": 255,
+          "output_tokens": 227,
+          "total_tokens": 482
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_resolver_rs",
+          "latency_sec": 5.11,
+          "input_tokens": 1305,
+          "output_tokens": 220,
+          "total_tokens": 1525
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_check_consts_resolver_rs_repair",
+          "latency_sec": 3.735,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_mod_rs",
+          "latency_sec": 4.341,
+          "input_tokens": 222,
+          "output_tokens": 137,
+          "total_tokens": 359
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_validate_rs",
+          "latency_sec": 4.523,
+          "input_tokens": 1257,
+          "output_tokens": 220,
+          "total_tokens": 1477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_validate_rs_repair",
+          "latency_sec": 4.383,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_type_ir_src_solve_inspect_format_rs",
+          "latency_sec": 5.045,
+          "input_tokens": 1363,
+          "output_tokens": 220,
+          "total_tokens": 1583
+        },
+        {
+          "stage": "file_summary:compiler_rustc_type_ir_src_solve_inspect_format_rs_repair",
+          "latency_sec": 3.653,
+          "input_tokens": 255,
+          "output_tokens": 218,
+          "total_tokens": 473
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.88,
+          "input_tokens": 27583,
+          "output_tokens": 389,
+          "total_tokens": 27972
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.658,
+          "input_tokens": 27502,
+          "output_tokens": 352,
+          "total_tokens": 27854
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.32,
+          "input_tokens": 27089,
+          "output_tokens": 312,
+          "total_tokens": 27401
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.729,
+          "input_tokens": 27283,
+          "output_tokens": 339,
+          "total_tokens": 27622
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.778,
+          "input_tokens": 27320,
+          "output_tokens": 323,
+          "total_tokens": 27643
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.33,
+          "input_tokens": 27636,
+          "output_tokens": 350,
+          "total_tokens": 27986
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.283,
+          "input_tokens": 27472,
+          "output_tokens": 431,
+          "total_tokens": 27903
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.136,
+          "input_tokens": 27438,
+          "output_tokens": 345,
+          "total_tokens": 27783
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.138,
+          "input_tokens": 27514,
+          "output_tokens": 297,
+          "total_tokens": 27811
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.184,
+          "input_tokens": 27278,
+          "output_tokens": 314,
+          "total_tokens": 27592
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.567,
+          "input_tokens": 27477,
+          "output_tokens": 365,
+          "total_tokens": 27842
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.312,
+          "input_tokens": 27499,
+          "output_tokens": 329,
+          "total_tokens": 27828
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.682,
+          "input_tokens": 27715,
+          "output_tokens": 293,
+          "total_tokens": 28008
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.042,
+          "input_tokens": 27588,
+          "output_tokens": 334,
+          "total_tokens": 27922
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.428,
+          "input_tokens": 25080,
+          "output_tokens": 359,
+          "total_tokens": 25439
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.244,
+          "input_tokens": 9618,
+          "output_tokens": 870,
+          "total_tokens": 10488
+        }
+      ]
+    }
+  }
+}

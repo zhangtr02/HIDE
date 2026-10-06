@@ -1,0 +1,252 @@
+{
+  "bug_id": "125432",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-05-22",
+    "resolved": "791adf759cc065316f054961875052d5bc03e16c"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/diagnostics/conflict_errors.rs",
+    "compiler/rustc_borrowck/src/places_conflict.rs",
+    "compiler/rustc_mir_dataflow/src/move_paths/builder.rs",
+    "compiler/rustc_mir_build/src/build/matches/mod.rs",
+    "compiler/rustc_middle/src/mir/tcx.rs",
+    "compiler/rustc_borrowck/src/path_utils.rs",
+    "compiler/rustc_borrowck/src/lib.rs",
+    "compiler/rustc_borrowck/src/used_muts.rs",
+    "compiler/rustc_borrowck/src/util/collect_writes.rs",
+    "compiler/rustc_borrowck/src/util/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a function with a local mutable variable `x: Option<i32>` initialized to `None`, then pattern-matches on `x`.",
+        "Uses `match` on a place expression (`x`), exercising how pattern matching may create borrows or move bindings for individual arms.",
+        "The `None` arm reassigns `x = Some(0)`, testing whether mutation is accepted when no payload was borrowed or moved.",
+        "The `Some(right)` arm binds the inner value by value and passes it to `consume(right)`, exercising move semantics from an enum variant payload.",
+        "Checks arm separation: borrow-checking should reason per matched variant, not treat all arms as if the `Some` payload loan exists in `None`.",
+        "Exercises MIR/NLL borrow checker behavior for pattern-match scrutinee handling, especially outstanding loans across mutually exclusive arms.",
+        "Tests compiler diagnostics around false-positive illegal assignment errors when matching an `Option` and mutating the scrutinee in a non-borrowing arm.",
+        "`main` is empty, so the reproducer isolates compile-time analysis of `separate_arms` rather than runtime behavior."
+      ],
+      "summary": "This reproducer checks borrow-checking for `match` on `Option`. The `Some` arm moves the payload, while the `None` arm mutates the original variable. Because the arms are mutually exclusive, reassignment in `None` should be allowed. The test targets a rustc bug where compiler analysis may incorrectly propagate a loan or move from one arm into another and reject valid code."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer is centered on borrow checking / MIR-based dataflow for a `match` over a local place (`x: Option<i32>`). The key pattern is arm-sensitive semantics: in the `None` arm, no payload exists and therefore there should be no outstanding loan or moved subplace preventing reassignment to `x`; in the `Some(right)` arm, the payload is moved by value into `right`. These effects are mutually exclusive and must remain separated per variant/arm. The compiler instead ICEs around the `Some(right) => consume(right)` arm, which strongly suggests a bug in compiler-side handling of match scrutinee place projections, move-path/loan tracking, or diagnostic construction for NLL/borrowck when one arm mutates the scrutinee and another arm moves from a variant payload. The panic during cleanup/destructor indicates the compiler likely first hit an internal inconsistent state while building or emitting a borrow-check diagnostic, then panicked again while unwinding. So the likely defect is not in user code but in rustc logic that merges per-arm borrow/move information too aggressively or encounters an invalid move path / loan path for enum variant matching on places, especially during error reporting for a false-positive assignment/borrow conflict.",
+      "possible_causes": [
+        "Bug in MIR/NLL borrow checker arm-sensitive dataflow: loans or moves from the `Some` arm are incorrectly propagated to the `None` arm, violating variant exclusivity for `match` arms.",
+        "Defect in move-path construction or place-conflict analysis for enum discriminant/variant payloads, causing rustc to treat `x` as borrowed/moved across all arms after matching on `x`.",
+        "Incorrect handling of scrutinee-place mutation after pattern matching on the same place, especially when one arm performs whole-place reassignment and another arm moves a subfield payload.",
+        "Compiler diagnostic bug in borrowck error reporting: after detecting a spurious conflict, rustc may attempt to emit a diagnostic using inconsistent borrow/move state and panic at the span associated with `consume(right)`.",
+        "Possible issue in match-candidate lowering to MIR or binding-mode processing for by-value bindings from enum variants, producing an invalid internal state later consumed by borrow checking.",
+        "Cleanup/double-panic defect in compiler error handling/destructor paths, triggered after an earlier internal borrowck inconsistency or malformed diagnostic object."
+      ],
+      "evidence": [
+        "The test specifically exercises mutually exclusive match arms: `None` reassigns `x`, while `Some(right)` moves the payload; these effects should not interfere across arms.",
+        "The stated expected behavior is that reassignment in the `None` arm is legal because no payload loan exists there, indicating the failure is in compiler arm separation reasoning.",
+        "The crash location is reported at `Some(right) => consume(right)`, implicating handling of the by-value payload binding/move from the variant.",
+        "The reproducer isolates compile-time analysis only; `main` is empty and there is no runtime behavior, so the defect must be in rustc static analysis/code generation pipeline.",
+        "The output is an ICE (`compiler unexpectedly panicked`) rather than a normal borrowck rejection, indicating an internal inconsistency in compiler production code.",
+        "`panic in a destructor during cleanup` and `thread caused non-unwinding panic` suggest an initial compiler bug likely occurred earlier, then diagnostic/emission or cleanup code encountered corrupted or invalid state.",
+        "The behavior summary explicitly targets MIR/NLL borrow checker handling of outstanding loans across mutually exclusive arms, matching the most plausible subsystem for this failure."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1787,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/diagnostics/conflict_errors.rs",
+        "reason": "The reproducer is expected to trigger borrow-check-style reasoning around a match scrutinee mutated in one arm and moved in another, but it ICEs during or after pointing at `consume(right)`. The panic-during-cleanup pattern strongly suggests rustc first constructed an inconsistent borrowck conflict/move diagnostic and then crashed while emitting or dropping it. This file is the main borrowck conflict diagnostic construction layer and is therefore highly suspicious."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/places_conflict.rs",
+        "reason": "A core risk here is that rustc incorrectly decides that mutation of `x` in the `None` arm conflicts with the move of the payload in the `Some` arm, despite variant exclusivity. That would come from faulty place-overlap reasoning between the whole place `x` and variant/subplace accesses derived from pattern matching. This file contains the core place-conflict logic used by borrowck, making it a strong candidate."
+      },
+      {
+        "path": "compiler/rustc_mir_dataflow/src/move_paths/builder.rs",
+        "reason": "The `Some(right)` arm moves the payload out of an enum variant while another arm reassigns the whole scrutinee. If move-path construction for enum variants/downcasts is wrong, borrowck can end up with invalid or over-merged move information, leading both to false conflicts and ICEs. This file builds the move-path structures that such analysis depends on."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/mod.rs",
+        "reason": "The bug is specifically match-arm sensitive. If MIR lowering of `match x` fails to preserve proper arm separation, introduces incorrect binding setup, or mishandles scrutinee/place semantics for by-value variant bindings, later borrow checking could see impossible states. This main match lowering file is therefore a plausible root cause."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/tcx.rs",
+        "reason": "Correct handling of enum variant payload projections depends on accurate `PlaceTy`/projection typing, especially around downcasts and fields of ADTs. A mismatch here could corrupt later move-path or borrowck reasoning for `Some(right)` versus the whole `x` place. It is less direct than borrowck files, but still a plausible source for an internal inconsistency in variant-place handling."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/path_utils.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/lib.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/used_muts.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/util/collect_writes.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/util/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 153.526,
+    "stage_times_sec": {
+      "checkout": 1.344,
+      "load_bug_context": 0.247,
+      "test_behavior_analysis": 6.143,
+      "test_failure_analysis": 12.582,
+      "load_file_candidates": 0.227,
+      "search_suspicious_files": 132.984
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 426719,
+      "output_tokens": 6749,
+      "total_tokens": 433468,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.142,
+          "input_tokens": 390,
+          "output_tokens": 320,
+          "total_tokens": 710
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.582,
+          "input_tokens": 1992,
+          "output_tokens": 722,
+          "total_tokens": 2714
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.338,
+          "input_tokens": 27693,
+          "output_tokens": 299,
+          "total_tokens": 27992
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.112,
+          "input_tokens": 27612,
+          "output_tokens": 335,
+          "total_tokens": 27947
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.818,
+          "input_tokens": 27199,
+          "output_tokens": 301,
+          "total_tokens": 27500
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.428,
+          "input_tokens": 27393,
+          "output_tokens": 350,
+          "total_tokens": 27743
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.951,
+          "input_tokens": 27430,
+          "output_tokens": 285,
+          "total_tokens": 27715
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.844,
+          "input_tokens": 27746,
+          "output_tokens": 383,
+          "total_tokens": 28129
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.317,
+          "input_tokens": 27582,
+          "output_tokens": 430,
+          "total_tokens": 28012
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.102,
+          "input_tokens": 27548,
+          "output_tokens": 365,
+          "total_tokens": 27913
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.398,
+          "input_tokens": 27624,
+          "output_tokens": 364,
+          "total_tokens": 27988
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.844,
+          "input_tokens": 27388,
+          "output_tokens": 353,
+          "total_tokens": 27741
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.01,
+          "input_tokens": 27587,
+          "output_tokens": 307,
+          "total_tokens": 27894
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.227,
+          "input_tokens": 27609,
+          "output_tokens": 376,
+          "total_tokens": 27985
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.724,
+          "input_tokens": 27825,
+          "output_tokens": 360,
+          "total_tokens": 28185
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.238,
+          "input_tokens": 27698,
+          "output_tokens": 331,
+          "total_tokens": 28029
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 9.418,
+          "input_tokens": 24975,
+          "output_tokens": 371,
+          "total_tokens": 25346
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 8.184,
+          "input_tokens": 13428,
+          "output_tokens": 497,
+          "total_tokens": 13925
+        }
+      ]
+    }
+  }
+}

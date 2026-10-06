@@ -1,0 +1,245 @@
+{
+  "bug_id": "112250",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-05-31",
+    "resolved": "f0411ffcebcd7f75ac02ed45feb53ffd07b75398"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+    "compiler/rustc_trait_selection/src/traits/outlives_bounds.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_infer/src/infer/outlives/verify.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_hir_analysis/src/collect/item_bounds.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with a generic associated type `Ty<'a>` using a `where Self: 'a` requirement, exercising GATs and lifetime-dependent associated types.",
+        "Implements the trait for all `T`, concretely setting `Ty<'a> = ()`, so every instantiated associated type is `Sized`.",
+        "Declares `struct Foo<T: Trait>` with a higher-ranked trait bound `for<'a> T::Ty<'a>: Sized`, exercising HRTBs over associated type projections.",
+        "Uses a reference type `&'static str` as `T`, forcing the compiler to reason about trait impls and lifetime relationships for reference types.",
+        "The function `test(_: Foo<&'static str>)` checks whether `Foo<&'static str>` is well-formed solely from its type signature, without constructing a value.",
+        "The comment highlights an implied bound scenario: the compiler may infer `'static: 'a` for placeholder lifetimes when validating the higher-ranked bound.",
+        "This stresses compiler normalization and well-formedness checking for projected GATs under binders, especially interactions between placeholders and concrete lifetimes.",
+        "The reproducer targets a nightly compiler bug in trait solving/region reasoning, where implied lifetime bounds around HRTBs and GAT projections are mishandled."
+      ],
+      "summary": "The reproducer is a minimal type-level test for Rust’s trait solver. It combines a generic associated type, a blanket impl, and a higher-ranked `for<'a>` bound on an associated type projection. By mentioning `Foo<&'static str>` in a function parameter, it forces well-formedness checking and lifetime inference without runtime code. The bug is in compiler handling of implied outlives relationships between `'static` and placeholder lifetimes under HRTBs while validating GAT projections."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on well-formedness checking of a type that combines three advanced features: a generic associated type with `where Self: 'a`, a higher-ranked bound `for<'a> T::Ty<'a>: Sized`, and a concrete instantiation `T = &'static str`. The query stack shows the ICE happens during `check_well_formed` for `test`, not during codegen or borrow checking, so the defect is in type WF/trait solving logic. The reproducer forces rustc to validate the projection `T::Ty<'a>` under a binder, while also accounting for the GAT-required outlives relation `Self: 'a`. For `T = &'static str`, this becomes a region reasoning problem involving a concrete region `'static` and a placeholder lifetime introduced by `for<'a>`. The comment and behavior strongly suggest the compiler incorrectly derives or mishandles an implied bound like `'static: 'a` for a placeholder region. That points to a bug in normalization / projection obligation handling under binders, or in region constraint generation for implied outlives bounds of GATs during WF checking. Since the impl defines `Ty<'a> = ()`, the program should be trivially accepted or rejected gracefully; an ICE indicates an internal inconsistency in how placeholder-bound lifetimes are related to concrete regions during trait solving.",
+      "possible_causes": [
+        "Bug in well-formedness checking for higher-ranked projected GAT bounds: `check_well_formed` likely mishandles `for<'a> T::Ty<'a>` obligations when the GAT has a `where Self: 'a` requirement.",
+        "Incorrect implied outlives inference under binders: the compiler may be generating or assuming an invalid relation such as concrete `'static: placeholder('a)` while proving `Self: 'a` for `T = &'static str`.",
+        "Defect in projection normalization / obligation elaboration for GATs under HRTBs, where `T::Ty<'a>` is normalized without correctly preserving the placeholder lifetime environment.",
+        "Region solver / placeholder leak checking bug involving interaction between concrete regions and higher-ranked placeholders during trait solving for associated type projections.",
+        "Instantiation bug in trait solver when applying the blanket impl `impl<T> Trait for T` to a reference type and then checking the GAT's `where Self: 'a` clause under a `for<'a>` binder.",
+        "Compiler code may be missing a graceful rejection path for unsatisfied or ambiguous outlives constraints on GAT projections, causing an ICE instead of a normal type error during top-level WF analysis."
+      ],
+      "evidence": [
+        "Query stack during panic shows `#0 [check_well_formed] checking that test is well-formed`, localizing the issue to type WF / trait solving rather than later compilation stages.",
+        "The reproducer combines GATs (`type Ty<'a> where Self: 'a;`) with HRTB projection (`for<'a> T::Ty<'a>: Sized`), a known stress point for normalization and bound instantiation.",
+        "`T = &'static str` forces the solver to prove the GAT requirement `Self: 'a` for every placeholder `'a`, creating a concrete-vs-placeholder lifetime interaction.",
+        "The test body is empty and only mentions `Foo<&'static str>` in a function signature, so the crash must come from compiler reasoning about the type itself.",
+        "The implementation `type Ty<'a> = () where Self: 'a;` means the projected type is always `Sized`; therefore the difficult part is not `Sized` itself but validating the associated type projection and its outlives precondition.",
+        "The provided behavior explicitly highlights an implied bound scenario involving `'static` and placeholder lifetimes, matching a region reasoning defect under binders.",
+        "The stack trace ends in analysis with an ICE and no user-facing type error, indicating an internal compiler inconsistency in handling these obligations."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1628,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The ICE occurs in the `check_well_formed` query while checking `test`, so the primary suspicion is the HIR well-formedness checker that creates and normalizes the WF obligations for `Foo<&'static str>`. This reproducer is entirely type-signature driven, and `wfcheck.rs` is the direct entry point for the failing phase."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "This file generates WF obligations for types and predicates, including the GAT projection and higher-ranked bound involved here. The bug description points to mishandling of well-formedness obligations around `for<'a> T::Ty<'a>` with a `where Self: 'a` GAT requirement, which is exactly the sort of logic implemented here."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The reproducer stresses normalization/projection of a generic associated type under a binder. If the compiler incorrectly handles `T::Ty<'a>` under HRTBs or loses the placeholder lifetime environment while projecting, `project.rs` is a likely source."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+        "reason": "The failure analysis explicitly points to implied outlives reasoning such as deriving an invalid relation like `'static: placeholder('a)`. This file computes implied outlives bounds from WF requirements, so it is highly relevant to a bug involving GAT `Self: 'a` constraints under higher-ranked lifetimes."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/outlives_bounds.rs",
+        "reason": "This module reifies implied outlives relationships from WF inputs back into the local inference context. Since the reproducer centers on an implied-bound interaction between a concrete `'static` region and a placeholder lifetime, this file is a strong candidate."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "The bug involves a `for<'a>` binder and placeholder lifetime reasoning. Incorrect instantiation of higher-ranked binders with placeholders or fresh vars can easily cause invalid concrete-vs-placeholder outlives assumptions, making the higher-ranked inference machinery suspicious."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/verify.rs",
+        "reason": "If the ICE is caused by turning a type-outlives obligation into an invalid region condition involving placeholders, the verification logic here is a likely culprit. It specifically handles environment- and binder-sensitive proofs of `T: 'a` obligations."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "The reproducer requires proving the GAT’s `Self: 'a` outlives condition for `Self = &'static str` under an HRTB. This file lowers such type-outlives obligations into region constraints and deferred checks, so a bug here could explain the bad implied bound or ICE."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "Normalization of projection terms under binders is central to this reproducer. If normalization of the projected GAT inside `for<'a>` mishandles escaping bound regions or skipped universes, this wrapper is a plausible source."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+        "reason": "This file has explicit special handling for associated types and GATs, including remapping GAT variables and nested projections. While the ICE manifests during WF checking rather than collection, incorrect predicate/bound remapping for the GAT could seed the later failure."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 143.107,
+    "stage_times_sec": {
+      "checkout": 2.931,
+      "load_bug_context": 0.043,
+      "test_behavior_analysis": 6.003,
+      "test_failure_analysis": 13.075,
+      "load_file_candidates": 0.102,
+      "search_suspicious_files": 120.953
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 395945,
+      "output_tokens": 6881,
+      "total_tokens": 402826,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.003,
+          "input_tokens": 411,
+          "output_tokens": 371,
+          "total_tokens": 782
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.075,
+          "input_tokens": 2326,
+          "output_tokens": 807,
+          "total_tokens": 3133
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.665,
+          "input_tokens": 27885,
+          "output_tokens": 345,
+          "total_tokens": 28230
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.78,
+          "input_tokens": 27931,
+          "output_tokens": 352,
+          "total_tokens": 28283
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.267,
+          "input_tokens": 27555,
+          "output_tokens": 203,
+          "total_tokens": 27758
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.796,
+          "input_tokens": 27810,
+          "output_tokens": 334,
+          "total_tokens": 28144
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.231,
+          "input_tokens": 27773,
+          "output_tokens": 392,
+          "total_tokens": 28165
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.48,
+          "input_tokens": 28199,
+          "output_tokens": 417,
+          "total_tokens": 28616
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.121,
+          "input_tokens": 28012,
+          "output_tokens": 397,
+          "total_tokens": 28409
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.563,
+          "input_tokens": 28025,
+          "output_tokens": 302,
+          "total_tokens": 28327
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.621,
+          "input_tokens": 27983,
+          "output_tokens": 358,
+          "total_tokens": 28341
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.302,
+          "input_tokens": 27789,
+          "output_tokens": 324,
+          "total_tokens": 28113
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.283,
+          "input_tokens": 28105,
+          "output_tokens": 333,
+          "total_tokens": 28438
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.222,
+          "input_tokens": 28094,
+          "output_tokens": 355,
+          "total_tokens": 28449
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.968,
+          "input_tokens": 28163,
+          "output_tokens": 435,
+          "total_tokens": 28598
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.603,
+          "input_tokens": 17273,
+          "output_tokens": 382,
+          "total_tokens": 17655
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.019,
+          "input_tokens": 12611,
+          "output_tokens": 774,
+          "total_tokens": 13385
+        }
+      ]
+    }
+  }
+}

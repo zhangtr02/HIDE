@@ -1,0 +1,236 @@
+{
+  "bug_id": "99566",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-07-18",
+    "resolved": "263edd43c5255084292329423c61a9d69715ebfa"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/closure.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_parse/src/parser/expr.rs",
+    "compiler/rustc_parse/src/parser/generics.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_ast_passes/src/feature_gate.rs",
+    "compiler/rustc_resolve/src/late/lifetimes.rs",
+    "compiler/rustc_hir/src/hir.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_typeck/src/check/expr.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only feature `closure_lifetime_binder`, activating experimental syntax paths for closure generic binders.",
+        "`main` contains a standalone closure expression used as a statement, so parsing and type-checking occur without calling it.",
+        "The closure starts with `for<const N: i32>`, attempting to declare a const generic binder on the closure.",
+        "This exercises parser support for `for<...>` binders preceding closures, a syntax mainly intended for higher-ranked lifetime binders.",
+        "It tests whether const generics are incorrectly accepted, rejected, or mishandled inside closure binder syntax.",
+        "The closure has explicit return type `-> ()` and empty body `{}`, keeping the reproducer minimal and isolating binder handling.",
+        "Because `N` is unused, the focus is compiler handling of generic parameter declaration syntax rather than value flow or trait solving.",
+        "The reproducer targets frontend compiler behavior: feature gating, parsing, AST/HIR lowering, and diagnostics around experimental closure binders with const generics."
+      ],
+      "summary": "This reproducer enables an unstable closure-binder feature and then writes a minimal closure prefixed with `for<const N: i32>`. It does not execute logic; instead, it stresses rustc’s frontend handling of experimental closure generic binder syntax, especially whether const generics in that position are parsed, lowered, gated, and diagnosed correctly."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is that the crash is triggered entirely by frontend handling of the experimental `closure_lifetime_binder` syntax, specifically a `for<...>` binder attached to a closure that contains a const generic parameter (`const N: i32`) instead of the lifetime binders this syntax was primarily designed for. The reproducer is intentionally minimal: the closure is a standalone statement, has no captures of interest, no call site, no trait solving pressure, and an empty body, yet the compiler still ICEs during `typeck` of `main`. That strongly suggests the parser accepted or partially accepted the syntax, but later compiler stages assumed closure binders only contain lifetimes and failed when encountering a const generic parameter. Since the query stack ends in type checking, the likely defect is not runtime logic or borrow checking, but an invariant violation between parsing/lowering and type checking for closure binder generic parameters. In short, rustc appears to mishandle unsupported generic parameter kinds in closure binders: either missing validation/rejection earlier, or type-check code pattern-matching on lifetime-only binders and panicking when a const parameter is present.",
+      "possible_causes": [
+        "Missing validation in parser/AST validation/HIR lowering that closure `for<...>` binders under `closure_lifetime_binder` must contain only lifetime parameters, allowing a const generic binder to reach later stages unexpectedly.",
+        "Type-checking code for closure binders likely assumes all bound generic params are lifetimes and hits an unhandled `const` parameter case, causing an ICE instead of emitting a diagnostic.",
+        "Feature-gating or diagnostic logic for experimental closure binders may be incomplete: const generics in closure binders are neither cleanly rejected nor normalized, leaving malformed HIR/type information consumed by `typeck`.",
+        "AST-to-HIR lowering for closure binders may incorrectly represent `for<const N: i32>` using structures intended only for higher-ranked lifetime binders, producing invalid internal state that later panics during closure type checking.",
+        "An internal exhaustiveness gap or `bug!()/unreachable!()` in compiler code handling `closure_lifetime_binder` generic parameter kinds is likely, especially in code paths constructing late-bound vars or closure signatures."
+      ],
+      "evidence": [
+        "The reproducer uses `#![feature(closure_lifetime_binder)]`, so it directly exercises unstable compiler-only syntax handling paths.",
+        "The problematic syntax is `for<const N: i32> || -> () {};`, which places a const generic parameter in a closure binder position mainly intended for higher-ranked lifetime binders.",
+        "The closure body is empty and the closure is not called, eliminating runtime semantics, trait interactions, and most borrow-check complexity; the bug is therefore in frontend/compiler internal handling of the syntax itself.",
+        "The compiler output shows an unexpected panic with query stack `#0 [typeck] type-checking main`, indicating the syntax survived parsing and reached type checking before crashing.",
+        "The test behavior explicitly states the goal is to stress parsing, AST/HIR lowering, feature gating, and diagnostics around experimental closure binders with const generics, matching the observed ICE site.",
+        "Because `N` is unused and there are no other generics or types involved, the distinguishing trigger is the presence of a const generic inside the closure binder rather than any downstream semantic usage."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1459,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/closure.rs",
+        "reason": "The ICE occurs during `typeck` of a closure expression using the unstable `closure_lifetime_binder` syntax. This file is the primary closure type-checking entry point and is the most likely place to contain an assumption that closure binders only contain lifetimes, leading to a panic when a const generic binder reaches type checking."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "The parser appears to accept `for<const N: i32> || ...`, so lowering likely translates the closure binder into HIR. If lowering code for closure binders was written for higher-ranked lifetime binders only, it could incorrectly represent or fail to validate const parameters, creating invalid HIR consumed later by typeck."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/expr.rs",
+        "reason": "This reproducer directly exercises expression parsing of `for<...>` before a closure. The expression parser is a strong suspect if it incorrectly accepts const generic parameters in closure binder syntax instead of rejecting them or routing them to proper diagnostics."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/generics.rs",
+        "reason": "The problematic syntax is specifically a generic parameter list containing `const N: i32`. Generic-parameter parsing may be too permissive for closure binders, allowing parameter kinds that should be disallowed in this context and thereby enabling later-stage invariant violations."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "If parsing intentionally accepts a broader AST shape, AST validation is a plausible missing-check point. This pass should reject syntactically invalid or contextually unsupported AST forms before lowering; failure to reject const params in closure binders would allow malformed input to reach type checking."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/feature_gate.rs",
+        "reason": "The feature gate for `closure_lifetime_binder` may only account for lifetime binders and neglect const generic binders. Incomplete gating/diagnostic handling could let unsupported syntax through without emitting an error, contributing to the later ICE."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late/lifetimes.rs",
+        "reason": "Closure binder syntax is closely tied to higher-ranked lifetime machinery. If this pass assumes closure binders introduce only lifetimes, encountering a const generic parameter could break internal expectations or produce inconsistent resolution data that later typeck relies on."
+      },
+      {
+        "path": "compiler/rustc_hir/src/hir.rs",
+        "reason": "HIR definitions model generic parameter kinds and closure-related syntax. If the HIR representation for closure binders was effectively lifetime-only at that time, this file is a plausible source of an invariant mismatch once const binders are lowered into HIR structures."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "`for<...>` binders are handled by higher-ranked instantiation logic. If a const generic binder is incorrectly allowed into machinery intended for bound regions/lifetimes, this file may contain non-exhaustive handling or assumptions that surface as a panic during closure signature checking."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/expr.rs",
+        "reason": "General expression type checking dispatches closure expressions into closure-specific code and may enforce syntactic/type invariants around closure expressions. If the ICE arises just before or around closure-specific handling, this file is a secondary suspect near the reported `typeck` failure site."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 153.448,
+    "stage_times_sec": {
+      "checkout": 3.766,
+      "load_bug_context": 0.056,
+      "test_behavior_analysis": 7.152,
+      "test_failure_analysis": 15.14,
+      "load_file_candidates": 0.512,
+      "search_suspicious_files": 126.822
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 350327,
+      "output_tokens": 5722,
+      "total_tokens": 356049,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 7.152,
+          "input_tokens": 348,
+          "output_tokens": 282,
+          "total_tokens": 630
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.14,
+          "input_tokens": 2158,
+          "output_tokens": 673,
+          "total_tokens": 2831
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 10.182,
+          "input_tokens": 27836,
+          "output_tokens": 358,
+          "total_tokens": 28194
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.187,
+          "input_tokens": 27406,
+          "output_tokens": 153,
+          "total_tokens": 27559
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.509,
+          "input_tokens": 27435,
+          "output_tokens": 290,
+          "total_tokens": 27725
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 10.859,
+          "input_tokens": 27673,
+          "output_tokens": 317,
+          "total_tokens": 27990
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.834,
+          "input_tokens": 27594,
+          "output_tokens": 316,
+          "total_tokens": 27910
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.016,
+          "input_tokens": 27658,
+          "output_tokens": 303,
+          "total_tokens": 27961
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 10.266,
+          "input_tokens": 27667,
+          "output_tokens": 340,
+          "total_tokens": 28007
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.99,
+          "input_tokens": 27541,
+          "output_tokens": 338,
+          "total_tokens": 27879
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.73,
+          "input_tokens": 26402,
+          "output_tokens": 327,
+          "total_tokens": 26729
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.107,
+          "input_tokens": 27421,
+          "output_tokens": 278,
+          "total_tokens": 27699
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.325,
+          "input_tokens": 27715,
+          "output_tokens": 296,
+          "total_tokens": 28011
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.851,
+          "input_tokens": 27399,
+          "output_tokens": 348,
+          "total_tokens": 27747
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.726,
+          "input_tokens": 6850,
+          "output_tokens": 385,
+          "total_tokens": 7235
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 14.209,
+          "input_tokens": 11224,
+          "output_tokens": 718,
+          "total_tokens": 11942
+        }
+      ]
+    }
+  }
+}

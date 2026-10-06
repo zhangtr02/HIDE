@@ -1,0 +1,252 @@
+{
+  "bug_id": "118144",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-21",
+    "resolved": "3a85a5cfe7884f94e3cb29a606913d7989ad9b48"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/upvar.rs",
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_typeck/src/pat.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+    "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+    "compiler/rustc_middle/src/hir/place.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_ast_lowering/src/pat.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `V<'a>` holding a tuple with `Option<&'a mut i32>`, exercising lifetimes, mutable references, tuple structs, and nested tuple patterns.",
+        "`nested` takes `&mut V<'_>`, using an elided lifetime in a mutable borrow and forcing borrow checking on the struct’s interior reference.",
+        "Inside an immediately invoked closure, `V((_o,)) = v;` performs destructuring assignment on a `&mut V`, not a `let` pattern binding.",
+        "The `_o` binding extracts the inner `Option<&mut i32>` through pattern assignment, testing place-expression destructuring and type inference in closures.",
+        "`v.0 = (None,);` mutates the same `v` after destructuring, exercising alias analysis and mutable borrow conflict detection.",
+        "The closure captures `v` mutably and is called immediately, stressing MIR lowering and borrow checking for closure environments.",
+        "This specifically probes nightly support for destructuring assignment with tuple structs and nested tuple fields under non-lexical lifetime analysis.",
+        "The program has no runtime behavior in `main`; the reproducer is aimed at compile-time checking, not execution semantics."
+      ],
+      "summary": "The reproducer creates a tuple-struct containing an optional mutable reference, then inside an immediately invoked closure destructures a `&mut V` with assignment-pattern syntax and writes back to the same value. It exercises destructuring assignment, closure capture, borrow checking, NLL/MIR lowering, and alias/conflict analysis on nested mutable references."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during the type-checking/analysis phase for `nested`, triggered by an unusual combination of features: destructuring assignment syntax used inside an immediately-invoked closure, operating on a `&mut V<'_>` where `V` contains nested tuple fields and an `Option<&mut i32>`. The compiler already reports ordinary user-facing errors (E0308 and E0425), but instead of recovering cleanly it panics during `typeck`, which strongly suggests a defect in error recovery or invariant handling for destructuring assignment on reference-typed places. A key suspicious construct is `V((_o,)) = v;`: this is assignment-pattern syntax, not a `let`, yet it introduces what looks like a fresh binding `_o`. Since assignment destructuring requires assignee expressions rather than new bindings, the compiler likely emits name-resolution/type errors, then later code in type checking or THIR/MIR lowering incorrectly assumes the assignee pattern has already been validated into proper place expressions. The nested tuple-struct pattern and mutable reference contents likely exacerbate this by forcing place construction, autoderef/autoref, and borrow checking logic over an invalid assignee form. Overall, the common pattern is an invalid destructuring assignment over a mutable reference place inside closure capture, with nested tuple-struct fields and interior mutable-reference types, causing rustc to mishandle diagnostics recovery and crash instead of stopping after emitting errors.",
+      "possible_causes": [
+        "Bug in type checker/error recovery for destructuring assignment (`PatKind::Assign`-style handling): invalid assignee patterns that contain binding identifiers (like `_o`) are not fully rejected before later analysis assumes they are valid place expressions.",
+        "Defect in closure-body type checking or THIR/MIR lowering for destructuring assignment on `&mut`-captured variables, especially when the assignee is a tuple-struct pattern over a reference-typed place (`v: &mut V<'_>`).",
+        "Missing invariant/check when lowering nested tuple-struct destructuring assignment involving autoderef of `&mut V` into field projections; later passes may panic after earlier E0308/E0425 diagnostics leave partially-invalid HIR/THIR.",
+        "Compiler bug in diagnostic recovery for name resolution within assignment patterns: unresolved `_o` in `V((_o,)) = v;` is reported, but subsequent typeck still tries to analyze borrow/place semantics as though `_o` were a valid assignee target.",
+        "Potential borrow-check preparation bug where assignment-pattern analysis and closure capture analysis interact incorrectly on the same mutable place (`v`) when the closure both destructures from and writes back to `v`.",
+        "Incorrect handling of tuple-struct assignee patterns with nested single-element tuples in nightly destructuring-assignment support, leading to malformed internal representation or unexpected pattern/place mismatch during analysis."
+      ],
+      "evidence": [
+        "Query stack shows panic in `#0 [typeck] type-checking 'nested'` followed by analysis, so the defect is in compiler semantic analysis rather than runtime/codegen.",
+        "Compiler output mentions ordinary user errors `E0308` and `E0425`, indicating rustc recognized invalid source constructs but then crashed anyway—classic sign of bad recovery in production compiler code.",
+        "The trigger expression `V((_o,)) = v;` uses destructuring assignment syntax rather than `let`, so `_o` is not a valid new binding in an assignee pattern; this is a high-risk edge case for assignment-pattern validation.",
+        "`nested` operates on `&mut V<'_>` and `V` contains `Option<&mut i32>`, combining mutable references, lifetimes, nested tuples, and tuple-struct field projections—precisely the sort of complex place/type scenario that stresses THIR/MIR lowering and borrow checking.",
+        "The closure captures `v` mutably and immediately performs both destructuring from `v` and mutation `v.0 = (None,)`, which intensifies alias/place analysis and may expose assumptions violated by earlier errors.",
+        "The reproducer has no runtime path and fails at compile time only, consistent with a frontend/typeck/lowering compiler defect rather than a problem in the test program’s execution semantics.",
+        "Behavior summary explicitly stresses nightly destructuring assignment with tuple structs and nested tuple fields under NLL/closure analysis, matching the likely subsystem where the production compiler defect resides."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1705,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/upvar.rs",
+        "reason": "This file reports the ICE itself (`ProjectionKinds Deref and Field were mismatched` at upvar.rs:704), with the stack running through `InferBorrowKindVisitor`, `analyze_closure`, and `compute_min_captures`. That aligns exactly with the reproducer's stress point: closure capture analysis over `v` used in mixed ways - as `&mut V`, via implicit `*v` in destructuring assignment, then mutated by field (`v.0 = ...`)."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "Most suspicious because the ICE occurs during the `typeck` query for `nested`, and the trigger is an invalid destructuring assignment expression inside a closure (`V((_o,)) = v;`). Expression type checking is where assignment/destructuring assignment, assignee validation, autoderef of `&mut V`, and recovery after earlier E0308/E0425 diagnostics are coordinated."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/pat.rs",
+        "reason": "Destructuring assignment reuses pattern-like structure but with assignee restrictions. This file is highly suspect for mishandling tuple-struct/nested tuple assignee forms containing a binding-like name (`_o`) and failing to reject or recover cleanly before later analysis assumes a valid place-like structure."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "The problematic code is inside an immediately invoked closure that mutably captures `v` and both destructures from and writes back to it. Closure body checking and capture-sensitive type checking may be incorrectly interacting with invalid destructuring assignment recovery."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "If HIR type checking emits user errors but still produces partially invalid expression data, THIR expression lowering is a likely crash point for destructuring assignment over a `&mut` place with nested tuple-struct projections. This file handles expression lowering informed by typeck adjustments."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+        "reason": "This is the THIR body construction entry point and is a common location where rustc assumes type checking results are sufficiently well-formed. Since the panic follows `typeck` and happens during analysis, bad error recovery around the closure body could surface here."
+      },
+      {
+        "path": "compiler/rustc_middle/src/hir/place.rs",
+        "reason": "The reproducer stresses conversion of a pattern-shaped assignee into place expressions over `&mut V` with field projections. HIR place modeling is relevant if rustc incorrectly constructs or validates places for destructuring assignment after diagnostics."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "Although the query stack names HIR `typeck`, the reproducer specifically stresses mutable aliasing and reassignment after destructuring. If invalid MIR/THIR is produced due to earlier recovery, MIR type checking in borrowck is a plausible downstream ICE site."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "Nightly destructuring assignment syntax is initially lowered here. A lowering bug could misclassify or incompletely validate assignment-pattern expressions inside closures, especially tuple-struct assignee forms that look pattern-like but are not binding patterns."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/pat.rs",
+        "reason": "Nested tuple-struct pattern syntax in the assignee (`V((_o,))`) may pass through pattern lowering machinery or shared helpers. If assignee-specific restrictions are not preserved during lowering, later type checking could see malformed HIR and crash during recovery."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 156.191,
+    "stage_times_sec": {
+      "checkout": 2.213,
+      "load_bug_context": 0.091,
+      "test_behavior_analysis": 5.3,
+      "test_failure_analysis": 15.814,
+      "load_file_candidates": 0.388,
+      "search_suspicious_files": 132.386
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 417452,
+      "output_tokens": 7199,
+      "total_tokens": 424651,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.3,
+          "input_tokens": 384,
+          "output_tokens": 316,
+          "total_tokens": 700
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.814,
+          "input_tokens": 2259,
+          "output_tokens": 889,
+          "total_tokens": 3148
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.692,
+          "input_tokens": 28153,
+          "output_tokens": 356,
+          "total_tokens": 28509
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.322,
+          "input_tokens": 28032,
+          "output_tokens": 367,
+          "total_tokens": 28399
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.628,
+          "input_tokens": 27674,
+          "output_tokens": 267,
+          "total_tokens": 27941
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.252,
+          "input_tokens": 27891,
+          "output_tokens": 341,
+          "total_tokens": 28232
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.773,
+          "input_tokens": 27826,
+          "output_tokens": 347,
+          "total_tokens": 28173
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.26,
+          "input_tokens": 28236,
+          "output_tokens": 348,
+          "total_tokens": 28584
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.801,
+          "input_tokens": 28039,
+          "output_tokens": 437,
+          "total_tokens": 28476
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.054,
+          "input_tokens": 28019,
+          "output_tokens": 376,
+          "total_tokens": 28395
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.709,
+          "input_tokens": 28035,
+          "output_tokens": 450,
+          "total_tokens": 28485
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.696,
+          "input_tokens": 27882,
+          "output_tokens": 353,
+          "total_tokens": 28235
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.361,
+          "input_tokens": 28236,
+          "output_tokens": 366,
+          "total_tokens": 28602
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.882,
+          "input_tokens": 28176,
+          "output_tokens": 293,
+          "total_tokens": 28469
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.748,
+          "input_tokens": 28186,
+          "output_tokens": 244,
+          "total_tokens": 28430
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.302,
+          "input_tokens": 28019,
+          "output_tokens": 335,
+          "total_tokens": 28354
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.867,
+          "input_tokens": 8422,
+          "output_tokens": 397,
+          "total_tokens": 8819
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.007,
+          "input_tokens": 13983,
+          "output_tokens": 717,
+          "total_tokens": 14700
+        }
+      ]
+    }
+  }
+}

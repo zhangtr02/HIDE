@@ -1,0 +1,754 @@
+{
+  "bug_id": "104843",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-10-20",
+    "resolved": "4b8f4319954ff2642690b9e5cbe4af352d095bf6"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/build/matches/mod.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+    "compiler/rustc_hir_analysis/src/check/region.rs",
+    "compiler/rustc_hir_analysis/src/check/expr.rs",
+    "compiler/rustc_hir_analysis/src/check/gather_locals.rs",
+    "compiler/rustc_hir_analysis/src/check/rvalue_scopes.rs",
+    "compiler/rustc_mir_build/src/build/scope.rs",
+    "compiler/rustc_borrowck/src/type_check/mod.rs",
+    "compiler/rustc_hir_analysis/src/check/fn_ctxt/_impl.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `let_chains`, allowing `if` conditions to mix boolean operands with `let PAT = EXPR` bindings joined by `&&`.",
+        "Defines `F(Box<()>)`, exercising a tuple struct containing an owning smart pointer type, though the field is never used at runtime.",
+        "Implements `F::s(&self) -> Option<&str>`, testing a method that borrows `self` and returns an optional shared string slice.",
+        "Defines `cex() -> Option<F>` returning `None`, exercising pattern matching on an owned `Option` value inside a conditional chain.",
+        "Uses `if false && ...` so later chain elements are unreachable at runtime, stressing compiler short-circuit handling rather than execution behavior.",
+        "First `let` chain pattern, `let Some(ce) = cex()`, conditionally moves an `F` out of `Option` and binds it for later operands.",
+        "Second `let` chain, `let Some(_ce) = ce.s()`, reuses the earlier binding by shared borrow, testing scope and borrow propagation across chained lets.",
+        "Exercises compiler lowering/type checking for let-chains with mixed constants, moves, borrows, and nested `Option` destructuring in one `if` condition."
+      ],
+      "summary": "The reproducer targets nightly let-chain lowering in an `if` condition. It combines a constant `false`, an owned `Option<F>` destructuring, and a subsequent borrowed method call on the bound value. Because `false` short-circuits execution, the interesting part is compile-time handling: scope creation for let-bindings, move/borrow interactions across chained operands, and type checking of nested `Option` patterns."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an internal compiler error triggered by the experimental `let_chains` feature during compilation, not by runtime behavior. The reproducer combines three notable ingredients in a single `if` condition: a constant boolean `false`, a first `let`-chain that moves an owned value out of `Option<F>`, and a second `let`-chain that immediately borrows that bound value via `ce.s()`. Since `false && ...` makes the later operands unreachable at runtime, the bug is most likely in compiler analysis/lowering of chained conditions rather than code generation for actual execution. The stack trace shows the panic happens very late, during compiler teardown (`drop_in_place`, `with_source_map`, `ParseSess`/`Session` destruction) with an empty query stack, which is typical of an earlier internal inconsistency being detected during delayed bug emission or cleanup. The common pattern is therefore malformed compiler state produced while handling let-chain scope/liveness/temporary semantics for a short-circuited boolean chain that mixes moves and borrows across chained `let` operands.",
+      "possible_causes": [
+        "Defect in HIR lowering for `if` let-chains: the compiler may incorrectly construct scopes or binding visibility for later `&& let` operands when an earlier operand is a constant `false`, leaving an invalid internal representation for the bound variable `ce`.",
+        "Bug in MIR/builder handling of short-circuit `&&` with `let`-chain bindings: move-out from `Option<F>` in `let Some(ce) = cex()` followed by borrow in `ce.s()` may produce inconsistent storage/live ranges or use-after-move style internal state, especially when the whole suffix is unreachable due to constant folding.",
+        "Incorrect region/type-checking of chained `let` conditions where a later operand borrows a binding introduced by an earlier operand; the compiler may mishandle borrow propagation across `let`-chain segments in the presence of short-circuit semantics.",
+        "Defect in temporary/drop-scope computation for `let_chains`: the owning type `F(Box<()>)` suggests destructor/drop elaboration may be involved, and the compiler may create invalid cleanup/drop data for a value bound in a conditional chain that is never actually evaluated.",
+        "Bug in delayed diagnostic or span/source-map handling associated with `let_chains`, where an earlier internal error in lowering/type checking is only surfaced as a panic during session cleanup, matching the teardown-oriented stack trace and empty query stack."
+      ],
+      "evidence": [
+        "The reproducer explicitly uses nightly-only `#![feature(let_chains)]`, so the bug is concentrated in unstable `let`-chain compiler logic.",
+        "The `if` condition mixes `false && let Some(ce) = cex() && let Some(_ce) = ce.s()`, which stresses short-circuit semantics plus chained pattern bindings.",
+        "The first chained `let` moves an owned `F` out of `Option<F>`, and the second chained `let` immediately borrows it via `&self`, a sensitive combination for scope/liveness/borrow analysis.",
+        "Because the leftmost operand is literal `false`, no runtime execution of the lets occurs; therefore the ICE must come from compile-time lowering/analysis rather than runtime behavior.",
+        "The stack trace does not show a normal user-facing type error; instead rustc panics with 'the compiler unexpectedly panicked', indicating an internal invariant violation.",
+        "The query stack is empty (`end of query stack`), and the frames are dominated by compiler/session destruction (`drop_in_place`, `Session`, `Compiler`, `with_source_map`), which is consistent with corrupted internal state or a delayed bug emitted during cleanup rather than a normal compilation path."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1514,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/mod.rs",
+        "reason": "Most suspicious because `let_chains` in `if` conditions are lowered through match/let-condition MIR building. The reproducer specifically combines short-circuit `&&`, a `let Some(ce) = cex()` binding, and a later borrow `ce.s()` from that binding, which strongly points to buggy handling of binding scope, reachability, or cleanup in let-condition lowering."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "`if` condition expressions and unstable `let_chains` syntax are first desugared/lowered here from AST to HIR. A bug in how chained `let` operands are represented, especially with an initial constant `false`, could create inconsistent later state that only surfaces as an ICE during cleanup."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "THIR construction bridges HIR expression structure into MIR-building form. If chained `let` conditions incorrectly preserve scopes, temporaries, or operand ordering across `false && let ... && let ...`, this file is a likely source of malformed THIR consumed later by MIR build."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/region.rs",
+        "reason": "The reproducer stresses scope/lifetime relationships for a binding introduced in one `let` chain operand and borrowed in the next. This file computes the HIR `ScopeTree` and terminating scopes for conditionals, so an error here could mis-model temporary or binding lifetimes for let-chains."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/expr.rs",
+        "reason": "Type checking of chained `let` conditions with mixed boolean operands, moves, and borrows happens here. The specific pattern of moving `F` from `Option<F>` and then borrowing it via `ce.s()` across chained operands may expose a type-checking or adjustment bug for `let_chains`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/gather_locals.rs",
+        "reason": "This visitor explicitly handles both `hir::Local` and `hir::Let`, making it relevant for `let` expressions used inside conditions. A bug in pre-registering locals or their scopes for chained let conditions could explain later compiler inconsistency."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/rvalue_scopes.rs",
+        "reason": "The reproducer may involve incorrect temporary lifetime extension or pattern-related rvalue scope computation inside let-chains. Since `cex()` produces an owned temporary that is pattern-matched and then reused by borrow, this file is a plausible source of invalid lifetime/drop state."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/scope.rs",
+        "reason": "If the ICE comes from bad drop scheduling or lexical scope management for let-chain bindings in short-circuited conditions, this MIR scope/drop management code is highly relevant. The owned `F(Box<()>)` makes incorrect cleanup handling especially suspicious."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/mod.rs",
+        "reason": "An internal inconsistency in MIR created for the let-chain could be detected later by MIR type checking during borrowck. This file is where malformed MIR involving moves/borrows/live ranges often turns into compiler-internal failures rather than user errors."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/fn_ctxt/_impl.rs",
+        "reason": "The initial `false` makes later chain operands unreachable at runtime, so divergence/unreachable-code tracking may interact badly with `let_chains`. This file contains reachability logic (`warn_if_unreachable`) and function-context control-flow handling that could contribute to a broken state around such conditions."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 449.575,
+    "stage_times_sec": {
+      "checkout": 2.81,
+      "load_bug_context": 0.076,
+      "test_behavior_analysis": 6.369,
+      "test_failure_analysis": 13.959,
+      "load_file_candidates": 307.926,
+      "search_suspicious_files": 118.434
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 90,
+      "input_tokens": 426177,
+      "output_tokens": 22629,
+      "total_tokens": 448806,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.369,
+          "input_tokens": 414,
+          "output_tokens": 352,
+          "total_tokens": 766
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.959,
+          "input_tokens": 2336,
+          "output_tokens": 760,
+          "total_tokens": 3096
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check__match_rs",
+          "latency_sec": 5.043,
+          "input_tokens": 1266,
+          "output_tokens": 220,
+          "total_tokens": 1486
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check__match_rs_repair",
+          "latency_sec": 3.299,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_autoderef_rs",
+          "latency_sec": 4.499,
+          "input_tokens": 1010,
+          "output_tokens": 220,
+          "total_tokens": 1230
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_autoderef_rs_repair",
+          "latency_sec": 3.78,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_callee_rs",
+          "latency_sec": 4.675,
+          "input_tokens": 1364,
+          "output_tokens": 220,
+          "total_tokens": 1584
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_callee_rs_repair",
+          "latency_sec": 4.187,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_cast_rs",
+          "latency_sec": 4.609,
+          "input_tokens": 1536,
+          "output_tokens": 220,
+          "total_tokens": 1756
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_cast_rs_repair",
+          "latency_sec": 3.497,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_closure_rs",
+          "latency_sec": 4.595,
+          "input_tokens": 1383,
+          "output_tokens": 220,
+          "total_tokens": 1603
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_closure_rs_repair",
+          "latency_sec": 2.858,
+          "input_tokens": 255,
+          "output_tokens": 204,
+          "total_tokens": 459
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_coercion_rs",
+          "latency_sec": 6.307,
+          "input_tokens": 1479,
+          "output_tokens": 220,
+          "total_tokens": 1699
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_coercion_rs_repair",
+          "latency_sec": 2.552,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_demand_rs",
+          "latency_sec": 4.452,
+          "input_tokens": 1387,
+          "output_tokens": 220,
+          "total_tokens": 1607
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_demand_rs_repair",
+          "latency_sec": 3.366,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_diverges_rs",
+          "latency_sec": 5.46,
+          "input_tokens": 874,
+          "output_tokens": 220,
+          "total_tokens": 1094
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_diverges_rs_repair",
+          "latency_sec": 2.779,
+          "input_tokens": 255,
+          "output_tokens": 203,
+          "total_tokens": 458
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_expectation_rs",
+          "latency_sec": 4.975,
+          "input_tokens": 1414,
+          "output_tokens": 220,
+          "total_tokens": 1634
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_expectation_rs_repair",
+          "latency_sec": 3.87,
+          "input_tokens": 255,
+          "output_tokens": 225,
+          "total_tokens": 480
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_expr_rs",
+          "latency_sec": 4.994,
+          "input_tokens": 1353,
+          "output_tokens": 220,
+          "total_tokens": 1573
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_expr_rs_repair",
+          "latency_sec": 2.934,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fallback_rs",
+          "latency_sec": 5.606,
+          "input_tokens": 1245,
+          "output_tokens": 220,
+          "total_tokens": 1465
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fallback_rs_repair",
+          "latency_sec": 2.906,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fn_ctxt__impl_rs",
+          "latency_sec": 5.508,
+          "input_tokens": 1335,
+          "output_tokens": 220,
+          "total_tokens": 1555
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fn_ctxt__impl_rs_repair",
+          "latency_sec": 3.25,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fn_ctxt_arg_matrix_rs",
+          "latency_sec": 6.103,
+          "input_tokens": 1271,
+          "output_tokens": 220,
+          "total_tokens": 1491
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fn_ctxt_arg_matrix_rs_repair",
+          "latency_sec": 3.947,
+          "input_tokens": 255,
+          "output_tokens": 208,
+          "total_tokens": 463
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fn_ctxt_checks_rs",
+          "latency_sec": 5.264,
+          "input_tokens": 1359,
+          "output_tokens": 220,
+          "total_tokens": 1579
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fn_ctxt_checks_rs_repair",
+          "latency_sec": 3.031,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fn_ctxt_mod_rs",
+          "latency_sec": 5.179,
+          "input_tokens": 1317,
+          "output_tokens": 220,
+          "total_tokens": 1537
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fn_ctxt_mod_rs_repair",
+          "latency_sec": 3.427,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fn_ctxt_suggestions_rs",
+          "latency_sec": 5.397,
+          "input_tokens": 1307,
+          "output_tokens": 220,
+          "total_tokens": 1527
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_fn_ctxt_suggestions_rs_repair",
+          "latency_sec": 3.874,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_gather_locals_rs",
+          "latency_sec": 5.093,
+          "input_tokens": 1421,
+          "output_tokens": 220,
+          "total_tokens": 1641
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_gather_locals_rs_repair",
+          "latency_sec": 3.125,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_generator_interior_rs",
+          "latency_sec": 4.714,
+          "input_tokens": 1236,
+          "output_tokens": 220,
+          "total_tokens": 1456
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_generator_interior_rs_repair",
+          "latency_sec": 3.873,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_generator_interior_drop_ranges_rs",
+          "latency_sec": 5.857,
+          "input_tokens": 1361,
+          "output_tokens": 220,
+          "total_tokens": 1581
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_generator_interior_drop_ranges_rs_repair",
+          "latency_sec": 3.415,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:ompiler_rustc_hir_analysis_src_check_generator_interior_drop_ranges_cfg_build_rs",
+          "latency_sec": 4.103,
+          "input_tokens": 1447,
+          "output_tokens": 220,
+          "total_tokens": 1667
+        },
+        {
+          "stage": "file_summary:ompiler_rustc_hir_analysis_src_check_generator_interior_drop_ranges_cfg_build_rs_repair",
+          "latency_sec": 3.085,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:ler_rustc_hir_analysis_src_check_generator_interior_drop_ranges_cfg_propagate_rs",
+          "latency_sec": 4.42,
+          "input_tokens": 1060,
+          "output_tokens": 220,
+          "total_tokens": 1280
+        },
+        {
+          "stage": "file_summary:ler_rustc_hir_analysis_src_check_generator_interior_drop_ranges_cfg_propagate_rs_repair",
+          "latency_sec": 3.234,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:ler_rustc_hir_analysis_src_check_generator_interior_drop_ranges_cfg_visualize_rs",
+          "latency_sec": 5.663,
+          "input_tokens": 1011,
+          "output_tokens": 220,
+          "total_tokens": 1231
+        },
+        {
+          "stage": "file_summary:ler_rustc_hir_analysis_src_check_generator_interior_drop_ranges_cfg_visualize_rs_repair",
+          "latency_sec": 3.179,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:_hir_analysis_src_check_generator_interior_drop_ranges_record_consumed_borrow_rs",
+          "latency_sec": 5.265,
+          "input_tokens": 1366,
+          "output_tokens": 220,
+          "total_tokens": 1586
+        },
+        {
+          "stage": "file_summary:_hir_analysis_src_check_generator_interior_drop_ranges_record_consumed_borrow_rs_repair",
+          "latency_sec": 3.189,
+          "input_tokens": 255,
+          "output_tokens": 201,
+          "total_tokens": 456
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_inherited_rs",
+          "latency_sec": 4.843,
+          "input_tokens": 1424,
+          "output_tokens": 220,
+          "total_tokens": 1644
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_inherited_rs_repair",
+          "latency_sec": 3.155,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_method_confirm_rs",
+          "latency_sec": 4.292,
+          "input_tokens": 1456,
+          "output_tokens": 220,
+          "total_tokens": 1676
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_method_confirm_rs_repair",
+          "latency_sec": 3.324,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_method_mod_rs",
+          "latency_sec": 4.671,
+          "input_tokens": 1374,
+          "output_tokens": 220,
+          "total_tokens": 1594
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_method_mod_rs_repair",
+          "latency_sec": 3.71,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_method_prelude2021_rs",
+          "latency_sec": 4.322,
+          "input_tokens": 1304,
+          "output_tokens": 220,
+          "total_tokens": 1524
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_method_prelude2021_rs_repair",
+          "latency_sec": 3.269,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_method_probe_rs",
+          "latency_sec": 4.194,
+          "input_tokens": 1403,
+          "output_tokens": 220,
+          "total_tokens": 1623
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_method_probe_rs_repair",
+          "latency_sec": 2.989,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_method_suggest_rs",
+          "latency_sec": 5.576,
+          "input_tokens": 1248,
+          "output_tokens": 220,
+          "total_tokens": 1468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_method_suggest_rs_repair",
+          "latency_sec": 3.733,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_op_rs",
+          "latency_sec": 4.756,
+          "input_tokens": 1263,
+          "output_tokens": 220,
+          "total_tokens": 1483
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_op_rs_repair",
+          "latency_sec": 3.33,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_pat_rs",
+          "latency_sec": 5.026,
+          "input_tokens": 1411,
+          "output_tokens": 220,
+          "total_tokens": 1631
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_pat_rs_repair",
+          "latency_sec": 3.049,
+          "input_tokens": 255,
+          "output_tokens": 221,
+          "total_tokens": 476
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_place_op_rs",
+          "latency_sec": 5.107,
+          "input_tokens": 1366,
+          "output_tokens": 220,
+          "total_tokens": 1586
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_place_op_rs_repair",
+          "latency_sec": 3.168,
+          "input_tokens": 255,
+          "output_tokens": 207,
+          "total_tokens": 462
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_rvalue_scopes_rs",
+          "latency_sec": 4.795,
+          "input_tokens": 1071,
+          "output_tokens": 220,
+          "total_tokens": 1291
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_rvalue_scopes_rs_repair",
+          "latency_sec": 3.561,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_upvar_rs",
+          "latency_sec": 5.167,
+          "input_tokens": 1335,
+          "output_tokens": 220,
+          "total_tokens": 1555
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_upvar_rs_repair",
+          "latency_sec": 2.866,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_writeback_rs",
+          "latency_sec": 4.24,
+          "input_tokens": 1317,
+          "output_tokens": 220,
+          "total_tokens": 1537
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_check_writeback_rs_repair",
+          "latency_sec": 3.276,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_expr_use_visitor_rs",
+          "latency_sec": 5.19,
+          "input_tokens": 1416,
+          "output_tokens": 220,
+          "total_tokens": 1636
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_expr_use_visitor_rs_repair",
+          "latency_sec": 3.478,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_mem_categorization_rs",
+          "latency_sec": 4.43,
+          "input_tokens": 1428,
+          "output_tokens": 220,
+          "total_tokens": 1648
+        },
+        {
+          "stage": "file_summary:compiler_rustc_hir_analysis_src_mem_categorization_rs_repair",
+          "latency_sec": 3.772,
+          "input_tokens": 255,
+          "output_tokens": 213,
+          "total_tokens": 468
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.659,
+          "input_tokens": 28136,
+          "output_tokens": 322,
+          "total_tokens": 28458
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.634,
+          "input_tokens": 27661,
+          "output_tokens": 366,
+          "total_tokens": 28027
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.556,
+          "input_tokens": 27716,
+          "output_tokens": 330,
+          "total_tokens": 28046
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 10.086,
+          "input_tokens": 27907,
+          "output_tokens": 383,
+          "total_tokens": 28290
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.433,
+          "input_tokens": 27957,
+          "output_tokens": 371,
+          "total_tokens": 28328
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.349,
+          "input_tokens": 28014,
+          "output_tokens": 368,
+          "total_tokens": 28382
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.867,
+          "input_tokens": 28054,
+          "output_tokens": 374,
+          "total_tokens": 28428
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.831,
+          "input_tokens": 27942,
+          "output_tokens": 353,
+          "total_tokens": 28295
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.315,
+          "input_tokens": 27644,
+          "output_tokens": 318,
+          "total_tokens": 27962
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.739,
+          "input_tokens": 26667,
+          "output_tokens": 293,
+          "total_tokens": 26960
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.531,
+          "input_tokens": 27692,
+          "output_tokens": 377,
+          "total_tokens": 28069
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.435,
+          "input_tokens": 27988,
+          "output_tokens": 321,
+          "total_tokens": 28309
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.639,
+          "input_tokens": 18114,
+          "output_tokens": 417,
+          "total_tokens": 18531
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.337,
+          "input_tokens": 13882,
+          "output_tokens": 776,
+          "total_tokens": 14658
+        }
+      ]
+    }
+  }
+}

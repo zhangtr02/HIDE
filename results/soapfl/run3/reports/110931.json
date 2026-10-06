@@ -1,0 +1,242 @@
+{
+  "bug_id": "110931",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-04-27",
+    "resolved": "1c42cb4ef0544fbfaa500216e53382d6b079c001"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_infer/src/infer/region_constraints/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/custom.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_ty_utils/src/consts.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a function returning an array type whose length is computed by an inline const-like block inside the type position.",
+        "Inside the array length expression, it declares a local `usize` and then takes a reference `&'_ usize` to that local.",
+        "Uses the placeholder lifetime `'_` in a local reference type annotation, requiring lifetime inference in a const/type-level context.",
+        "Dereferences the inferred reference `*b` to produce the final array length, exercising constant evaluation of borrowed locals.",
+        "Leaves `foo`'s body empty, so the compiler must still type-check and validate the declared return type before body completion matters.",
+        "Exercises Rust's support for block expressions in const generic array lengths, including name resolution and local bindings within the block.",
+        "Triggers compiler handling of references and temporary/local lifetimes during compile-time evaluation rather than normal runtime execution.",
+        "Targets nightly rustc behavior around const-eval/type-checking interactions for array lengths, where inferred lifetimes may expose an internal compiler bug."
+      ],
+      "summary": "The reproducer declares a function whose return type is an array with a length computed from a block expression. That block creates a local integer, borrows it using an inferred `'_` lifetime, and dereferences the reference to obtain the length. This stresses nightly rustc’s type checking, lifetime inference, and constant evaluation for references inside array-length/type-position expressions, likely provoking the bug before the empty function body is considered."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on a block expression used as an array length in a function return type, i.e. a const/type-level context. Inside that block, rustc creates local bindings, infers a placeholder lifetime for `&'_ usize`, and then reports that the local `a` must be borrowed for `'static`. The common theme across the reproducer, behavior notes, and diagnostic is incorrect lifetime handling when ordinary local references appear inside type-position constant expressions. In this context, the compiler seems to treat the borrow as escaping into a globally valid const/type environment, rather than as a short-lived local borrow within the temporary block expression. The specific symptom (`type annotation requires that a is borrowed for 'static`) suggests a defect in how region inference, borrow checking, or const qualification lowers/infers placeholder lifetimes in anonymous constants used for array lengths. Since the function body is irrelevant and the error arises while validating the declared return type, the likely bug is in compiler logic for type-checking/region resolution of inline const-like array length expressions, especially the interaction between anonymous consts, placeholder lifetime `'_`, and borrow checking of local temporaries.",
+      "possible_causes": [
+        "Bug in lifetime/region inference for anonymous const or array-length expressions: `&'_ T` inside a type-position const block is being incorrectly promoted or normalized to require `'static` instead of an inferred local lifetime.",
+        "Defect in borrow checking for inline const/type-level blocks: locals declared inside the array-length expression are treated as if their references escape the block, causing a spurious E0597.",
+        "Incorrect lowering/HIR-to-typeck handling of block expressions in array lengths, where local bindings and inferred lifetimes are analyzed under rules meant for item/static contexts rather than temporary const expressions.",
+        "Problem in const-eval qualification or validation that assumes references appearing in type-level constants must be `'static`, even when the reference is only immediately dereferenced and does not escape.",
+        "Anonymous const handling may be reusing region constraints from normal const items or promoted constants, leading to an erroneous outlives requirement on stack locals within the const expression."
+      ],
+      "evidence": [
+        "The error is emitted from the return type's array length expression, before the empty function body matters, so the bug lies in compiler processing of type-position constants rather than executable code.",
+        "Diagnostic says `type annotation requires that 'a' is borrowed for 'static'`, even though the source only uses `&'_ usize`; this points to wrong lifetime inference/escalation by the compiler.",
+        "The reproducer's key stressor is a local borrow inside an inline block used for array length computation, matching compiler subsystems for anonymous consts, type checking, and region inference.",
+        "The reference does not escape semantically: it is immediately dereferenced to produce a `usize`, so a `'static` requirement is suspicious and indicates over-constraining in compiler analysis.",
+        "Behavior summary explicitly targets nightly interactions between const-eval and type-checking for array lengths, reinforcing that the defect is likely in that production compiler path."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1618,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Array lengths in return types are represented through anonymous consts, and this file computes `type_of` for anon consts based on their parent context. The bug appears specifically in a type-position array-length block expression, so incorrect classification or typing of that anon const could easily trigger the later bogus `'static` requirement."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "This is the core HIR-to-ty lowering path for type syntax. The reproducer stresses a block expression used inside an array length in type position, so mistakes here in lowering the const/type context or handling inferred lifetimes in such syntax are highly relevant."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "The emitted diagnostic says the annotation `&'_ usize` requires borrowing `a` for `'static`, which strongly suggests an outlives obligation is being generated incorrectly. This file is exactly where type-outlives obligations are decomposed into region constraints and could be over-constraining the local borrow in anon-const context."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/region_constraints/mod.rs",
+        "reason": "If the wrong `'static` requirement is not introduced earlier, it may arise when region constraints are recorded and unified. Since the failure is about inferred lifetime escalation inside a special const/type context, the central region-constraint collection layer is a strong suspect."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/custom.rs",
+        "reason": "Anonymous const/type checking commonly uses query type ops that scrape obligations and region constraints out of an inference context. A bug here could mis-handle region obligations produced while checking the array-length anon const, causing them to be interpreted as escaping into a global/static context."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "Type-position consts and inferred references often go through normalization under obligations. If normalization in this path mishandles escaping regions or binders for the anon const expression, it could manifest as the spurious `'static` outlives requirement seen in the diagnostic."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Well-formedness checking is performed on declared return types before the empty function body matters, matching the reproducer. This file generates WF obligations for types and const-related generic arguments, making it a plausible source of an erroneous lifetime requirement for the borrow inside the array-length const block."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The error arises while validating the function signature/return type rather than executable code. This file coordinates HIR/type-level well-formedness checking and could be invoking the wrong environment or const-context assumptions for the array-length anonymous const."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "The reproducer depends on acceptance and analysis of a const expression in a type. Although the failure is phrased as a lifetime error, this file is central to determining how type-position consts are treated and may participate in the path that treats the anon const too much like a globally evaluable constant."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This file builds abstract constants from THIR for const items and anonymous consts. Since the problematic construct is specifically a block-based array-length anon const with local bindings and a borrow, mishandling of the expression form here could interact badly with later type/lifetime checking."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 170.172,
+    "stage_times_sec": {
+      "checkout": 0.615,
+      "load_bug_context": 0.06,
+      "test_behavior_analysis": 6.852,
+      "test_failure_analysis": 14.173,
+      "load_file_candidates": 0.083,
+      "search_suspicious_files": 148.388
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 370699,
+      "output_tokens": 6461,
+      "total_tokens": 377160,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.852,
+          "input_tokens": 361,
+          "output_tokens": 294,
+          "total_tokens": 655
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.173,
+          "input_tokens": 1009,
+          "output_tokens": 618,
+          "total_tokens": 1627
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 11.702,
+          "input_tokens": 26378,
+          "output_tokens": 371,
+          "total_tokens": 26749
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.545,
+          "input_tokens": 26428,
+          "output_tokens": 346,
+          "total_tokens": 26774
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.177,
+          "input_tokens": 26046,
+          "output_tokens": 280,
+          "total_tokens": 26326
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 10.39,
+          "input_tokens": 26295,
+          "output_tokens": 358,
+          "total_tokens": 26653
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.98,
+          "input_tokens": 26241,
+          "output_tokens": 371,
+          "total_tokens": 26612
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.182,
+          "input_tokens": 26677,
+          "output_tokens": 400,
+          "total_tokens": 27077
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.923,
+          "input_tokens": 26535,
+          "output_tokens": 333,
+          "total_tokens": 26868
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.427,
+          "input_tokens": 26378,
+          "output_tokens": 398,
+          "total_tokens": 26776
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.812,
+          "input_tokens": 26556,
+          "output_tokens": 343,
+          "total_tokens": 26899
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 10.46,
+          "input_tokens": 26310,
+          "output_tokens": 311,
+          "total_tokens": 26621
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.262,
+          "input_tokens": 26619,
+          "output_tokens": 276,
+          "total_tokens": 26895
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 9.307,
+          "input_tokens": 26578,
+          "output_tokens": 350,
+          "total_tokens": 26928
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.601,
+          "input_tokens": 26588,
+          "output_tokens": 336,
+          "total_tokens": 26924
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.259,
+          "input_tokens": 13740,
+          "output_tokens": 319,
+          "total_tokens": 14059
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 15.334,
+          "input_tokens": 11960,
+          "output_tokens": 757,
+          "total_tokens": 12717
+        }
+      ]
+    }
+  }
+}

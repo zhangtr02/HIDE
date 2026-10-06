@@ -1,0 +1,229 @@
+{
+  "bug_id": "97104",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-05-16",
+    "resolved": "42e1761c704f074b7b8c7ff8a7433acfd65d2ee9"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/wfcheck.rs",
+    "compiler/rustc_typeck/src/collect/type_of.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_ast_lowering/src/path.rs",
+    "compiler/rustc_resolve/src/late/lifetimes.rs",
+    "compiler/rustc_trait_selection/src/traits/object_safety.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `type_alias_impl_trait`, allowing opaque `impl Trait` in type aliases within modules.",
+        "Defines opaque alias `Ty<'a> = impl Sized + 'a`; `define` fixes the hidden concrete type using an input `&str` tied to a lifetime.",
+        "Uses the lifetime-instantiated opaque type inside a function-pointer alias `fn(Ty<'_>) -> &str`.",
+        "Uses the same lifetime opaque type inside a trait-object alias `dyn Fn(Ty<'_>) -> &str`.",
+        "Defines generic opaque alias `Ty<T> = impl Sized`; `define<T>` binds each instantiation to the passed concrete type `T`.",
+        "Uses a concrete generic instantiation `Ty<&str>` inside a function-pointer alias returning `&str`.",
+        "Uses the generic opaque type inside a `dyn Fn(Ty<&str>) -> &str` trait object, stressing object type checking.",
+        "Exercises compiler validation of hidden opaque types when referenced from signatures, trait objects, lifetimes, and type parameters."
+      ],
+      "summary": "The reproducer tests `type_alias_impl_trait` with opaque aliases parameterized by lifetimes and by types. It defines hidden concrete types through functions, then reuses those opaque aliases inside function-pointer and `dyn Fn` type aliases. This stresses rustc’s handling of opaque type identity, lifetime capture, generic instantiation, and signature checking in nested type contexts."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is repeated use of `type_alias_impl_trait` opaque aliases (`Ty<'a>` and `Ty<T>`) not as direct return types, but re-embedded inside higher-level signature forms: function-pointer types and `dyn Fn` trait-object types. In both modules, the hidden type is fixed by a defining function, then the opaque alias is referenced from argument position and paired with an output `&str`. The reproducer therefore stresses compiler validation of opaque type identity and parameter capture when the opaque type appears in nested type positions rather than only in its defining item. The observed failure is that the compiler accepts all of these constructions and only emits dead-code warnings, so the bug is likely a missing rejection/validation path rather than a crash. The likely defect is in semantic checking for type-alias `impl Trait` when such opaque types are used inside fn signatures or trait-object `Fn` signatures: the compiler is probably not enforcing restrictions on hidden type leakage, lifetime/type parameter use, or well-formedness of opaque aliases referenced from nested binder contexts. In particular, use of `Ty<'_>` and `Ty<&str>` in `fn(...) -> &str` / `dyn Fn(...) -> &str` suggests a gap in checking opaque type expansion or substitution under binders, causing invalid signature forms to be accepted.",
+      "possible_causes": [
+        "Missing well-formedness/type-check validation for `type_alias_impl_trait` opaque aliases when they appear inside function-pointer type aliases (`fn(Ty<...>) -> ...`) rather than in ordinary item signatures.",
+        "Missing validation for opaque type aliases used inside `dyn Fn(...) -> ...` trait-object signatures, likely in the object-type/lowering path, allowing invalid opaque references to bypass checks.",
+        "Incorrect handling of lifetime capture/substitution for opaque aliases like `Ty<'_>` under nested binders, so inferred/anonymous lifetimes inside opaque alias arguments are accepted when they should be rejected or normalized differently.",
+        "Incorrect handling of generic substitution for opaque aliases like `Ty<&str>` when reused outside the defining function, causing the compiler to treat the opaque alias as an ordinary alias and skip hidden-type identity checks.",
+        "A defect in HIR lowering or later type collection/wf-checking that fails to propagate `impl Trait in type aliases` restrictions into nested type contexts (fn pointers and trait objects).",
+        "A leak-check or privacy/escaping-hidden-type check for opaque types is not triggered for signature aliases, so illegal exposure of an opaque type through public type structure is silently accepted."
+      ],
+      "evidence": [
+        "The reproducer intentionally uses nightly `type_alias_impl_trait`, indicating the code path under test is opaque type alias handling.",
+        "Both modules define an opaque alias via a `define` function, then reuse that alias in nested signature contexts (`fn(...)` and `dyn Fn(...)`), which is the shared stress pattern.",
+        "The accepted forms include both lifetime-parameterized (`Ty<'_>`) and type-parameterized (`Ty<&str>`) opaque aliases, suggesting the issue is generic over substitution/capture rather than tied to one parameter kind.",
+        "Compiler output shows only dead-code warnings and successful compilation (return code 0), so the defect is acceptance of invalid code due to missing diagnostics, not an ICE.",
+        "The behavior summary explicitly says the reproducer exercises validation of hidden opaque types in signatures, trait objects, lifetimes, and type parameters, aligning with a missing validation/checking bug in those compiler components."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1425,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "Most likely missing a well-formedness rejection for type-alias `impl Trait` when the opaque alias is reused inside nested signature forms like `fn(Ty<'_>) -> &str` and `dyn Fn(Ty<&str>) -> &str`. The bug is acceptance of invalid interface types, which strongly points to WF checking over item/type aliases and function-like signatures."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect/type_of.rs",
+        "reason": "This file computes declared types for items and includes opaque-type-specific validation during type collection. Since the reproducer embeds TAITs inside type aliases for fn pointers and trait objects, a gap here could let those opaque references be collected as ordinary types without enforcing the intended `type_alias_impl_trait` restrictions."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "Directly handles reconstruction and validation of opaque type definitions from instantiations, including remapping generic arguments and checking legality of hidden types. The reproducer stresses lifetime/type parameter substitution (`Ty<'_>`, `Ty<&str>`) in nested contexts, so a missed validation path here is highly plausible."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Core inference support for opaque types may be treating these TAIT occurrences too permissively when they appear in nested type positions, replacing or relating them without preserving the restrictions that should trigger an error for exposed/ill-formed usage."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Generates WF obligations for types under trait selection. If opaque aliases inside fn-pointer or `dyn Fn` signatures are not expanded into the necessary obligations, invalid nested uses could compile successfully with only warnings."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "This lowering code explicitly mentions `impl Trait` placement restrictions in paths. Because the reproducer uses TAIT references through path/generic syntax in nested type contexts, an omission during lowering could fail to mark these occurrences as restricted or needing later validation."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late/lifetimes.rs",
+        "reason": "The lifetime form `Ty<'_>` inside fn-pointer and trait-object signatures is a key stressor in the reproducer. If anonymous lifetime handling under these nested binders is resolved too permissively, later checks may never see the misuse correctly."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/object_safety.rs",
+        "reason": "One failing pattern uses `dyn Fn(Ty<...>) -> &str`, so trait-object-specific signature validation may be bypassing opaque-type checks. While object safety is not the whole issue, this file is a plausible place where `dyn Fn` handling could miss constraints on opaque argument types."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 138.81,
+    "stage_times_sec": {
+      "checkout": 1.14,
+      "load_bug_context": 0.038,
+      "test_behavior_analysis": 6.234,
+      "test_failure_analysis": 13.58,
+      "load_file_candidates": 0.07,
+      "search_suspicious_files": 117.747
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 332274,
+      "output_tokens": 5553,
+      "total_tokens": 337827,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.234,
+          "input_tokens": 475,
+          "output_tokens": 300,
+          "total_tokens": 775
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.58,
+          "input_tokens": 1470,
+          "output_tokens": 705,
+          "total_tokens": 2175
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.528,
+          "input_tokens": 27178,
+          "output_tokens": 337,
+          "total_tokens": 27515
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.931,
+          "input_tokens": 26731,
+          "output_tokens": 371,
+          "total_tokens": 27102
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.033,
+          "input_tokens": 26962,
+          "output_tokens": 317,
+          "total_tokens": 27279
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.395,
+          "input_tokens": 26954,
+          "output_tokens": 348,
+          "total_tokens": 27302
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.86,
+          "input_tokens": 26973,
+          "output_tokens": 359,
+          "total_tokens": 27332
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.949,
+          "input_tokens": 27033,
+          "output_tokens": 298,
+          "total_tokens": 27331
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 10.529,
+          "input_tokens": 27000,
+          "output_tokens": 370,
+          "total_tokens": 27370
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.113,
+          "input_tokens": 26671,
+          "output_tokens": 332,
+          "total_tokens": 27003
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.411,
+          "input_tokens": 26303,
+          "output_tokens": 358,
+          "total_tokens": 26661
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.644,
+          "input_tokens": 26790,
+          "output_tokens": 215,
+          "total_tokens": 27005
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.162,
+          "input_tokens": 26620,
+          "output_tokens": 337,
+          "total_tokens": 26957
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.505,
+          "input_tokens": 24100,
+          "output_tokens": 311,
+          "total_tokens": 24411
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.662,
+          "input_tokens": 11014,
+          "output_tokens": 595,
+          "total_tokens": 11609
+        }
+      ]
+    }
+  }
+}

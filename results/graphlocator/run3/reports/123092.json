@@ -1,0 +1,258 @@
+{
+  "bug_id": "123092",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-03-25",
+    "resolved": "0824b300eb0dae5d9ed59719d3f2732016683d66"
+  },
+  "final_top10": [
+    "compiler/rustc_pattern_analysis/src/rustc.rs",
+    "compiler/rustc_middle/src/mir/consts.rs",
+    "compiler/rustc_middle/src/thir.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_pattern_analysis/src/rustc.rs",
+      "compiler/rustc_middle/src/mir/consts.rs",
+      "compiler/rustc_middle/src/thir.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_pattern_analysis/src/rustc.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/consts.rs",
+        "rank": 2
+      },
+      {
+        "path": "compiler/rustc_middle/src/thir.rs",
+        "rank": 3
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/123092.json",
+    "graph_cache_hit": true,
+    "graph_cache_build_mode": "bug_cache",
+    "graph_cache_bug_id": "123092",
+    "graph_cache_checkout_commit": "0824b300eb0dae5d9ed59719d3f2732016683d66",
+    "initial_graph_node_count": 55018,
+    "initial_graph_edge_count": 55017,
+    "graph_node_count": 55018,
+    "graph_edge_count": 122333,
+    "lazy_loaded_edge_count": 67316,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"lower_pat\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_pattern_analysis/src/rustc.rs\", \"content\": \"pub fn lower_pat(&self, pat: &'p Pat<'tcx>) -> DeconstructedPat<'p, 'tcx> {\\n        let cx = self;\\n        let ty = cx.reveal_opaque_ty(pat.ty);\\n        let ctor;\\n        let arity;\\n        let fields: Vec<_>;\\n        match &pat.kind {\\n            PatKind::AscribeUserType { subpattern, .. }\\n            | PatKind::InlineConstant { subpattern, .. } => return self.lower_pat(subpattern),\\n            PatKind::Binding { subpattern: Some(subpat), .. } => return self.lower_pat(subpat),\\n            PatKind::Binding { subpattern: None, .. } | PatKind::Wild => {\\n                ctor = Wildcard;\\n                fields = vec![];\\n                arity = 0;\\n            }\\n            PatKind::Deref { subpattern } => {\\n                fields = vec![self.lower_pat(subpattern).at_index(0)];\\n                arity = 1;\\n                ctor = match ty.kind() {\\n                    // This is a box pattern.\\n                    ty::Adt(adt, ..) if adt.is_box() => Struct,\\n                    ty::Ref(..) => Ref,\\n                    _ => bug!(\\\"pattern has unexpected type: pat: {:?}, ty: {:?}\\\", pat, ty),\\n                };\\n            }\\n            PatKind::DerefPattern { .. } => {\\n                // FIXME(deref_patterns): At least detect that `box _` is irrefutable.\\n                fields = vec![];\\n                arity = 0;\\n                ctor = Opaque(OpaqueId::new());\\n            }\\n            PatKind::Leaf { subpatterns } | PatKind::Variant { subpatterns, .. } => {\\n                match ty.kind() {\\n                    ty::Tuple(fs) => {\\n                        ctor = Struct;\\n                        arity = fs.len();\\n                        fields = subpatterns\\n                            .iter()\\n                            .map(|ipat| self.lower_pat(&ipat.pattern).at_index(ipat.field.index()))\\n                            .collect();\\n                    }\\n                    ty::Adt(adt, _) if adt.is_box() => {\\n                        // The only legal patterns of type `Box` (outside `std`) are `_` and box\\n                        // patterns. If we're here we can assume this is a box pattern.\\n                        // FIXME(Nadrieril): A `Box` can in theory be matched either with `Box(_,\\n                        // _)` or a box pattern. As a hack to avoid an ICE with the former, we\\n                        // ignore other fields than the first one. This will trigger an error later\\n                        // anyway.\\n                        // See https://github.com/rust-lang/rust/issues/82772,\\n                        // explanation: https://github.com/rust-lang/rust/pull/82789#issuecomment-796921977\\n                        // The problem is that we can't know from the type whether we'll match\\n                        // normally or through box-patterns. We'll have to figure out a proper\\n                        // solution when we introduce generalized deref patterns. Also need to\\n                        // prevent mixing of those two options.\\n                        let pattern = subpatterns.into_iter().find(|pat| pat.field.index() == 0);\\n                        if let Some(pat) = pattern {\\n                            fields = vec![self.lower_pat(&pat.pattern).at_index(0)];\\n                        } else {\\n                            fields = vec![];\\n                        }\\n                        ctor = Struct;\\n                        arity = 1;\\n                    }\\n                    ty::Adt(adt, _) => {\\n                        ctor = match pat.kind {\\n                            PatKind::Leaf { .. } if adt.is_union() => UnionField,\\n                            PatKind::Leaf { .. } => Struct,\\n                            PatKind::Variant { variant_index, .. } => Variant(variant_index),\\n                            _ => bug!(),\\n                        };\\n                        let variant =\\n                            &adt.variant(RustcPatCtxt::variant_index_for_adt(&ctor, *adt));\\n                        arity = variant.fields.len();\\n                        fields = subpatterns\\n                            .iter()\\n                            .map(|ipat| self.lower_pat(&ipat.pattern).at_index(ipat.field.index()))\\n                            .collect();\\n                    }\\n                    _ => bug!(\\\"pattern has unexpected type: pat: {:?}, ty: {:?}\\\", pat, ty),\\n                }\\n            }\\n            PatKind::Constant { value } => {\\n                match ty.kind() {\\n                    ty::Bool => {\\n                        ctor = match value.try_eval_bool(cx.tcx, cx.param_env) {\\n                            Some(b) => Bool(b),\\n                            None => Opaque(OpaqueId::new()),\\n                        };\\n                        fields = vec![];\\n                        arity = 0;\\n                    }\\n                    ty::Char | ty::Int(_) | ty::Uint(_) => {\\n                        ctor = match value.try_eval_bits(cx.tcx, cx.param_env) {\\n                            Some(bits) => {\\n                                let x = match *ty.kind() {\\n                                    ty::Int(ity) => {\\n                                        let size = Integer::from_int_ty(&cx.tcx, ity).size().bits();\\n                                        MaybeInfiniteInt::new_finite_int(bits, size)\\n                                    }\\n                                    _ => MaybeInfiniteInt::new_finite_uint(bits),\\n                                };\\n                                IntRange(IntRange::from_singleton(x))\\n                            }\\n                            None => Opaque(OpaqueId::new()),\\n                        };\\n                        fields = vec![];\\n                        arity = 0;\\n                    }\\n                    ty::Float(ty::FloatTy::F32) => {\\n                        ctor = match value.try_eval_bits(cx.tcx, cx.param_env) {\\n                            Some(bits) => {\\n                                use rustc_apfloat::Float;\\n                                let value = rustc_apfloat::ieee::Single::from_bits(bits);\\n                                F32Range(value, value, RangeEnd::Included)\\n                            }\\n                            None => Opaque(OpaqueId::new()),\\n                        };\\n                        fields = vec![];\\n                        arity = 0;\\n                    }\\n                    ty::Float(ty::FloatTy::F64) => {\\n                        ctor = match value.try_eval_bits(cx.tcx, cx.param_env) {\\n                            Some(bits) => {\\n                                use rustc_apfloat::Float;\\n                                let value = rustc_apfloat::ieee::Double::from_bits(bits);\\n                                F64Range(value, value, RangeEnd::Included)\\n                            }\\n                            None => Opaque(OpaqueId::new()),\\n                        };\\n                        fields = vec![];\\n                        arity = 0;\\n                    }\\n                    ty::Ref(_, t, _) if t.is_str() => {\\n                        // We want a `&str` constant to behave like a `Deref` pattern, to be compatible\\n                        // with other `Deref` patterns. This could have been done in `const_to_pat`,\\n                        // but that causes issues with the rest of the matching code.\\n                        // So here, the constructor for a `\\\"foo\\\"` pattern is `&` (represented by\\n                        // `Ref`), and has one field. That field has constructor `Str(value)` and no\\n                        // subfields.\\n                        // Note: `t` is `str`, not `&str`.\\n                        let ty = self.reveal_opaque_ty(*t);\\n                        let subpattern = DeconstructedPat::new(Str(*value), Vec::new(), 0, ty, pat);\\n                        ctor = Ref;\\n                        fields = vec![subpattern.at_index(0)];\\n                        arity = 1;\\n                    }\\n                    // All constants that can be structurally matched have already been expanded\\n                    // into the corresponding `Pat`s by `const_to_pat`. Constants that remain are\\n                    // opaque.\\n                    _ => {\\n                        ctor = Opaque(OpaqueId::new());\\n                        fields = vec![];\\n                        arity = 0;\\n                    }\\n                }\\n            }\\n            PatKind::Range(patrange) => {\\n                let PatRange { lo, hi, end, .. } = patrange.as_ref();\\n                let end = match end {\\n                    rustc_hir::RangeEnd::Included => RangeEnd::Included,\\n                    rustc_hir::RangeEnd::Excluded => RangeEnd::Excluded,\\n                };\\n                ctor = match ty.kind() {\\n                    ty::Char | ty::Int(_) | ty::Uint(_) => {\\n                        let lo = cx.lower_pat_range_bdy(*lo, ty);\\n                        let hi = cx.lower_pat_range_bdy(*hi, ty);\\n                        IntRange(IntRange::from_range(lo, hi, end))\\n                    }\\n                    ty::Float(fty) => {\\n                        use rustc_apfloat::Float;\\n                        let lo = lo.as_finite().map(|c| c.eval_bits(cx.tcx, cx.param_env));\\n                        let hi = hi.as_finite().map(|c| c.eval_bits(cx.tcx, cx.param_env));\\n                        match fty {\\n                            ty::FloatTy::F16 => unimplemented!(\\\"f16_f128\\\"),\\n                            ty::FloatTy::F32 => {\\n                                use rustc_apfloat::ieee::Single;\\n                                let lo = lo.map(Single::from_bits).unwrap_or(-Single::INFINITY);\\n                                let hi = hi.map(Single::from_bits).unwrap_or(Single::INFINITY);\\n                                F32Range(lo, hi, end)\\n                            }\\n                            ty::FloatTy::F64 => {\\n                                use rustc_apfloat::ieee::Double;\\n                                let lo = lo.map(Double::from_bits).unwrap_or(-Double::INFINITY);\\n                                let hi = hi.map(Double::from_bits).unwrap_or(Double::INFINITY);\\n                                F64Range(lo, hi, end)\\n                            }\\n                            ty::FloatTy::F128 => unimplemented!(\\\"f16_f128\\\"),\\n                        }\\n                    }\\n                    _ => bug!(\\\"invalid type for range pattern: {}\\\", ty.inner()),\\n                };\\n                fields = vec![];\\n                arity = 0;\\n            }\\n            PatKind::Array { prefix, slice, suffix } | PatKind::Slice { prefix, slice, suffix } => {\\n                let array_len = match ty.kind() {\\n                    ty::Array(_, length) => {\\n                        Some(length.eval_target_usize(cx.tcx, cx.param_env) as usize)\\n                    }\\n                    ty::Slice(_) => None,\\n                    _ => span_bug!(pat.span, \\\"bad ty {:?} for slice pattern\\\", ty),\\n                };\\n                let kind = if slice.is_some() {\\n                    SliceKind::VarLen(prefix.len(), suffix.len())\\n                } else {\\n                    SliceKind::FixedLen(prefix.len() + suffix.len())\\n                };\\n                ctor = Slice(Slice::new(array_len, kind));\\n                fields = prefix\\n                    .iter()\\n                    .chain(suffix.iter())\\n                    .map(|p| self.lower_pat(&*p))\\n                    .enumerate()\\n                    .map(|(i, p)| p.at_index(i))\\n                    .collect();\\n                arity = kind.arity();\\n            }\\n            PatKind::Or { .. } => {\\n                ctor = Or;\\n                let pats = expand_or_pat(pat);\\n                fields = pats\\n                    .into_iter()\\n                    .map(|p| self.lower_pat(p))\\n                    .enumerate()\\n                    .map(|(i, p)| p.at_index(i))\\n                    .collect();\\n                arity = fields.len();\\n            }\\n            PatKind::Never => {\\n                // A never pattern matches all the values of its type (namely none). Moreover it\\n                // must be compatible with other constructors, since we can use `!` on a type like\\n                // `Result<!, !>` which has other constructors. Hence we lower it as a wildcard.\\n                ctor = Wildcard;\\n                fields = vec![];\\n                arity = 0;\\n            }\\n            PatKind::Error(_) => {\\n                ctor = Opaque(OpaqueId::new());\\n                fields = vec![];\\n                arity = 0;\\n            }\\n        }\\n        DeconstructedPat::new(ctor, fields, arity, ty, pat)\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"eval_bits\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/ty/consts.rs\", \"content\": \"pub fn eval_bits(self, tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>) -> u128 {\\n        self.try_eval_bits(tcx, param_env)\\n            .unwrap_or_else(|| bug!(\\\"expected bits of {:#?}, got {:#?}\\\", self.ty(), self))\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"eval_bits\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/thir.rs\", \"content\": \"pub fn eval_bits(self, ty: Ty<'tcx>, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> u128 {\\n        match self {\\n            Self::Finite(value) => value.eval_bits(tcx, param_env),\\n            Self::NegInfinity => {\\n                // Unwrap is ok because the type is known to be numeric.\\n                ty.numeric_min_and_max_as_bits(tcx).unwrap().0\\n            }\\n            Self::PosInfinity => {\\n                // Unwrap is ok because the type is known to be numeric.\\n                ty.numeric_min_and_max_as_bits(tcx).unwrap().1\\n            }\\n        }\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"lower_pat_range_bdy\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_pattern_analysis/src/rustc.rs\", \"content\": \"pub(crate) fn lower_pat_range_bdy(\\n        &self,\\n        bdy: PatRangeBoundary<'tcx>,\\n        ty: RevealedTy<'tcx>,\\n    ) -> MaybeInfiniteInt {\\n        match bdy {\\n            PatRangeBoundary::NegInfinity => MaybeInfiniteInt::NegInfinity,\\n            PatRangeBoundary::Finite(value) => {\\n                let bits = value.eval_bits(self.tcx, self.param_env);\\n                match *ty.kind() {\\n                    ty::Int(ity) => {\\n                        let size = Integer::from_int_ty(&self.tcx, ity).size().bits();\\n                        MaybeInfiniteInt::new_finite_int(bits, size)\\n                    }\\n                    _ => MaybeInfiniteInt::new_finite_uint(bits),\\n                }\\n            }\\n            PatRangeBoundary::PosInfinity => MaybeInfiniteInt::PosInfinity,\\n        }\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"eval_bits\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/mir/consts.rs\", \"content\": \"pub fn eval_bits(self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> u128 {\\n        self.try_eval_bits(tcx, param_env)\\n            .unwrap_or_else(|| bug!(\\\"expected bits of {:#?}, got {:#?}\\\", self.ty(), self))\\n    }\"}",
+      "{\"type\": \"FILE\", \"name\": \"consts.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/mir/consts.rs\", \"content\": \"consts.rs\"}",
+      "{\"type\": \"FILE\", \"name\": \"consts.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/ty/consts.rs\", \"content\": \"consts.rs\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"lower_pat\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_ast_lowering/src/pat.rs\", \"content\": \"pub(crate) fn lower_pat(&mut self, pattern: &Pat) -> &'hir hir::Pat<'hir> {\\n        self.arena.alloc(self.lower_pat_mut(pattern))\\n    }\"}",
+      "{\"type\": \"ENUM\", \"name\": \"PatRangeBoundary\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/thir.rs\", \"content\": \"pub enum PatRangeBoundary<'tcx> {\\n    Finite(mir::Const<'tcx>),\\n    NegInfinity,\\n    PosInfinity,\\n}\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_pattern_analysis/src/rustc.rs",
+      "compiler/rustc_middle/src/mir/consts.rs",
+      "compiler/rustc_middle/src/thir.rs"
+    ],
+    "found_modules": [
+      "compiler/rustc_middle/src/thir.rs::PatRangeBoundary"
+    ],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Pattern range boundary evaluates a malformed/ill-typed associated const as concrete bits",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "lower_pat_range_bdy",
+              "file": "compiler/rustc_pattern_analysis/src/rustc.rs",
+              "content": "pub(crate) fn lower_pat_range_bdy(\n        &self,\n        bdy: PatRangeBoundary<'tcx>,\n        ty: RevealedTy<'tcx>,\n    ) -> MaybeInfiniteInt {\n        match bdy {\n            PatRangeBoundary::NegInfinity => MaybeInfiniteInt::NegInfinity,\n            PatRangeBoundary::Finite(value) => {\n                let bits = value.eval_bits(self.tcx, self.param_env);\n                match *ty.kind() {\n                    ty::Int(ity) => {\n                        let size = Integer::from_int_ty(&self.tcx, ity).size().bits();\n                        MaybeInfiniteInt::new_finite_int(bits, size)\n                    }\n                    _ => MaybeInfiniteInt::new_finite_uint(bits),\n                }\n            }\n            PatRangeBoundary::PosInfinity => MaybeInfiniteInt::PosInfinity,\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "eval_bits in MIR consts panics when const cannot be represented as expected target bits/type",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "eval_bits",
+              "file": "compiler/rustc_middle/src/mir/consts.rs",
+              "content": "pub fn eval_bits(self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> u128 {\n        self.try_eval_bits(tcx, param_env)\n            .unwrap_or_else(|| bug!(\"expected bits of {:#?}, got {:#?}\", self.ty(), self))\n    }"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Range pattern boundary carries a Finite const despite earlier missing-type error, enabling invalid downstream evaluation",
+          "code_elements": [
+            {
+              "type": "ENUM",
+              "name": "PatRangeBoundary",
+              "file": "compiler/rustc_middle/src/thir.rs",
+              "content": "pub enum PatRangeBoundary<'tcx> {\n    Finite(mir::Const<'tcx>),\n    NegInfinity,\n    PosInfinity,\n}"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Pattern lowering/checking continues into range-pattern analysis after erroneous const omission, lacking error recovery guard",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "lower_pat",
+              "file": "compiler/rustc_pattern_analysis/src/rustc.rs",
+              "content": "pub fn lower_pat(&self, pat: &'p Pat<'tcx>) -> DeconstructedPat<'p, 'tcx> {\n        let cx = self;\n        let ty = cx.reveal_opaque_ty(pat.ty);\n        let ctor;\n        let arity;\n        let fields: Vec<_>;\n        match &pat.kind {\n            PatKind::AscribeUserType { subpattern, .. }\n            | PatKind::InlineConstant { subpattern, .. } => return self.lower_pat(subpattern),\n            PatKind::Binding { subpattern: Some(subpat), .. } => return self.lower_pat(subpat),\n            PatKind::Binding { subpattern: None, .. } | PatKind::Wild => {\n                ctor = Wildcard;\n                fields = vec![];\n                arity = 0;\n            }\n            PatKind::Deref { subpattern } => {\n                fields = vec![self.lower_pat(subpattern).at_index(0)];\n                arity = 1;\n                ctor = match ty.kind() {\n                    // This is a box pattern.\n                    ty::Adt(adt, ..) if adt.is_box() => Struct,\n                    ty::Ref(..) => Ref,\n                    _ => bug!(\"pattern has unexpected type: pat: {:?}, ty: {:?}\", pat, ty),\n                };\n            }\n            PatKind::DerefPattern { .. } => {\n                // FIXME(deref_patterns): At least detect that `box _` is irrefutable.\n                fields = vec![];\n                arity = 0;\n                ctor = Opaque(OpaqueId::new());\n            }\n            PatKind::Leaf { subpatterns } | PatKind::Variant { subpatterns, .. } => {\n                match ty.kind() {\n                    ty::Tuple(fs) => {\n                        ctor = Struct;\n                        arity = fs.len();\n                        fields = subpatterns\n                            .iter()\n                            .map(|ipat| self.lower_pat(&ipat.pattern).at_index(ipat.field.index()))\n                            .collect();\n                    }\n                    ty::Adt(adt, _) if adt.is_box() => {\n                        // The only legal patterns of type `Box` (outside `std`) are `_` and box\n                        // patterns. If we're here we can assume this is a box pattern.\n                        // FIXME(Nadrieril): A `Box` can in theory be matched either with `Box(_,\n                        // _)` or a box pattern. As a hack to avoid an ICE with the former, we\n                        // ignore other fields than the first one. This will trigger an error later\n                        // anyway.\n                        // See https://github.com/rust-lang/rust/issues/82772,\n                        // explanation: https://github.com/rust-lang/rust/pull/82789#issuecomment-796921977\n                        // The problem is that we can't know from the type whether we'll match\n                        // normally or through box-patterns. We'll have to figure out a proper\n                        // solution when we introduce generalized deref patterns. Also need to\n                        // prevent mixing of those two options.\n                        let pattern = subpatterns.into_iter().find(|pat| pat.field.index() == 0);\n                        if let Some(pat) = pattern {\n                            fields = vec![self.lower_pat(&pat.pattern).at_index(0)];\n                        } else {\n                            fields = vec![];\n                        }\n                        ctor = Struct;\n                        arity = 1;\n                    }\n                    ty::Adt(adt, _) => {\n                        ctor = match pat.kind {\n                            PatKind::Leaf { .. } if adt.is_union() => UnionField,\n                            PatKind::Leaf { .. } => Struct,\n                            PatKind::Variant { variant_index, .. } => Variant(variant_index),\n                            _ => bug!(),\n                        };\n                        let variant =\n                            &adt.variant(RustcPatCtxt::variant_index_for_adt(&ctor, *adt));\n                        arity = variant.fields.len();\n                        fields = subpatterns\n                            .iter()\n                            .map(|ipat| self.lower_pat(&ipat.pattern).at_index(ipat.field.index()))\n                            .collect();\n                    }\n                    _ => bug!(\"pattern has unexpected type: pat: {:?}, ty: {:?}\", pat, ty),\n                }\n            }\n            PatKind::Constant { value } => {\n                match ty.kind() {\n                    ty::Bool => {\n                        ctor = match value.try_eval_bool(cx.tcx, cx.param_env) {\n                            Some(b) => Bool(b),\n                            None => Opaque(OpaqueId::new()),\n                        };\n                        fields = vec![];\n                        arity = 0;\n                    }\n                    ty::Char | ty::Int(_) | ty::Uint(_) => {\n                        ctor = match value.try_eval_bits(cx.tcx, cx.param_env) {\n                            Some(bits) => {\n                                let x = match *ty.kind() {\n                                    ty::Int(ity) => {\n                                        let size = Integer::from_int_ty(&cx.tcx, ity).size().bits();\n                                        MaybeInfiniteInt::new_finite_int(bits, size)\n                                    }\n                                    _ => MaybeInfiniteInt::new_finite_uint(bits),\n                                };\n                                IntRange(IntRange::from_singleton(x))\n                            }\n                            None => Opaque(OpaqueId::new()),\n                        };\n                        fields = vec![];\n                        arity = 0;\n                    }\n                    ty::Float(ty::FloatTy::F32) => {\n                        ctor = match value.try_eval_bits(cx.tcx, cx.param_env) {\n                            Some(bits) => {\n                                use rustc_apfloat::Float;\n                                let value = rustc_apfloat::ieee::Single::from_bits(bits);\n                                F32Range(value, value, RangeEnd::Included)\n                            }\n                            None => Opaque(OpaqueId::new()),\n                        };\n                        fields = vec![];\n                        arity = 0;\n                    }\n                    ty::Float(ty::FloatTy::F64) => {\n                        ctor = match value.try_eval_bits(cx.tcx, cx.param_env) {\n                            Some(bits) => {\n                                use rustc_apfloat::Float;\n                                let value = rustc_apfloat::ieee::Double::from_bits(bits);\n                                F64Range(value, value, RangeEnd::Included)\n                            }\n                            None => Opaque(OpaqueId::new()),\n                        };\n                        fields = vec![];\n                        arity = 0;\n                    }\n                    ty::Ref(_, t, _) if t.is_str() => {\n                        // We want a `&str` constant to behave like a `Deref` pattern, to be compatible\n                        // with other `Deref` patterns. This could have been done in `const_to_pat`,\n                        // but that causes issues with the rest of the matching code.\n                        // So here, the constructor for a `\"foo\"` pattern is `&` (represented by\n                        // `Ref`), and has one field. That field has constructor `Str(value)` and no\n                        // subfields.\n                        // Note: `t` is `str`, not `&str`.\n                        let ty = self.reveal_opaque_ty(*t);\n                        let subpattern = DeconstructedPat::new(Str(*value), Vec::new(), 0, ty, pat);\n                        ctor = Ref;\n                        fields = vec![subpattern.at_index(0)];\n                        arity = 1;\n                    }\n                    // All constants that can be structurally matched have already been expanded\n                    // into the corresponding `Pat`s by `const_to_pat`. Constants that remain are\n                    // opaque.\n                    _ => {\n                        ctor = Opaque(OpaqueId::new());\n                        fields = vec![];\n                        arity = 0;\n                    }\n                }\n            }\n            PatKind::Range(patrange) => {\n                let PatRange { lo, hi, end, .. } = patrange.as_ref();\n                let end = match end {\n                    rustc_hir::RangeEnd::Included => RangeEnd::Included,\n                    rustc_hir::RangeEnd::Excluded => RangeEnd::Excluded,\n                };\n                ctor = match ty.kind() {\n                    ty::Char | ty::Int(_) | ty::Uint(_) => {\n                        let lo = cx.lower_pat_range_bdy(*lo, ty);\n                        let hi = cx.lower_pat_range_bdy(*hi, ty);\n                        IntRange(IntRange::from_range(lo, hi, end))\n                    }\n                    ty::Float(fty) => {\n                        use rustc_apfloat::Float;\n                        let lo = lo.as_finite().map(|c| c.eval_bits(cx.tcx, cx.param_env));\n                        let hi = hi.as_finite().map(|c| c.eval_bits(cx.tcx, cx.param_env));\n                        match fty {\n                            ty::FloatTy::F16 => unimplemented!(\"f16_f128\"),\n                            ty::FloatTy::F32 => {\n                                use rustc_apfloat::ieee::Single;\n                                let lo = lo.map(Single::from_bits).unwrap_or(-Single::INFINITY);\n                                let hi = hi.map(Single::from_bits).unwrap_or(Single::INFINITY);\n                                F32Range(lo, hi, end)\n                            }\n                            ty::FloatTy::F64 => {\n                                use rustc_apfloat::ieee::Double;\n                                let lo = lo.map(Double::from_bits).unwrap_or(-Double::INFINITY);\n                                let hi = hi.map(Double::from_bits).unwrap_or(Double::INFINITY);\n                                F64Range(lo, hi, end)\n                            }\n                            ty::FloatTy::F128 => unimplemented!(\"f16_f128\"),\n                        }\n                    }\n                    _ => bug!(\"invalid type for range pattern: {}\", ty.inner()),\n                };\n                fields = vec![];\n                arity = 0;\n            }\n            PatKind::Array { prefix, slice, suffix } | PatKind::Slice { prefix, slice, suffix } => {\n                let array_len = match ty.kind() {\n                    ty::Array(_, length) => {\n                        Some(length.eval_target_usize(cx.tcx, cx.param_env) as usize)\n                    }\n                    ty::Slice(_) => None,\n                    _ => span_bug!(pat.span, \"bad ty {:?} for slice pattern\", ty),\n                };\n                let kind = if slice.is_some() {\n                    SliceKind::VarLen(prefix.len(), suffix.len())\n                } else {\n                    SliceKind::FixedLen(prefix.len() + suffix.len())\n                };\n                ctor = Slice(Slice::new(array_len, kind));\n                fields = prefix\n                    .iter()\n                    .chain(suffix.iter())\n                    .map(|p| self.lower_pat(&*p))\n                    .enumerate()\n                    .map(|(i, p)| p.at_index(i))\n                    .collect();\n                arity = kind.arity();\n            }\n            PatKind::Or { .. } => {\n                ctor = Or;\n                let pats = expand_or_pat(pat);\n                fields = pats\n                    .into_iter()\n                    .map(|p| self.lower_pat(p))\n                    .enumerate()\n                    .map(|(i, p)| p.at_index(i))\n                    .collect();\n                arity = fields.len();\n            }\n            PatKind::Never => {\n                // A never pattern matches all the values of its type (namely none). Moreover it\n                // must be compatible with other constructors, since we can use `!` on a type like\n                // `Result<!, !>` which has other constructors. Hence we lower it as a wildcard.\n                ctor = Wildcard;\n                fields = vec![];\n                arity = 0;\n            }\n            PatKind::Error(_) => {\n                ctor = Opaque(OpaqueId::new());\n                fields = vec![];\n                arity = 0;\n            }\n        }\n        DeconstructedPat::new(ctor, fields, arity, ty, pat)\n    }"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.99
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.997
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.91
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.9
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 1041.881,
+    "stage_times_sec": {
+      "load_bug_context": 0.011,
+      "checkout": 0.872,
+      "load_or_build_graph": 33.828,
+      "symptom_vertices_locating": 981.139,
+      "dynamic_cig_discovering": 24.113,
+      "convert_results": 0.008
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 11,
+      "input_tokens": 73317,
+      "output_tokens": 1109,
+      "total_tokens": 74426,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.029,
+          "input_tokens": 3267,
+          "output_tokens": 109,
+          "total_tokens": 3376
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.763,
+          "input_tokens": 2623,
+          "output_tokens": 17,
+          "total_tokens": 2640
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.116,
+          "input_tokens": 3514,
+          "output_tokens": 49,
+          "total_tokens": 3563
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.107,
+          "input_tokens": 4047,
+          "output_tokens": 48,
+          "total_tokens": 4095
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.737,
+          "input_tokens": 4366,
+          "output_tokens": 46,
+          "total_tokens": 4412
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.141,
+          "input_tokens": 5562,
+          "output_tokens": 45,
+          "total_tokens": 5607
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 6.49,
+          "input_tokens": 4625,
+          "output_tokens": 159,
+          "total_tokens": 4784
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 4.353,
+          "input_tokens": 12744,
+          "output_tokens": 159,
+          "total_tokens": 12903
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 2.729,
+          "input_tokens": 7525,
+          "output_tokens": 158,
+          "total_tokens": 7683
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.78,
+          "input_tokens": 6722,
+          "output_tokens": 159,
+          "total_tokens": 6881
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 6.747,
+          "input_tokens": 18322,
+          "output_tokens": 160,
+          "total_tokens": 18482
+        }
+      ]
+    }
+  }
+}

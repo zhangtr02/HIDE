@@ -1,0 +1,243 @@
+{
+  "bug_id": "112124",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-05-29",
+    "resolved": "1c53407e8c7cc922d718bde61ca34f47b6d2120f"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/coherence/builtin.rs",
+    "compiler/rustc_trait_selection/src/traits/misc.rs",
+    "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+    "compiler/rustc_middle/src/ty/trait_def.rs",
+    "compiler/rustc_hir/src/lang_items.rs",
+    "compiler/rustc_trait_selection/src/traits/structural_match.rs",
+    "compiler/rustc_ty_utils/src/structural_match.rs",
+    "compiler/rustc_middle/src/ty/consts/valtree.rs",
+    "compiler/rustc_const_eval/src/const_eval/valtrees.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `adt_const_params`, exercising unstable support for non-primitive const generic parameter types.",
+        "Imports `core::marker::ConstParamTy`, the marker trait rustc uses to restrict which types may appear as const generic parameters.",
+        "Defines a zero-sized user type `Foo`, then targets a reference type `&'static Foo` rather than `Foo` itself.",
+        "Implements `ConstParamTy` for `&'static Foo`, exercising trait implementation on a reference type with a `'static` lifetime.",
+        "Tests compiler checking of manual `ConstParamTy` impl legality, coherence, and feature-gated const-generic admissibility rules.",
+        "Exercises const-evaluability/type-system paths involving references as potential const parameters, an unusual edge case for structural matching.",
+        "Contains no actual const-generic usage in functions or types, so the reproducer isolates trait-definition/validation behavior during compilation.",
+        "Uses a minimal `main` to ensure any failure comes from front-end type checking and trait validation, not runtime behavior."
+      ],
+      "summary": "This reproducer is a compile-only minimal case for nightly const generics internals. It enables `adt_const_params`, defines `Foo`, and manually implements `ConstParamTy` for `&'static Foo`. The code probes whether rustc correctly accepts or rejects reference types as structural const parameter candidates, focusing on feature gating, trait validation, and type-system handling rather than runtime execution."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer is a front-end, compile-only test focused on the unstable `adt_const_params` machinery and the compiler-internal marker trait `ConstParamTy`. The common pattern is that it manually implements `ConstParamTy` for a reference type (`&'static Foo`) instead of for an ADT or primitive, and does so without ever using that type as an actual const generic parameter. This isolates rustc's trait validation/admissibility logic for const-param-capable types. The observed behavior is that compilation succeeds with only the expected incomplete-feature warning. Given the test intent, the likely bug is that rustc incorrectly accepts a manual `ConstParamTy` impl for a reference type, meaning the compiler's checks around which types may legally implement or satisfy `ConstParamTy` are missing, incomplete, or bypassed when validating impls. Since references are a sensitive edge case for structural matching and const parameter representation, the defect is most likely in trait impl checking or structural-const eligibility logic rather than code generation or runtime.",
+      "possible_causes": [
+        "Missing or incomplete validation in rustc for manual `ConstParamTy` implementations, allowing impls for reference types such as `&'static Foo` that should be rejected or specially restricted.",
+        "A defect in the `adt_const_params` structural-match eligibility check, where reference types are incorrectly classified as admissible const parameter types during trait/ty validation.",
+        "Trait coherence or built-in-trait handling bug for `ConstParamTy`, where rustc treats it like an ordinary user-implementable marker trait instead of enforcing compiler-side restrictions on eligible type forms.",
+        "An omission in front-end semantic checks that only validate `ConstParamTy` when a type is actually used as a const generic parameter, but fail to reject invalid impls at impl-definition time.",
+        "Incorrect handling of references in const-generic type-system code paths (`ConstParamTy`/structural equality), especially for `'static` references to user-defined zero-sized types."
+      ],
+      "evidence": [
+        "The reproducer enables `#![feature(adt_const_params)]`, directly targeting unstable const-generic admissibility logic.",
+        "It imports and manually implements `core::marker::ConstParamTy`, indicating the test is probing compiler validation of this special marker trait.",
+        "The impl target is `&'static Foo`, an unusual edge-case type for const parameters compared with primitives or plain ADTs.",
+        "There is no actual const-generic usage, so acceptance of the program implies the relevant checking happens (or should happen) during trait impl validation.",
+        "Compiler output shows only the generic incomplete-feature warning and then successful compilation (`Return code: 0`), suggesting rustc did not diagnose the impl as invalid.",
+        "The behavior summary explicitly states the test is about legality, coherence, and admissibility rules for `ConstParamTy`, aligning the likely defect with front-end trait/type validation."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1626,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/coherence/builtin.rs",
+        "reason": "This file explicitly dispatches and validates impls of built-in/lang-item traits including `ConstParamTy`. The reproducer is about an apparently-invalid manual `impl ConstParamTy for &'static Foo {}` being accepted, so the most likely missing check is here in the built-in trait impl validator for `ConstParamTy`."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/misc.rs",
+        "reason": "This file contains `type_allowed_to_implement_const_param_ty`, the core shape-based legality check for which types may implement `ConstParamTy`/`UnsizedConstParamTy`. A reference type like `&'static Foo` being accepted strongly suggests this function may incorrectly classify references as allowed, or may not be invoked from coherence for this impl."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+        "reason": "This is the coherence-phase entry point that runs per-impl policy checks before/alongside built-in trait validation. If invalid `ConstParamTy` impls are only supposed to be rejected during impl checking, an omission in how this module invokes built-in/manual-implementability enforcement could let the impl pass through."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/trait_def.rs",
+        "reason": "If `ConstParamTy` is treated incorrectly as an ordinary trait rather than a compiler-restricted built-in/lang-item trait, the metadata and semantic flags for the trait could be wrong here, causing downstream coherence checks not to apply the expected restrictions."
+      },
+      {
+        "path": "compiler/rustc_hir/src/lang_items.rs",
+        "reason": "`ConstParamTy` is a compiler-known marker trait, so incorrect lang-item classification or lookup could prevent the special-case impl validation from recognizing the trait as `ConstParamTy` and enforcing its restrictions."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/structural_match.rs",
+        "reason": "The bug concerns structural admissibility of types for const-param use, and references are a delicate edge case. While this file is more pattern-oriented, it contains the trait-selection-side structural matching checks that could influence whether reference-containing types are seen as structurally acceptable."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/structural_match.rs",
+        "reason": "This file provides the `has_structural_eq_impl` query used to decide whether ADTs are structurally matchable. If `ConstParamTy` legality relies on structural-equality support and references are slipping through due to shallow or incomplete checks, this query layer is relevant."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/consts/valtree.rs",
+        "reason": "`adt_const_params` relies on valtree-based structural representation of type-level constants. References are generally problematic for canonical structural const representation, so a too-permissive assumption in valtree admissibility could underlie why `&'static Foo` is not rejected."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/valtrees.rs",
+        "reason": "This file performs conversion of const values into `ValTree`, the representation central to structural const parameters. If reference types are supposed to be excluded from const-param machinery, missing rejection logic around references here could reflect or contribute to the overly permissive acceptance."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The reproducer has no actual const-generic use, so rejection would need to happen at impl-definition time via front-end well-formedness/semantic checks. If those checks are deferred too late or omitted for `ConstParamTy` impl headers, this WF-checking layer is a plausible secondary suspect."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 158.954,
+    "stage_times_sec": {
+      "checkout": 1.69,
+      "load_bug_context": 0.081,
+      "test_behavior_analysis": 6.458,
+      "test_failure_analysis": 11.012,
+      "load_file_candidates": 0.098,
+      "search_suspicious_files": 139.615
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 371504,
+      "output_tokens": 6278,
+      "total_tokens": 377782,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.457,
+          "input_tokens": 356,
+          "output_tokens": 294,
+          "total_tokens": 650
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.012,
+          "input_tokens": 1006,
+          "output_tokens": 584,
+          "total_tokens": 1590
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.296,
+          "input_tokens": 26341,
+          "output_tokens": 300,
+          "total_tokens": 26641
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.047,
+          "input_tokens": 26387,
+          "output_tokens": 348,
+          "total_tokens": 26735
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.411,
+          "input_tokens": 26011,
+          "output_tokens": 249,
+          "total_tokens": 26260
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.609,
+          "input_tokens": 26266,
+          "output_tokens": 354,
+          "total_tokens": 26620
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.998,
+          "input_tokens": 26229,
+          "output_tokens": 375,
+          "total_tokens": 26604
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 10.195,
+          "input_tokens": 26655,
+          "output_tokens": 371,
+          "total_tokens": 27026
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.361,
+          "input_tokens": 26473,
+          "output_tokens": 376,
+          "total_tokens": 26849
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.286,
+          "input_tokens": 26467,
+          "output_tokens": 326,
+          "total_tokens": 26793
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.815,
+          "input_tokens": 26448,
+          "output_tokens": 331,
+          "total_tokens": 26779
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.892,
+          "input_tokens": 26268,
+          "output_tokens": 327,
+          "total_tokens": 26595
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.305,
+          "input_tokens": 26549,
+          "output_tokens": 344,
+          "total_tokens": 26893
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.978,
+          "input_tokens": 26557,
+          "output_tokens": 267,
+          "total_tokens": 26824
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.917,
+          "input_tokens": 26606,
+          "output_tokens": 315,
+          "total_tokens": 26921
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.267,
+          "input_tokens": 15318,
+          "output_tokens": 357,
+          "total_tokens": 15675
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 14.204,
+          "input_tokens": 11567,
+          "output_tokens": 760,
+          "total_tokens": 12327
+        }
+      ]
+    }
+  }
+}

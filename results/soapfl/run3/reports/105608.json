@@ -1,0 +1,239 @@
+{
+  "bug_id": "105608",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-12-11",
+    "resolved": "c6fcdb690609769a240fc8ab0de0ce68d5ea7dba"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/method/confirm.rs",
+    "compiler/rustc_hir_typeck/src/method/probe.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_middle/src/ty/abstract_const.rs",
+    "compiler/rustc_ty_utils/src/consts.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_infer/src/infer/combine.rs",
+    "compiler/rustc_middle/src/ty/consts.rs",
+    "compiler/rustc_hir_analysis/src/astconv/generics.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `generic_const_exprs`, allowing const expressions like `STRATEGIES + 1` in type-level const generic arguments.",
+        "Defines `Combination<const STRATEGIES: usize>`, exercising const generics on a zero-sized struct.",
+        "Implements an inherent method `and<M>(self) -> Combination<{ STRATEGIES + 1 }>` that increments a const generic in the return type.",
+        "Introduces an unused generic type parameter `M`, forcing method generic argument handling independent of value-level behavior.",
+        "Calls `Combination::<0>.and::<_>().and::<_>()`, chaining methods so the compiler must propagate evolving const-generic values through multiple calls.",
+        "Uses turbofish with inferred placeholders `::<_>()`, exercising type inference for method generics while const generics are computed.",
+        "Relies on type-checking only: returned values are unused, so the reproducer targets compiler inference/normalization rather than runtime execution.",
+        "The reproducer stresses nightly const-generic evaluation, normalization, and method-call resolution; the historical bug was an internal compiler error during this compilation path."
+      ],
+      "summary": "This reproducer is a compile-time-only test for nightly const generics. A zero-sized type carries a `usize` const parameter, and each `and` call returns the same type with that const increased by one. Chaining `and::<_>()` twice makes rustc combine generic method inference with normalization of `STRATEGIES + 1` across successive calls, targeting an ICE in const-generic type checking."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on compile-time handling of const generics plus method generic inference, not on runtime code. The reproducer uses `generic_const_exprs` and an inherent method whose return type contains the const expression `STRATEGIES + 1`. The call chain `Combination::<0>.and::<_>().and::<_>()` forces rustc to repeatedly resolve a method with an unused generic type parameter while also normalizing and propagating the evolving const generic through successive method calls. Because the values are unused and the query stack is empty at the panic site, the ICE likely occurs in an internal type-checking / inference / normalization path rather than borrow checking or code generation. The common pattern is repeated normalization of anonymous const expressions in method return types during chained UFCS-style method resolution with placeholder generic arguments. This strongly suggests a compiler defect in the interaction between generic argument inference for methods and const-generic expression normalization/evaluation when building or relating function signatures across chained calls.",
+      "possible_causes": [
+        "A bug in rustc's type inference for method generic arguments (`::<_>`) when the method signature also contains a const-generic expression in the return type, causing an unexpected internal state during method-call type checking.",
+        "A defect in normalization of const-generic expressions like `STRATEGIES + 1` across chained method calls, especially when the result of one call becomes the receiver type of the next call.",
+        "Incorrect handling of anonymous consts / unevaluated consts in the trait solver or type relation code, leading to a panic while relating `Combination<{N + 1}>` from successive invocations.",
+        "A compiler bug in substitution/instantiation of generic parameters for inherent methods where both type generics and const generics must be combined, particularly with an unused method type parameter `M`.",
+        "Missing validation or error recovery in the `generic_const_exprs` compilation path, so an unsupported or unresolved const expression/inference combination triggers an ICE instead of a normal diagnostic.",
+        "A bug in canonicalization or normalization-after-erasing-regions for method signatures involving const expressions, exposed by chaining calls that repeatedly re-enter the same signature with updated const arguments."
+      ],
+      "evidence": [
+        "The reproducer explicitly enables nightly `generic_const_exprs`, so the failing path is in unstable const-generic expression support.",
+        "The method return type is `Combination<{ STRATEGIES + 1 }>`, requiring rustc to represent and normalize an unevaluated const expression in a type.",
+        "The chained call `Combination::<0>.and::<_>().and::<_>()` forces propagation of the computed const generic from one method call into the next.",
+        "The method generic parameter `M` is unused, and each call uses `::<_>()`, directly exercising method generic inference independent of runtime semantics.",
+        "The code is compile-time only and the returned values are unused, narrowing the bug to type checking, inference, const evaluation, or normalization rather than execution.",
+        "Compiler output says this is an internal compiler panic with no user-facing type error, indicating missing handling in production compiler code rather than invalid reproducer logic.",
+        "The query stack is empty at panic, consistent with a panic in a lower-level internal routine for type/const handling rather than a normal query-reported diagnostic path.",
+        "The behavior summary explicitly identifies the target area as const-generic evaluation, normalization, and method-call resolution during chained calls."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1559,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+        "reason": "Most suspicious because the ICE is triggered during chained inherent method calls with explicit-but-inferred method generic args (`and::<_>()`) and a return type containing a const-generic expression. This file instantiates the chosen method signature, substitutes generic arguments, rebuilds the callee type, and applies obligations during method-call type checking—exactly where `M` inference and `Combination<{ STRATEGIES + 1 }>` must be combined across the chain."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/probe.rs",
+        "reason": "Method lookup/probing is heavily exercised by the chained `.and::<_>().and::<_>()` calls. Probe logic must construct and compare candidate method signatures against the receiver type as its const generic evolves from `0` to `{0 + 1}` and onward. A bug here could mishandle generic argument placeholders or receiver matching in the presence of const-generic return types."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "`FnCtxt` is the central expression/type-checking engine coordinating method resolution, generic argument lowering, inference, and obligation registration. Since the reproducer is compile-time-only and appears to ICE during type checking rather than codegen, this file is a strong candidate for mishandling inference state or normalization around chained method calls with inferred generic args and const expressions."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "The reproducer explicitly depends on `generic_const_exprs` and on proving/accepting `STRATEGIES + 1` as a const expression in a type. This file is the main trait-selection-side gatekeeper for whether such consts are considered evaluatable under the current param-env, and historical ICEs around generic const expressions often arise from missing handling of inference variables or param-dependent unevaluated consts here."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/abstract_const.rs",
+        "reason": "`STRATEGIES + 1` is represented as an abstract/unevaluated const during type checking. Chaining calls forces repeated expansion/instantiation of that expression under different substitutions. If abstract const expansion or recursive substitution is buggy, it can easily surface as an ICE in this exact pattern."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This file builds and validates abstract const representations from THIR. Since the problematic expression is a simple arithmetic const-generic expression used in a return type, any flaw in constructing or validating its abstract-const form for later evaluatability/normalization could produce an internal failure instead of a normal diagnostic."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The failure description strongly points to normalization of type-level const expressions across chained method calls. This file provides the recursive normalization query path used by type checking and trait solving; an ICE could stem from normalizing a method signature or receiver/result type that still contains inferred or unevaluated const components."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/combine.rs",
+        "reason": "Relating successive call results requires equating or subtyping types containing const-generic expressions, likely including const inference variables and unevaluated consts. This file contains the core machinery for relating types and constants during inference, so it is a plausible source of a panic when combining `Combination<{N + 1}>`-style types during method-call checking."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/consts.rs",
+        "reason": "This is the core representation of `ty::Const`, including infer, param, and unevaluated const forms. Since the bug likely involves bad handling of const substitution/representation while type checking a generic method chain, corruption or missing cases at this representation layer are plausible."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/generics.rs",
+        "reason": "The syntax `and::<_>()` exercises generic argument kind/count checking and lowering for method generics, while const generics are simultaneously present in the surrounding signature. Although less likely than method typeck proper, this file is still suspicious because incorrect handling of `_` generic arguments or mixed generic kinds can feed malformed substitutions into later method confirmation/normalization paths."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 134.412,
+    "stage_times_sec": {
+      "checkout": 1.83,
+      "load_bug_context": 0.049,
+      "test_behavior_analysis": 6.484,
+      "test_failure_analysis": 12.162,
+      "load_file_candidates": 0.103,
+      "search_suspicious_files": 113.784
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 375632,
+      "output_tokens": 6332,
+      "total_tokens": 381964,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.484,
+          "input_tokens": 425,
+          "output_tokens": 318,
+          "total_tokens": 743
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.162,
+          "input_tokens": 2291,
+          "output_tokens": 686,
+          "total_tokens": 2977
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.876,
+          "input_tokens": 27720,
+          "output_tokens": 359,
+          "total_tokens": 28079
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.747,
+          "input_tokens": 27663,
+          "output_tokens": 368,
+          "total_tokens": 28031
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.372,
+          "input_tokens": 27548,
+          "output_tokens": 338,
+          "total_tokens": 27886
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.344,
+          "input_tokens": 27785,
+          "output_tokens": 345,
+          "total_tokens": 28130
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.102,
+          "input_tokens": 27822,
+          "output_tokens": 370,
+          "total_tokens": 28192
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.66,
+          "input_tokens": 27992,
+          "output_tokens": 337,
+          "total_tokens": 28329
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.59,
+          "input_tokens": 27853,
+          "output_tokens": 319,
+          "total_tokens": 28172
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.548,
+          "input_tokens": 27830,
+          "output_tokens": 342,
+          "total_tokens": 28172
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.368,
+          "input_tokens": 27852,
+          "output_tokens": 393,
+          "total_tokens": 28245
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.326,
+          "input_tokens": 26457,
+          "output_tokens": 346,
+          "total_tokens": 26803
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.031,
+          "input_tokens": 27982,
+          "output_tokens": 334,
+          "total_tokens": 28316
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.473,
+          "input_tokens": 28023,
+          "output_tokens": 276,
+          "total_tokens": 28299
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.465,
+          "input_tokens": 27464,
+          "output_tokens": 293,
+          "total_tokens": 27757
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.851,
+          "input_tokens": 12925,
+          "output_tokens": 908,
+          "total_tokens": 13833
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,230 @@
+{
+  "bug_id": "114728",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-03-31",
+    "resolved": "c5cf08d37b85f953b132951e868df5b924250fdc"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/check/compare_method.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_borrowck/src/region_infer/mod.rs",
+    "compiler/rustc_borrowck/src/member_constraints.rs",
+    "compiler/rustc_typeck/src/check/wfcheck.rs",
+    "compiler/rustc_typeck/src/check/regionck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a nested-reference alias `Static<'a> = &'static &'a ()`, combining an outer `'static` borrow with an inner generic lifetime `'a`.",
+        "Declares trait `Extend<'a>` whose method returns `&'static str` from an input `&'a str`, forcing lifetime reasoning across trait impls.",
+        "Implements `Extend<'a>` for `Static<'a>` and returns `s` directly, exercising lifetime checking for coercing a shorter borrow to `'static`.",
+        "Uses explicit lifetime parameters on the trait and impl, testing how rustc relates impl lifetimes to associated method signatures.",
+        "Function `boom<'a>(arg: Static<'_>) -> impl Extend<'a>` returns an opaque `impl Trait`, hiding the concrete nested-reference type behind a lifetime-parameterized trait.",
+        "The `'_` lifetime in `Static<'_>` asks rustc to infer the inner reference lifetime while still producing an opaque type tied to explicit `'a`.",
+        "In `main`, `boom(&&())` constructs the nested references from temporaries, exercising temporary lifetime extension and borrow checking.",
+        "Calling `.extend(&String::from(\"temporary\"))` passes a temporary string slice where the method promises `&'static str`, stressing region inference, opaque type checking, and soundness diagnostics."
+      ],
+      "summary": "The reproducer mixes nested references, explicit lifetimes, and `impl Trait` to create a suspicious lifetime flow. A trait method claims to return `&'static str` from `&'a str`, and `boom` hides the implementing type behind an opaque return. The final call uses temporaries, making rustc analyze inferred lifetimes, temporary extension, trait impl matching, and whether an unsound non-`'static` borrow can escape as `'static`."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is a soundness hole around lifetime/region checking when an opaque `impl Trait` return type hides a concrete type whose trait implementation is lifetime-parameterized. The reproducer combines: (1) a nested-reference alias with an outer `&'static` and inner generic lifetime, (2) a trait method that unsafely promises `&'static str` from `&'a str`, and (3) a function returning `impl Extend<'a>` while taking `Static<'_>`, so the concrete lifetime carried by the hidden type is inferred separately from the explicit `'a` on the opaque trait bound. The compiler accepts code that should be rejected because the impl method body returns `s: &'a str` as `&'static str`, and the final call uses a temporary string, proving a non-static borrow escapes as `'static`. This strongly suggests rustc incorrectly relates the hidden type lifetimes, trait impl lifetimes, and opaque return lifetime obligations, allowing an invalid outlives relationship to be assumed or never checked. The likely defect is in compiler logic for borrow checking / region inference / opaque type checking for `impl Trait` with higher-ranked or inferred lifetimes, rather than in the reproducer itself.",
+      "possible_causes": [
+        "Missing or incorrect lifetime constraint checking when validating the impl method signature/body for `impl<'a> Extend<'a> for Static<'a>`, allowing `&'a str` to be returned where `&'static str` is required.",
+        "Bug in opaque `impl Trait` lifetime capture/normalization: `fn boom<'a>(arg: Static<'_>) -> impl Extend<'a>` may incorrectly treat the hidden type as satisfying `Extend<'a>` without enforcing that the inferred inner lifetime of `Static<'_>` matches or outlives `'a`.",
+        "Region inference / borrow checker defect where the inferred lifetime inside the nested-reference alias `&'static &'a ()` is accidentally promoted, generalized, or equated too strongly, leading to acceptance of an invalid `'a: 'static` relationship.",
+        "Trait selection / projection bug involving lifetime-parameterized trait impls behind opaque return types, causing rustc to check only that some `Extend<'a>` impl exists for the hidden type but not the full well-formedness and outlives obligations induced by the method return type.",
+        "Type checking bug in handling placeholders/inference variables from `'_` within a type alias used in an opaque return position, causing lifetime obligations to be lost during canonicalization or hidden-type registration.",
+        "Failure in leak-checking / escaping-region validation for opaque types, permitting a temporary borrow from `&String::from(\"temporary\")` to escape through a method call typed as returning `&'static str`."
+      ],
+      "evidence": [
+        "Compiler output shows successful compilation (`Finished dev ... Return code: 0`) even though the impl method directly returns `s: &'a str` as `&'static str`, which should be rejected by lifetime checking.",
+        "The trait definition itself encodes the unsound requirement: `fn extend(self, _: &'a str) -> &'static str;` and the impl body `s` returns the input unchanged, so acceptance indicates a compiler-side lifetime validation failure.",
+        "The opaque return `impl Extend<'a>` in `boom` hides the concrete `Static<'_>` type, creating the exact scenario where hidden-type lifetime obligations can be dropped or misrelated.",
+        "The use of `Static<'a> = &'static &'a ()` mixes an outer `'static` reference with an inner non-static lifetime, a pattern known to stress region inference and variance/outlives reasoning.",
+        "`boom(&&()).extend(&String::from(\"temporary\"))` passes a temporary-derived `&str` into a method claimed to return `&'static str`; if accepted, a short-lived borrow is escaping, confirming a soundness issue rather than a reproducer mistake.",
+        "The reproducer specifically combines explicit trait lifetimes, inferred `'_`, nested references, and `impl Trait`, and the only observed wrong behavior is acceptance of invalid code, pointing to compiler production code in typeck/borrowck/opaque-type handling."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1406,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/check/compare_method.rs",
+        "reason": "The reproducer is accepted even though the impl method body returns `s: &'a str` where the trait method requires `&'static str`. That points first at trait/impl method signature compatibility and predicate entailment checking. This file is the main place that validates an impl method against its trait declaration, including lifetime relationships, so a missed check here could let the unsound impl through."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "`fn boom<'a>(arg: Static<'_>) -> impl Extend<'a>` is the key opaque-type pattern. The bug description strongly suggests hidden-type lifetime remapping or escape validation is wrong when reconstructing the opaque definition from an instantiation, exactly what this file handles."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "The failure mode involves `impl Trait` plus inferred lifetimes and an escaping temporary borrow. This file performs post-region-inference handling for opaque types and rewrites regions in hidden types, so an incorrect mapping or erasure here could lose the obligation tying the hidden type’s inner lifetime to the trait bound lifetime."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "This file tracks and resolves opaque types during inference, including replacing opaque types with inference vars and generating obligations. Since the reproducer depends on `impl Trait` hiding a concrete lifetime-parameterized type, dropped or weakened obligations here are a very plausible source."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "The core unsoundness is that a non-`'static` `&'a str` effectively escapes as `&'static str`. That implies missing or incorrectly lowered type-outlives obligations. This file is specifically responsible for lowering `T: 'a`-style obligations into region constraints and deferred checks."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/mod.rs",
+        "reason": "If the compiler accidentally infers or accepts an invalid outlives relation, the main region solver is a prime suspect. The reproducer stresses nested references, inferred `'_`, and opaque types, all of which feed into NLL region inference handled here."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/member_constraints.rs",
+        "reason": "Opaque types often introduce member constraints of the form ‘region must be one of these candidates’. A bug in storing or interpreting those constraints could cause the hidden type lifetime from `Static<'_>` to be generalized too much and satisfy `impl Extend<'a>` incorrectly."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/wfcheck.rs",
+        "reason": "The code should likely be rejected as not well formed once the impl body/signature obligations are considered. This file drives item well-formedness and region checking for item signatures, so a missing WF rejection for the impl method or opaque return is plausible."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/check/regionck.rs",
+        "reason": "The final call uses a temporary string and gets treated as producing `&'static str`. If expression-level region constraints are not being added correctly around the method call / returned reference flow, regionck could be failing to encode the necessary lifetime dependency before borrowck."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "The trait method and opaque return both rely on well-formedness and implied outlives requirements being generated correctly. If WF obligation generation misses a crucial lifetime constraint for the impl method or hidden type, the compiler could accept this unsound program."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 130.208,
+    "stage_times_sec": {
+      "checkout": 4.091,
+      "load_bug_context": 0.035,
+      "test_behavior_analysis": 6.558,
+      "test_failure_analysis": 15.068,
+      "load_file_candidates": 0.326,
+      "search_suspicious_files": 104.129
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 324069,
+      "output_tokens": 5976,
+      "total_tokens": 330045,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.558,
+          "input_tokens": 450,
+          "output_tokens": 380,
+          "total_tokens": 830
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.068,
+          "input_tokens": 1053,
+          "output_tokens": 856,
+          "total_tokens": 1909
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.201,
+          "input_tokens": 26921,
+          "output_tokens": 426,
+          "total_tokens": 27347
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.272,
+          "input_tokens": 26491,
+          "output_tokens": 260,
+          "total_tokens": 26751
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.364,
+          "input_tokens": 26693,
+          "output_tokens": 315,
+          "total_tokens": 27008
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.225,
+          "input_tokens": 26677,
+          "output_tokens": 399,
+          "total_tokens": 27076
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.292,
+          "input_tokens": 26671,
+          "output_tokens": 383,
+          "total_tokens": 27054
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.647,
+          "input_tokens": 26711,
+          "output_tokens": 344,
+          "total_tokens": 27055
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.834,
+          "input_tokens": 26828,
+          "output_tokens": 334,
+          "total_tokens": 27162
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.879,
+          "input_tokens": 26266,
+          "output_tokens": 316,
+          "total_tokens": 26582
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 5.979,
+          "input_tokens": 25998,
+          "output_tokens": 161,
+          "total_tokens": 26159
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.187,
+          "input_tokens": 26732,
+          "output_tokens": 319,
+          "total_tokens": 27051
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.008,
+          "input_tokens": 26317,
+          "output_tokens": 361,
+          "total_tokens": 26678
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.807,
+          "input_tokens": 19869,
+          "output_tokens": 352,
+          "total_tokens": 20221
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.405,
+          "input_tokens": 10392,
+          "output_tokens": 770,
+          "total_tokens": 11162
+        }
+      ]
+    }
+  }
+}

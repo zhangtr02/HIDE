@@ -1,0 +1,234 @@
+{
+  "bug_id": "103330",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-10-19",
+    "resolved": "a24a020e6d926dffe6b472fc647978f92269504e"
+  },
+  "final_top10": [
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+    "compiler/rustc_middle/src/middle/resolve_lifetime.rs",
+    "compiler/rustc_hir_analysis/src/check/mod.rs",
+    "compiler/rustc_hir_analysis/src/check/expr.rs",
+    "compiler/rustc_hir_analysis/src/check/coercion.rs",
+    "compiler/rustc_infer/src/infer/sub.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_borrowck/src/universal_regions.rs",
+    "compiler/rustc_borrowck/src/type_check/free_region_relations.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `foo` with one explicit lifetime `'a` shared by two `&str` parameters, exercising lifetime parameter parsing and binding.",
+        "Returns `&str` without an explicit lifetime, relying on lifetime elision rules for function return types.",
+        "Because `foo` has multiple input references with the same named lifetime, the compiler can infer the elided return lifetime as `'a`.",
+        "Uses a string literal `\"\"` as the return expression, exercising coercion from `&'static str` to a shorter inferred `&'a str`.",
+        "Checks region/lifetime subtyping: a `'static` reference must be accepted where the signature requires a borrowed reference tied to parameters.",
+        "Contains no calls to `foo`; compilation still type-checks the function body and signature during item checking.",
+        "Uses edition 2021 with a pinned nightly toolchain, targeting a compiler-specific regression in borrow checking or lifetime resolution."
+      ],
+      "summary": "The reproducer is minimal: it defines a function whose two inputs share an explicit lifetime and whose return lifetime is elided, then returns a string literal. This exercises Rust’s function lifetime elision, named lifetime propagation, and coercion from `&'static str` to the inferred parameter lifetime during type checking, without needing to call the function."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer isolates a very small lifetime-checking scenario: a free function has two input references that both use the same explicit lifetime `'a`, an elided output reference `-> &str`, and a body returning a string literal `\"\"` of type `&'static str`. Under Rust lifetime elision rules, when there is exactly one distinct input lifetime appearing in the arguments, the elided output lifetime should be inferred as that lifetime, here effectively `-> &'a str`. Since `&'static str` is a subtype of `&'a str`, the body should type-check. The observed behavior is successful compilation with only a dead-code warning, so the relevant common pattern is correct handling of output lifetime elision plus region subtyping/coercion from `'static` to an inferred shorter lifetime. Therefore, if there was a compiler bug behind this reproducer, it would most plausibly lie in production compiler code that resolves elided output lifetimes for function signatures, canonicalizes/distinguishes input lifetimes, or performs region subtyping/coercion during type checking/borrow checking of the return expression. A defect in these areas could incorrectly reject such code by failing to infer the output as `'a`, miscounting the number of distinct input lifetimes because there are two parameters, or not allowing `&'static str` to coerce to the inferred return region.",
+      "possible_causes": [
+        "Defect in function lifetime elision logic for free functions: the compiler may incorrectly resolve an elided return lifetime when multiple parameters are present but all share the same named lifetime, failing to infer the output as `&'a str`.",
+        "Bug in region/lifetime canonicalization or distinct-lifetime counting: the compiler could treat the two `&'a str` inputs as separate candidates instead of one distinct lifetime, causing erroneous ambiguity in output lifetime inference.",
+        "Defect in type checking of return expressions involving string literals: coercion/subtyping from `&'static str` to the inferred return type `&'a str` may be mishandled.",
+        "Bug in borrow checker / region inference around return type obligations: the compiler may generate an incorrect outlives constraint for the returned reference, rejecting a valid `'static: 'a` relation.",
+        "Possible regression in HIR/type lowering for elided lifetimes in function signatures, where the elided output lifetime is not properly linked to the sole input lifetime appearing in parameters."
+      ],
+      "evidence": [
+        "The function signature is `fn foo<'a>(_: &'a str, _: &'a str) -> &str`, which specifically exercises output lifetime elision with one distinct input lifetime repeated across multiple parameters.",
+        "The return expression is a string literal `\"\"`, whose type is `&'static str`, so successful checking depends on correct region subtyping/coercion from `'static` to the inferred `&'a str`.",
+        "The function is never called, so the behavior depends on item signature checking and function body type checking rather than call-site inference.",
+        "Compiler output shows successful compilation and only a dead-code warning, indicating that the expected semantics are accepted on this toolchain and that any defect would be in compiler lifetime/type-checking internals, not in the reproducer source.",
+        "The test summary explicitly targets lifetime elision, named lifetime propagation, and borrow-checking/lifetime-resolution behavior on a pinned nightly, aligning the suspected defect area with compiler region inference and signature elision code paths."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1514,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "Lifetime resolution - including the enforcement and diagnosis of elision rules around recording resolutions - belongs to late resolution in this file. A defect here could misclassify the free function as having several candidate input lifetimes merely because it takes two reference parameters, even though both share the same named lifetime."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+        "reason": "Most directly tied to resolving and classifying explicit and elided lifetimes in function signatures. This reproducer hinges on elided output lifetime inference from repeated uses of the same named input lifetime `'a`, so a bug here could mis-handle binder setup or lifetime classification and cause incorrect ambiguity."
+      },
+      {
+        "path": "compiler/rustc_middle/src/middle/resolve_lifetime.rs",
+        "reason": "Defines the lifetime-resolution data structures including `Set1`, which is specifically used to represent zero/one/many distinct lifetime candidates. If repeated `&'a` inputs were incorrectly treated as multiple distinct lifetimes instead of one distinct candidate, output elision could fail here."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/mod.rs",
+        "reason": "Top-level coordinator for HIR type checking and region checking. Since the bug scenario is about function signature/body lifetime checking rather than parsing or codegen, the orchestration layer that connects elision, region checks, and writeback is a plausible integration point."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/expr.rs",
+        "reason": "The function body returns a string literal `\"\"`, so expression checking must validate that `&'static str` fits the inferred return type `&'a str`. A bug in expected-type propagation or return-expression checking could reject valid subtyping/coercion."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/coercion.rs",
+        "reason": "Directly responsible for coercions and subtype-like adjustments during expression type checking. The reproducer depends on accepting coercion/subtyping from `&'static str` to the inferred `&'a str`, making this file highly relevant."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/sub.rs",
+        "reason": "Implements subtype checking in the inference engine. If the compiler mishandled region subtyping for references, especially `'static` outliving an inferred return region, this is a prime place for the defect."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "Translates type outlives requirements into region constraints. If return-type checking generated the wrong outlives obligations for the inferred output lifetime, valid code like this could be rejected here."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/universal_regions.rs",
+        "reason": "Builds the universal/free region model for a body, including liberated input/output types. Since the reproducer is centered on relating the function’s input lifetime `'a` to its elided output, a mistake in constructing these universal regions could surface as a lifetime bug."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/free_region_relations.rs",
+        "reason": "Computes known outlives relations among universal regions. The key semantic fact is effectively `'static: 'a` plus correct treatment of the single distinct input lifetime; a bug here could cause incorrect free-region relations during MIR type checking."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 149.534,
+    "stage_times_sec": {
+      "checkout": 1.377,
+      "load_bug_context": 0.044,
+      "test_behavior_analysis": 5.494,
+      "test_failure_analysis": 14.075,
+      "load_file_candidates": 0.495,
+      "search_suspicious_files": 128.049
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 345944,
+      "output_tokens": 5880,
+      "total_tokens": 351824,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.494,
+          "input_tokens": 342,
+          "output_tokens": 266,
+          "total_tokens": 608
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 14.075,
+          "input_tokens": 931,
+          "output_tokens": 703,
+          "total_tokens": 1634
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.95,
+          "input_tokens": 26673,
+          "output_tokens": 384,
+          "total_tokens": 27057
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.488,
+          "input_tokens": 26198,
+          "output_tokens": 298,
+          "total_tokens": 26496
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.464,
+          "input_tokens": 26253,
+          "output_tokens": 311,
+          "total_tokens": 26564
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.852,
+          "input_tokens": 26444,
+          "output_tokens": 292,
+          "total_tokens": 26736
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.84,
+          "input_tokens": 26494,
+          "output_tokens": 335,
+          "total_tokens": 26829
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.228,
+          "input_tokens": 26551,
+          "output_tokens": 350,
+          "total_tokens": 26901
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.96,
+          "input_tokens": 26591,
+          "output_tokens": 304,
+          "total_tokens": 26895
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 10.592,
+          "input_tokens": 26479,
+          "output_tokens": 359,
+          "total_tokens": 26838
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.741,
+          "input_tokens": 26181,
+          "output_tokens": 298,
+          "total_tokens": 26479
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.951,
+          "input_tokens": 25204,
+          "output_tokens": 308,
+          "total_tokens": 25512
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 10.284,
+          "input_tokens": 26229,
+          "output_tokens": 303,
+          "total_tokens": 26532
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.066,
+          "input_tokens": 26525,
+          "output_tokens": 335,
+          "total_tokens": 26860
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.459,
+          "input_tokens": 16651,
+          "output_tokens": 340,
+          "total_tokens": 16991
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.148,
+          "input_tokens": 12198,
+          "output_tokens": 694,
+          "total_tokens": 12892
+        }
+      ]
+    }
+  }
+}

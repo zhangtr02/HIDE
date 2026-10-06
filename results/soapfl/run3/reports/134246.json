@@ -1,0 +1,259 @@
+{
+  "bug_id": "134246",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-12-14",
+    "resolved": "327c7ee4367ea587a49eff1d4715f462ab6db5f0"
+  },
+  "final_top10": [
+    "compiler/rustc_smir/src/rustc_smir/convert/mir.rs",
+    "compiler/rustc_smir/src/rustc_internal/pretty.rs",
+    "compiler/rustc_smir/src/rustc_smir/context.rs",
+    "compiler/rustc_driver_impl/src/pretty.rs",
+    "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+    "compiler/rustc_mir_transform/src/coroutine.rs",
+    "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+    "compiler/rustc_smir/src/rustc_smir/builder.rs",
+    "compiler/rustc_middle/src/mir/syntax.rs",
+    "compiler/rustc_smir/src/rustc_smir/convert/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Uses nightly-only `-Zunpretty=stable-mir`, exercising the compiler’s Stable MIR pretty-printing path instead of normal code generation.",
+        "Compiles a crate declared with edition 2024, but forces `--edition=2018` for this source, stressing edition override handling.",
+        "Imports `std::future::ready` and awaits it inside an async context, exercising async lowering of an immediately-ready future.",
+        "Defines an async closure `async || { ... }`, a newer Rust feature that must capture outer locals into a generated future.",
+        "The async closure captures `vec` by mutable borrow and calls `vec.push(...)`, testing capture analysis and borrow checking for async closures.",
+        "Creates and awaits `ready(String::from(\"\"))`, exercising temporary creation, ownership transfer, and await desugaring within the closure body.",
+        "Never invokes the closure, so the reproducer focuses on type checking and MIR construction for the closure/future, not runtime behavior.",
+        "Uses `Vec<String>` mutation from inside the async closure, stressing Stable MIR generation for mutable upvar captures and async state machines."
+      ],
+      "summary": "The reproducer is compile-only. It defines an async closure that mutably captures a local `Vec<String>`, awaits a `ready(String)` future, and pushes the result into the vector. This stresses async-closure lowering, upvar capture/borrowing, await desugaring, edition handling, and especially the nightly Stable MIR pretty-printing path."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in the Stable MIR conversion/pretty-printing pipeline rather than in parsing, type checking, borrow checking, or normal MIR construction. The backtrace is entirely inside `rustc_smir`/`stable_mir` conversion code, specifically while converting MIR `Body -> StatementKind -> Rvalue -> AggregateKind` for `-Zunpretty=stable-mir`. The reproducer’s distinctive shape is an `async ||` closure that mutably captures an outer local (`vec`), contains an `.await`, and therefore must be lowered into a generated coroutine/future state machine with synthesized aggregate forms and captured upvars. Since the closure is never called, the bug is likely triggered merely by constructing/printing MIR for the async closure body/future body. The common thread is that async-closure lowering plus mutable upvar capture plus await desugaring creates a MIR aggregate/variant form that Stable MIR’s `Stable::stable` conversion does not expect or does not fully support, causing a panic when pretty-printing Stable MIR.",
+      "possible_causes": [
+        "Missing or incorrect handling in `rustc_smir` Stable MIR conversion for a MIR `AggregateKind` produced by async closure/coroutine lowering, likely one involving coroutine state-machine variants or closure/coroutine captures.",
+        "A defect in Stable MIR support for async closures specifically: the generated MIR for `async ||` may use a newer aggregate or capture representation that `-Zunpretty=stable-mir` has not been updated to serialize.",
+        "Incorrect assumptions in Stable MIR lowering about upvar captures, especially mutable by-reference captures inside async closures, leading to a panic when converting the closure/future body.",
+        "Incomplete support in Stable MIR for await-desugared temporaries inside coroutine bodies, where `ready(...).await` introduces generator state and aggregate construction not covered by the conversion code.",
+        "Edition/feature interaction bug in compiler internals: async closures under the forced source edition may produce MIR shapes that the Stable MIR printer does not normalize or validate before conversion.",
+        "A production-code bug in the pretty-print path that tries to obtain/print MIR bodies for synthesized async-closure or coroutine items using unsupported body kinds, instead of gracefully rejecting or handling them."
+      ],
+      "evidence": [
+        "Backtrace frames are in `<rustc_middle::mir::syntax::AggregateKind as rustc_smir::Stable>::stable`, then `Rvalue`, `StatementKind`, and `Body`, showing the panic occurs during Stable MIR conversion of MIR aggregates.",
+        "The compiler is invoked with `-Zunpretty=stable-mir`; the test behavior explicitly says it exercises Stable MIR pretty-printing rather than normal code generation.",
+        "The reproducer uses `async || { vec.push(ready(String::from(\"\")).await); }`, which combines async closure lowering, mutable capture, and await desugaring—exactly the kind of construct that creates synthesized coroutine/state-machine MIR.",
+        "`vec` is captured by mutable borrow inside the async closure, stressing upvar capture representation in lowered MIR.",
+        "The closure is never invoked, so runtime semantics are irrelevant; the crash must arise from compiler internal representation/printing of the generated closure/future body.",
+        "The query stack is empty and there are no user-facing type or borrow errors, consistent with a panic in a late pretty-print/serialization path rather than semantic analysis.",
+        "Behavior summary emphasizes Stable MIR generation for mutable upvar captures and async state machines, aligning with the `AggregateKind` conversion site in the backtrace."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1863,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_smir/src/rustc_smir/convert/mir.rs",
+        "reason": "Most suspicious because the panic occurs directly in `Stable::stable` for MIR nodes, with the backtrace specifically showing `AggregateKind -> Rvalue -> StatementKind -> Body` conversion. The reproducer stresses async-closure/coroutine MIR with mutable captures and await desugaring, which likely produces an `AggregateKind` variant this conversion code does not yet handle correctly."
+      },
+      {
+        "path": "compiler/rustc_smir/src/rustc_internal/pretty.rs",
+        "reason": "This is the Stable MIR pretty-print entry point used by `-Zunpretty=stable-mir`. Since the crash happens only on the Stable MIR printing path, this file is a strong suspect for incorrectly requesting/printing MIR bodies for async-closure-generated items without guarding unsupported cases."
+      },
+      {
+        "path": "compiler/rustc_smir/src/rustc_smir/context.rs",
+        "reason": "Backtrace frame 16 is `TablesWrapper as Context::mir_body`, placing this file directly on the failing path. If async closure or coroutine bodies are being fetched/converted through the wrong item/instance path, the bug could originate in how this bridge exposes MIR bodies to Stable MIR."
+      },
+      {
+        "path": "compiler/rustc_driver_impl/src/pretty.rs",
+        "reason": "The stack shows `rustc_driver_impl::pretty::print` immediately above the Stable MIR machinery. This file dispatches `-Zunpretty=stable-mir`, so it is a plausible location if the driver is selecting or traversing items in a way that triggers unsupported synthesized async-closure/coroutine bodies."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+        "reason": "The failing conversion point is MIR `AggregateKind`, and this file is responsible for constructing MIR `Rvalue`s and aggregates from THIR expressions. Async closures, captures, and await expressions may be lowered here into an aggregate form that later Stable MIR conversion mishandles."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "reason": "Async closures with `.await` are lowered into coroutine state-machine MIR here. The reproducer’s distinctive combination of async closure, mutable upvar capture, and await likely creates coroutine-specific aggregate/state variants; if those shapes changed recently, Stable MIR conversion may be out of sync with what this pass produces."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "reason": "The reproducer uses an async closure, which is exactly the feature this file specializes in for coroutine-closure bodies and capture ownership modes. A by-move/by-ref body distinction for async closures could produce novel MIR body forms or aggregates that Stable MIR conversion does not expect."
+      },
+      {
+        "path": "compiler/rustc_smir/src/rustc_smir/builder.rs",
+        "reason": "This file builds the Stable MIR body from rustc MIR before lowering via `Stable`. If the issue involves choosing the wrong MIR instance/body or failing to normalize/instantiate async-closure or coroutine bodies properly, the bug could manifest here before the final conversion step."
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/syntax.rs",
+        "reason": "`AggregateKind` is defined in this file, and the backtrace names `rustc_middle::mir::syntax::AggregateKind`. If a new or changed aggregate variant for async closures/coroutines was introduced here without corresponding Stable MIR support, this definition site is relevant and suspicious."
+      },
+      {
+        "path": "compiler/rustc_smir/src/rustc_smir/convert/mod.rs",
+        "reason": "This is the top-level Stable MIR conversion infrastructure. While less directly implicated than `convert/mir.rs`, it is a plausible coordination point if the bug is due to incomplete conversion support for newer coroutine/closure-related enums or shared adapters used during MIR lowering."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 167.453,
+    "stage_times_sec": {
+      "checkout": 8.288,
+      "load_bug_context": 0.12,
+      "test_behavior_analysis": 5.302,
+      "test_failure_analysis": 10.448,
+      "load_file_candidates": 11.608,
+      "search_suspicious_files": 131.686
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 445109,
+      "output_tokens": 7460,
+      "total_tokens": 452569,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.302,
+          "input_tokens": 367,
+          "output_tokens": 303,
+          "total_tokens": 670
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.447,
+          "input_tokens": 2209,
+          "output_tokens": 713,
+          "total_tokens": 2922
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.394,
+          "input_tokens": 27965,
+          "output_tokens": 354,
+          "total_tokens": 28319
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.547,
+          "input_tokens": 27898,
+          "output_tokens": 380,
+          "total_tokens": 28278
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 6.965,
+          "input_tokens": 27247,
+          "output_tokens": 382,
+          "total_tokens": 27629
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.083,
+          "input_tokens": 27694,
+          "output_tokens": 372,
+          "total_tokens": 28066
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 5.026,
+          "input_tokens": 27710,
+          "output_tokens": 190,
+          "total_tokens": 27900
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 6.793,
+          "input_tokens": 27898,
+          "output_tokens": 349,
+          "total_tokens": 28247
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.543,
+          "input_tokens": 27833,
+          "output_tokens": 368,
+          "total_tokens": 28201
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.336,
+          "input_tokens": 27747,
+          "output_tokens": 341,
+          "total_tokens": 28088
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.542,
+          "input_tokens": 27860,
+          "output_tokens": 363,
+          "total_tokens": 28223
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.989,
+          "input_tokens": 27851,
+          "output_tokens": 363,
+          "total_tokens": 28214
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.421,
+          "input_tokens": 27542,
+          "output_tokens": 406,
+          "total_tokens": 27948
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.449,
+          "input_tokens": 27860,
+          "output_tokens": 384,
+          "total_tokens": 28244
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.373,
+          "input_tokens": 28031,
+          "output_tokens": 381,
+          "total_tokens": 28412
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.647,
+          "input_tokens": 28119,
+          "output_tokens": 324,
+          "total_tokens": 28443
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.172,
+          "input_tokens": 27728,
+          "output_tokens": 355,
+          "total_tokens": 28083
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 6.414,
+          "input_tokens": 16132,
+          "output_tokens": 339,
+          "total_tokens": 16471
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.962,
+          "input_tokens": 9418,
+          "output_tokens": 793,
+          "total_tokens": 10211
+        }
+      ]
+    }
+  }
+}

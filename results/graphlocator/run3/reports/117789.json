@@ -1,0 +1,260 @@
+{
+  "bug_id": "117789",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-10",
+    "resolved": "0f44eb32f1123ac93ab404d74c295263ce468343"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/coherence/orphan.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_hir_analysis/src/coherence/orphan.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/coherence/orphan.rs",
+        "rank": 1
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/117789.json",
+    "graph_cache_hit": true,
+    "graph_cache_build_mode": "bug_cache",
+    "graph_cache_bug_id": "117789",
+    "graph_cache_checkout_commit": "0f44eb32f1123ac93ab404d74c295263ce468343",
+    "initial_graph_node_count": 53321,
+    "initial_graph_edge_count": 53320,
+    "graph_node_count": 53321,
+    "graph_edge_count": 53863,
+    "lazy_loaded_edge_count": 543,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"do_orphan_check_impl\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/coherence/orphan.rs\", \"content\": \"fn do_orphan_check_impl<'tcx>(\\n    tcx: TyCtxt<'tcx>,\\n    trait_ref: ty::TraitRef<'tcx>,\\n    def_id: LocalDefId,\\n) -> Result<(), ErrorGuaranteed> {\\n    let trait_def_id = trait_ref.def_id;\\n\\n    match traits::orphan_check(tcx, def_id.to_def_id()) {\\n        Ok(()) => {}\\n        Err(err) => {\\n            let item = tcx.hir().expect_item(def_id);\\n            let hir::ItemKind::Impl(impl_) = item.kind else {\\n                bug!(\\\"{:?} is not an impl: {:?}\\\", def_id, item);\\n            };\\n            let tr = impl_.of_trait.as_ref().unwrap();\\n            let sp = tcx.def_span(def_id);\\n\\n            emit_orphan_check_error(\\n                tcx,\\n                sp,\\n                item.span,\\n                tr.path.span,\\n                trait_ref,\\n                impl_.self_ty.span,\\n                &impl_.generics,\\n                err,\\n            )?\\n        }\\n    }\\n\\n    // In addition to the above rules, we restrict impls of auto traits\\n    // so that they can only be implemented on nominal types, such as structs,\\n    // enums or foreign types. To see why this restriction exists, consider the\\n    // following example (#22978). Imagine that crate A defines an auto trait\\n    // `Foo` and a fn that operates on pairs of types:\\n    //\\n    // ```\\n    // // Crate A\\n    // auto trait Foo { }\\n    // fn two_foos<A:Foo,B:Foo>(..) {\\n    //     one_foo::<(A,B)>(..)\\n    // }\\n    // fn one_foo<T:Foo>(..) { .. }\\n    // ```\\n    //\\n    // This type-checks fine; in particular the fn\\n    // `two_foos` is able to conclude that `(A,B):Foo`\\n    // because `A:Foo` and `B:Foo`.\\n    //\\n    // Now imagine that crate B comes along and does the following:\\n    //\\n    // ```\\n    // struct A { }\\n    // struct B { }\\n    // impl Foo for A { }\\n    // impl Foo for B { }\\n    // impl !Foo for (A, B) { }\\n    // ```\\n    //\\n    // This final impl is legal according to the orphan\\n    // rules, but it invalidates the reasoning from\\n    // `two_foos` above.\\n    debug!(\\n        \\\"trait_ref={:?} trait_def_id={:?} trait_is_auto={}\\\",\\n        trait_ref,\\n        trait_def_id,\\n        tcx.trait_is_auto(trait_def_id)\\n    );\\n\\n    if tcx.trait_is_auto(trait_def_id) {\\n        let self_ty = trait_ref.self_ty();\\n\\n        // If the impl is in the same crate as the auto-trait, almost anything\\n        // goes.\\n        //\\n        //     impl MyAuto for Rc<Something> {}  // okay\\n        //     impl<T> !MyAuto for *const T {}   // okay\\n        //     impl<T> MyAuto for T {}           // okay\\n        //\\n        // But there is one important exception: implementing for a trait object\\n        // is not allowed.\\n        //\\n        //     impl MyAuto for dyn Trait {}      // NOT OKAY\\n        //     impl<T: ?Sized> MyAuto for T {}   // NOT OKAY\\n        //\\n        // With this restriction, it's guaranteed that an auto-trait is\\n        // implemented for a trait object if and only if the auto-trait is one\\n        // of the trait object's trait bounds (or a supertrait of a bound). In\\n        // other words `dyn Trait + AutoTrait` always implements AutoTrait,\\n        // while `dyn Trait` never implements AutoTrait.\\n        //\\n        // This is necessary in order for autotrait bounds on methods of trait\\n        // objects to be sound.\\n        //\\n        //     auto trait AutoTrait {}\\n        //\\n        //     trait ObjectSafeTrait {\\n        //         fn f(&self) where Self: AutoTrait;\\n        //     }\\n        //\\n        // We can allow f to be called on `dyn ObjectSafeTrait + AutoTrait`.\\n        //\\n        // If we didn't deny `impl AutoTrait for dyn Trait`, it would be unsound\\n        // for the ObjectSafeTrait shown above to be object safe because someone\\n        // could take some type implementing ObjectSafeTrait but not AutoTrait,\\n        // unsize it to `dyn ObjectSafeTrait`, and call .f() which has no\\n        // concrete implementation (issue #50781).\\n        enum LocalImpl {\\n            Allow,\\n            Disallow { problematic_kind: &'static str },\\n        }\\n\\n        // If the auto-trait is from a dependency, it must only be getting\\n        // implemented for a nominal type, and specifically one local to the\\n        // current crate.\\n        //\\n        //     impl<T> Sync for MyStruct<T> {}   // okay\\n        //\\n        //     impl Sync for Rc<MyStruct> {}     // NOT OKAY\\n        enum NonlocalImpl {\\n            Allow,\\n            DisallowBecauseNonlocal,\\n            DisallowOther,\\n        }\\n\\n        // Exhaustive match considering that this logic is essential for\\n        // soundness.\\n        let (local_impl, nonlocal_impl) = match self_ty.kind() {\\n            // struct Struct<T>;\\n            // impl AutoTrait for Struct<Foo> {}\\n            ty::Adt(self_def, _) => (\\n                LocalImpl::Allow,\\n                if self_def.did().is_local() {\\n                    NonlocalImpl::Allow\\n                } else {\\n                    NonlocalImpl::DisallowBecauseNonlocal\\n                },\\n            ),\\n\\n            // extern { type OpaqueType; }\\n            // impl AutoTrait for OpaqueType {}\\n            ty::Foreign(did) => (\\n                LocalImpl::Allow,\\n                if did.is_local() {\\n                    NonlocalImpl::Allow\\n                } else {\\n                    NonlocalImpl::DisallowBecauseNonlocal\\n                },\\n            ),\\n\\n            // impl AutoTrait for dyn Trait {}\\n            ty::Dynamic(..) => (\\n                LocalImpl::Disallow { problematic_kind: \\\"trait object\\\" },\\n                NonlocalImpl::DisallowOther,\\n            ),\\n\\n            // impl<T> AutoTrait for T {}\\n            // impl<T: ?Sized> AutoTrait for T {}\\n            ty::Param(..) => (\\n                if self_ty.is_sized(tcx, tcx.param_env(def_id)) {\\n                    LocalImpl::Allow\\n                } else {\\n                    LocalImpl::Disallow { problematic_kind: \\\"generic type\\\" }\\n                },\\n                NonlocalImpl::DisallowOther,\\n            ),\\n\\n            ty::Alias(kind, _) => {\\n                let problematic_kind = match kind {\\n                    // trait Id { type This: ?Sized; }\\n                    // impl<T: ?Sized> Id for T {\\n                    //     type This = T;\\n                    // }\\n                    // impl<T: ?Sized> AutoTrait for <T as Id>::This {}\\n                    AliasKind::Projection => \\\"associated type\\\",\\n                    // type Foo = (impl Sized, bool)\\n                    // impl AutoTrait for Foo {}\\n                    AliasKind::Weak => \\\"type alias\\\",\\n                    // type Opaque = impl Trait;\\n                    // impl AutoTrait for Opaque {}\\n                    AliasKind::Opaque => \\\"opaque type\\\",\\n                    // ```\\n                    // struct S<T>(T);\\n                    // impl<T: ?Sized> S<T> {\\n                    //     type This = T;\\n                    // }\\n                    // impl<T: ?Sized> AutoTrait for S<T>::This {}\\n                    // ```\\n                    // FIXME(inherent_associated_types): The example code above currently leads to a cycle\\n                    AliasKind::Inherent => \\\"associated type\\\",\\n                };\\n                (LocalImpl::Disallow { problematic_kind }, NonlocalImpl::DisallowOther)\\n            }\\n\\n            ty::Bool\\n            | ty::Char\\n            | ty::Int(..)\\n            | ty::Uint(..)\\n            | ty::Float(..)\\n            | ty::Str\\n            | ty::Array(..)\\n            | ty::Slice(..)\\n            | ty::RawPtr(..)\\n            | ty::Ref(..)\\n            | ty::FnDef(..)\\n            | ty::FnPtr(..)\\n            | ty::Never\\n            | ty::Tuple(..) => (LocalImpl::Allow, NonlocalImpl::DisallowOther),\\n\\n            ty::Closure(..)\\n            | ty::Coroutine(..)\\n            | ty::CoroutineWitness(..)\\n            | ty::Bound(..)\\n            | ty::Placeholder(..)\\n            | ty::Infer(..) => {\\n                let sp = tcx.def_span(def_id);\\n                span_bug!(sp, \\\"weird self type for autotrait impl\\\")\\n            }\\n\\n            ty::Error(..) => (LocalImpl::Allow, NonlocalImpl::Allow),\\n        };\\n\\n        if trait_def_id.is_local() {\\n            match local_impl {\\n                LocalImpl::Allow => {}\\n                LocalImpl::Disallow { problematic_kind } => {\\n                    return Err(tcx.sess.emit_err(errors::TraitsWithDefaultImpl {\\n                        span: tcx.def_span(def_id),\\n                        traits: tcx.def_path_str(trait_def_id),\\n                        problematic_kind,\\n                        self_ty,\\n                    }));\\n                }\\n            }\\n        } else {\\n            match nonlocal_impl {\\n                NonlocalImpl::Allow => {}\\n                NonlocalImpl::DisallowBecauseNonlocal => {\\n                    return Err(tcx.sess.emit_err(errors::CrossCrateTraitsDefined {\\n                        span: tcx.def_span(def_id),\\n                        traits: tcx.def_path_str(trait_def_id),\\n                    }));\\n                }\\n                NonlocalImpl::DisallowOther => {\\n                    return Err(tcx.sess.emit_err(errors::CrossCrateTraits {\\n                        span: tcx.def_span(def_id),\\n                        traits: tcx.def_path_str(trait_def_id),\\n                        self_ty,\\n                    }));\\n                }\\n            }\\n        }\\n    }\\n\\n    Ok(())\\n}\"}",
+      "{\"type\": \"FILE\", \"name\": \"orphan.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/coherence/orphan.rs\", \"content\": \"orphan.rs\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"orphan_check_impl\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/coherence/orphan.rs\", \"content\": \"pub(crate) fn orphan_check_impl(\\n    tcx: TyCtxt<'_>,\\n    impl_def_id: LocalDefId,\\n) -> Result<(), ErrorGuaranteed> {\\n    let trait_ref = tcx.impl_trait_ref(impl_def_id).unwrap().instantiate_identity();\\n    trait_ref.error_reported()?;\\n\\n    let ret = do_orphan_check_impl(tcx, trait_ref, impl_def_id);\\n    if tcx.trait_is_auto(trait_ref.def_id) {\\n        lint_auto_trait_impl(tcx, trait_ref, impl_def_id);\\n    }\\n\\n    ret\\n}\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_hir_analysis/src/coherence/orphan.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Orphan check assumes valid auto trait metadata despite prior invalid auto trait errors",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "orphan_check_impl",
+              "file": "compiler/rustc_hir_analysis/src/coherence/orphan.rs",
+              "content": "pub(crate) fn orphan_check_impl(\n    tcx: TyCtxt<'_>,\n    impl_def_id: LocalDefId,\n) -> Result<(), ErrorGuaranteed> {\n    let trait_ref = tcx.impl_trait_ref(impl_def_id).unwrap().instantiate_identity();\n    trait_ref.error_reported()?;\n\n    let ret = do_orphan_check_impl(tcx, trait_ref, impl_def_id);\n    if tcx.trait_is_auto(trait_ref.def_id) {\n        lint_auto_trait_impl(tcx, trait_ref, impl_def_id);\n    }\n\n    ret\n}"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "do_orphan_check_impl continues coherence/orphan processing for malformed auto trait impls instead of bailing out cleanly",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "do_orphan_check_impl",
+              "file": "compiler/rustc_hir_analysis/src/coherence/orphan.rs",
+              "content": "fn do_orphan_check_impl<'tcx>(\n    tcx: TyCtxt<'tcx>,\n    trait_ref: ty::TraitRef<'tcx>,\n    def_id: LocalDefId,\n) -> Result<(), ErrorGuaranteed> {\n    let trait_def_id = trait_ref.def_id;\n\n    match traits::orphan_check(tcx, def_id.to_def_id()) {\n        Ok(()) => {}\n        Err(err) => {\n            let item = tcx.hir().expect_item(def_id);\n            let hir::ItemKind::Impl(impl_) = item.kind else {\n                bug!(\"{:?} is not an impl: {:?}\", def_id, item);\n            };\n            let tr = impl_.of_trait.as_ref().unwrap();\n            let sp = tcx.def_span(def_id);\n\n            emit_orphan_check_error(\n                tcx,\n                sp,\n                item.span,\n                tr.path.span,\n                trait_ref,\n                impl_.self_ty.span,\n                &impl_.generics,\n                err,\n            )?\n        }\n    }\n\n    // In addition to the above rules, we restrict impls of auto traits\n    // so that they can only be implemented on nominal types, such as structs,\n    // enums or foreign types. To see why this restriction exists, consider the\n    // following example (#22978). Imagine that crate A defines an auto trait\n    // `Foo` and a fn that operates on pairs of types:\n    //\n    // ```\n    // // Crate A\n    // auto trait Foo { }\n    // fn two_foos<A:Foo,B:Foo>(..) {\n    //     one_foo::<(A,B)>(..)\n    // }\n    // fn one_foo<T:Foo>(..) { .. }\n    // ```\n    //\n    // This type-checks fine; in particular the fn\n    // `two_foos` is able to conclude that `(A,B):Foo`\n    // because `A:Foo` and `B:Foo`.\n    //\n    // Now imagine that crate B comes along and does the following:\n    //\n    // ```\n    // struct A { }\n    // struct B { }\n    // impl Foo for A { }\n    // impl Foo for B { }\n    // impl !Foo for (A, B) { }\n    // ```\n    //\n    // This final impl is legal according to the orphan\n    // rules, but it invalidates the reasoning from\n    // `two_foos` above.\n    debug!(\n        \"trait_ref={:?} trait_def_id={:?} trait_is_auto={}\",\n        trait_ref,\n        trait_def_id,\n        tcx.trait_is_auto(trait_def_id)\n    );\n\n    if tcx.trait_is_auto(trait_def_id) {\n        let self_ty = trait_ref.self_ty();\n\n        // If the impl is in the same crate as the auto-trait, almost anything\n        // goes.\n        //\n        //     impl MyAuto for Rc<Something> {}  // okay\n        //     impl<T> !MyAuto for *const T {}   // okay\n        //     impl<T> MyAuto for T {}           // okay\n        //\n        // But there is one important exception: implementing for a trait object\n        // is not allowed.\n        //\n        //     impl MyAuto for dyn Trait {}      // NOT OKAY\n        //     impl<T: ?Sized> MyAuto for T {}   // NOT OKAY\n        //\n        // With this restriction, it's guaranteed that an auto-trait is\n        // implemented for a trait object if and only if the auto-trait is one\n        // of the trait object's trait bounds (or a supertrait of a bound). In\n        // other words `dyn Trait + AutoTrait` always implements AutoTrait,\n        // while `dyn Trait` never implements AutoTrait.\n        //\n        // This is necessary in order for autotrait bounds on methods of trait\n        // objects to be sound.\n        //\n        //     auto trait AutoTrait {}\n        //\n        //     trait ObjectSafeTrait {\n        //         fn f(&self) where Self: AutoTrait;\n        //     }\n        //\n        // We can allow f to be called on `dyn ObjectSafeTrait + AutoTrait`.\n        //\n        // If we didn't deny `impl AutoTrait for dyn Trait`, it would be unsound\n        // for the ObjectSafeTrait shown above to be object safe because someone\n        // could take some type implementing ObjectSafeTrait but not AutoTrait,\n        // unsize it to `dyn ObjectSafeTrait`, and call .f() which has no\n        // concrete implementation (issue #50781).\n        enum LocalImpl {\n            Allow,\n            Disallow { problematic_kind: &'static str },\n        }\n\n        // If the auto-trait is from a dependency, it must only be getting\n        // implemented for a nominal type, and specifically one local to the\n        // current crate.\n        //\n        //     impl<T> Sync for MyStruct<T> {}   // okay\n        //\n        //     impl Sync for Rc<MyStruct> {}     // NOT OKAY\n        enum NonlocalImpl {\n            Allow,\n            DisallowBecauseNonlocal,\n            DisallowOther,\n        }\n\n        // Exhaustive match considering that this logic is essential for\n        // soundness.\n        let (local_impl, nonlocal_impl) = match self_ty.kind() {\n            // struct Struct<T>;\n            // impl AutoTrait for Struct<Foo> {}\n            ty::Adt(self_def, _) => (\n                LocalImpl::Allow,\n                if self_def.did().is_local() {\n                    NonlocalImpl::Allow\n                } else {\n                    NonlocalImpl::DisallowBecauseNonlocal\n                },\n            ),\n\n            // extern { type OpaqueType; }\n            // impl AutoTrait for OpaqueType {}\n            ty::Foreign(did) => (\n                LocalImpl::Allow,\n                if did.is_local() {\n                    NonlocalImpl::Allow\n                } else {\n                    NonlocalImpl::DisallowBecauseNonlocal\n                },\n            ),\n\n            // impl AutoTrait for dyn Trait {}\n            ty::Dynamic(..) => (\n                LocalImpl::Disallow { problematic_kind: \"trait object\" },\n                NonlocalImpl::DisallowOther,\n            ),\n\n            // impl<T> AutoTrait for T {}\n            // impl<T: ?Sized> AutoTrait for T {}\n            ty::Param(..) => (\n                if self_ty.is_sized(tcx, tcx.param_env(def_id)) {\n                    LocalImpl::Allow\n                } else {\n                    LocalImpl::Disallow { problematic_kind: \"generic type\" }\n                },\n                NonlocalImpl::DisallowOther,\n            ),\n\n            ty::Alias(kind, _) => {\n                let problematic_kind = match kind {\n                    // trait Id { type This: ?Sized; }\n                    // impl<T: ?Sized> Id for T {\n                    //     type This = T;\n                    // }\n                    // impl<T: ?Sized> AutoTrait for <T as Id>::This {}\n                    AliasKind::Projection => \"associated type\",\n                    // type Foo = (impl Sized, bool)\n                    // impl AutoTrait for Foo {}\n                    AliasKind::Weak => \"type alias\",\n                    // type Opaque = impl Trait;\n                    // impl AutoTrait for Opaque {}\n                    AliasKind::Opaque => \"opaque type\",\n                    // ```\n                    // struct S<T>(T);\n                    // impl<T: ?Sized> S<T> {\n                    //     type This = T;\n                    // }\n                    // impl<T: ?Sized> AutoTrait for S<T>::This {}\n                    // ```\n                    // FIXME(inherent_associated_types): The example code above currently leads to a cycle\n                    AliasKind::Inherent => \"associated type\",\n                };\n                (LocalImpl::Disallow { problematic_kind }, NonlocalImpl::DisallowOther)\n            }\n\n            ty::Bool\n            | ty::Char\n            | ty::Int(..)\n            | ty::Uint(..)\n            | ty::Float(..)\n            | ty::Str\n            | ty::Array(..)\n            | ty::Slice(..)\n            | ty::RawPtr(..)\n            | ty::Ref(..)\n            | ty::FnDef(..)\n            | ty::FnPtr(..)\n            | ty::Never\n            | ty::Tuple(..) => (LocalImpl::Allow, NonlocalImpl::DisallowOther),\n\n            ty::Closure(..)\n            | ty::Coroutine(..)\n            | ty::CoroutineWitness(..)\n            | ty::Bound(..)\n            | ty::Placeholder(..)\n            | ty::Infer(..) => {\n                let sp = tcx.def_span(def_id);\n                span_bug!(sp, \"weird self type for autotrait impl\")\n            }\n\n            ty::Error(..) => (LocalImpl::Allow, NonlocalImpl::Allow),\n        };\n\n        if trait_def_id.is_local() {\n            match local_impl {\n                LocalImpl::Allow => {}\n                LocalImpl::Disallow { problematic_kind } => {\n                    return Err(tcx.sess.emit_err(errors::TraitsWithDefaultImpl {\n                        span: tcx.def_span(def_id),\n                        traits: tcx.def_path_str(trait_def_id),\n                        problematic_kind,\n                        self_ty,\n                    }));\n                }\n            }\n        } else {\n            match nonlocal_impl {\n                NonlocalImpl::Allow => {}\n                NonlocalImpl::DisallowBecauseNonlocal => {\n                    return Err(tcx.sess.emit_err(errors::CrossCrateTraitsDefined {\n                        span: tcx.def_span(def_id),\n                        traits: tcx.def_path_str(trait_def_id),\n                    }));\n                }\n                NonlocalImpl::DisallowOther => {\n                    return Err(tcx.sess.emit_err(errors::CrossCrateTraits {\n                        span: tcx.def_span(def_id),\n                        traits: tcx.def_path_str(trait_def_id),\n                        self_ty,\n                    }));\n                }\n            }\n        }\n    }\n\n    Ok(())\n}"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Assertion in orphan.rs triggered by mismatched expected counts for erroneous generic auto trait impl/trait combination",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "orphan.rs",
+              "file": "compiler/rustc_hir_analysis/src/coherence/orphan.rs",
+              "content": "orphan.rs"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Invalid auto trait declarations with generic parameters or bounds still reach auto-trait orphan checking path",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "do_orphan_check_impl",
+              "file": "compiler/rustc_hir_analysis/src/coherence/orphan.rs",
+              "content": "fn do_orphan_check_impl<'tcx>(\n    tcx: TyCtxt<'tcx>,\n    trait_ref: ty::TraitRef<'tcx>,\n    def_id: LocalDefId,\n) -> Result<(), ErrorGuaranteed> {\n    let trait_def_id = trait_ref.def_id;\n\n    match traits::orphan_check(tcx, def_id.to_def_id()) {\n        Ok(()) => {}\n        Err(err) => {\n            let item = tcx.hir().expect_item(def_id);\n            let hir::ItemKind::Impl(impl_) = item.kind else {\n                bug!(\"{:?} is not an impl: {:?}\", def_id, item);\n            };\n            let tr = impl_.of_trait.as_ref().unwrap();\n            let sp = tcx.def_span(def_id);\n\n            emit_orphan_check_error(\n                tcx,\n                sp,\n                item.span,\n                tr.path.span,\n                trait_ref,\n                impl_.self_ty.span,\n                &impl_.generics,\n                err,\n            )?\n        }\n    }\n\n    // In addition to the above rules, we restrict impls of auto traits\n    // so that they can only be implemented on nominal types, such as structs,\n    // enums or foreign types. To see why this restriction exists, consider the\n    // following example (#22978). Imagine that crate A defines an auto trait\n    // `Foo` and a fn that operates on pairs of types:\n    //\n    // ```\n    // // Crate A\n    // auto trait Foo { }\n    // fn two_foos<A:Foo,B:Foo>(..) {\n    //     one_foo::<(A,B)>(..)\n    // }\n    // fn one_foo<T:Foo>(..) { .. }\n    // ```\n    //\n    // This type-checks fine; in particular the fn\n    // `two_foos` is able to conclude that `(A,B):Foo`\n    // because `A:Foo` and `B:Foo`.\n    //\n    // Now imagine that crate B comes along and does the following:\n    //\n    // ```\n    // struct A { }\n    // struct B { }\n    // impl Foo for A { }\n    // impl Foo for B { }\n    // impl !Foo for (A, B) { }\n    // ```\n    //\n    // This final impl is legal according to the orphan\n    // rules, but it invalidates the reasoning from\n    // `two_foos` above.\n    debug!(\n        \"trait_ref={:?} trait_def_id={:?} trait_is_auto={}\",\n        trait_ref,\n        trait_def_id,\n        tcx.trait_is_auto(trait_def_id)\n    );\n\n    if tcx.trait_is_auto(trait_def_id) {\n        let self_ty = trait_ref.self_ty();\n\n        // If the impl is in the same crate as the auto-trait, almost anything\n        // goes.\n        //\n        //     impl MyAuto for Rc<Something> {}  // okay\n        //     impl<T> !MyAuto for *const T {}   // okay\n        //     impl<T> MyAuto for T {}           // okay\n        //\n        // But there is one important exception: implementing for a trait object\n        // is not allowed.\n        //\n        //     impl MyAuto for dyn Trait {}      // NOT OKAY\n        //     impl<T: ?Sized> MyAuto for T {}   // NOT OKAY\n        //\n        // With this restriction, it's guaranteed that an auto-trait is\n        // implemented for a trait object if and only if the auto-trait is one\n        // of the trait object's trait bounds (or a supertrait of a bound). In\n        // other words `dyn Trait + AutoTrait` always implements AutoTrait,\n        // while `dyn Trait` never implements AutoTrait.\n        //\n        // This is necessary in order for autotrait bounds on methods of trait\n        // objects to be sound.\n        //\n        //     auto trait AutoTrait {}\n        //\n        //     trait ObjectSafeTrait {\n        //         fn f(&self) where Self: AutoTrait;\n        //     }\n        //\n        // We can allow f to be called on `dyn ObjectSafeTrait + AutoTrait`.\n        //\n        // If we didn't deny `impl AutoTrait for dyn Trait`, it would be unsound\n        // for the ObjectSafeTrait shown above to be object safe because someone\n        // could take some type implementing ObjectSafeTrait but not AutoTrait,\n        // unsize it to `dyn ObjectSafeTrait`, and call .f() which has no\n        // concrete implementation (issue #50781).\n        enum LocalImpl {\n            Allow,\n            Disallow { problematic_kind: &'static str },\n        }\n\n        // If the auto-trait is from a dependency, it must only be getting\n        // implemented for a nominal type, and specifically one local to the\n        // current crate.\n        //\n        //     impl<T> Sync for MyStruct<T> {}   // okay\n        //\n        //     impl Sync for Rc<MyStruct> {}     // NOT OKAY\n        enum NonlocalImpl {\n            Allow,\n            DisallowBecauseNonlocal,\n            DisallowOther,\n        }\n\n        // Exhaustive match considering that this logic is essential for\n        // soundness.\n        let (local_impl, nonlocal_impl) = match self_ty.kind() {\n            // struct Struct<T>;\n            // impl AutoTrait for Struct<Foo> {}\n            ty::Adt(self_def, _) => (\n                LocalImpl::Allow,\n                if self_def.did().is_local() {\n                    NonlocalImpl::Allow\n                } else {\n                    NonlocalImpl::DisallowBecauseNonlocal\n                },\n            ),\n\n            // extern { type OpaqueType; }\n            // impl AutoTrait for OpaqueType {}\n            ty::Foreign(did) => (\n                LocalImpl::Allow,\n                if did.is_local() {\n                    NonlocalImpl::Allow\n                } else {\n                    NonlocalImpl::DisallowBecauseNonlocal\n                },\n            ),\n\n            // impl AutoTrait for dyn Trait {}\n            ty::Dynamic(..) => (\n                LocalImpl::Disallow { problematic_kind: \"trait object\" },\n                NonlocalImpl::DisallowOther,\n            ),\n\n            // impl<T> AutoTrait for T {}\n            // impl<T: ?Sized> AutoTrait for T {}\n            ty::Param(..) => (\n                if self_ty.is_sized(tcx, tcx.param_env(def_id)) {\n                    LocalImpl::Allow\n                } else {\n                    LocalImpl::Disallow { problematic_kind: \"generic type\" }\n                },\n                NonlocalImpl::DisallowOther,\n            ),\n\n            ty::Alias(kind, _) => {\n                let problematic_kind = match kind {\n                    // trait Id { type This: ?Sized; }\n                    // impl<T: ?Sized> Id for T {\n                    //     type This = T;\n                    // }\n                    // impl<T: ?Sized> AutoTrait for <T as Id>::This {}\n                    AliasKind::Projection => \"associated type\",\n                    // type Foo = (impl Sized, bool)\n                    // impl AutoTrait for Foo {}\n                    AliasKind::Weak => \"type alias\",\n                    // type Opaque = impl Trait;\n                    // impl AutoTrait for Opaque {}\n                    AliasKind::Opaque => \"opaque type\",\n                    // ```\n                    // struct S<T>(T);\n                    // impl<T: ?Sized> S<T> {\n                    //     type This = T;\n                    // }\n                    // impl<T: ?Sized> AutoTrait for S<T>::This {}\n                    // ```\n                    // FIXME(inherent_associated_types): The example code above currently leads to a cycle\n                    AliasKind::Inherent => \"associated type\",\n                };\n                (LocalImpl::Disallow { problematic_kind }, NonlocalImpl::DisallowOther)\n            }\n\n            ty::Bool\n            | ty::Char\n            | ty::Int(..)\n            | ty::Uint(..)\n            | ty::Float(..)\n            | ty::Str\n            | ty::Array(..)\n            | ty::Slice(..)\n            | ty::RawPtr(..)\n            | ty::Ref(..)\n            | ty::FnDef(..)\n            | ty::FnPtr(..)\n            | ty::Never\n            | ty::Tuple(..) => (LocalImpl::Allow, NonlocalImpl::DisallowOther),\n\n            ty::Closure(..)\n            | ty::Coroutine(..)\n            | ty::CoroutineWitness(..)\n            | ty::Bound(..)\n            | ty::Placeholder(..)\n            | ty::Infer(..) => {\n                let sp = tcx.def_span(def_id);\n                span_bug!(sp, \"weird self type for autotrait impl\")\n            }\n\n            ty::Error(..) => (LocalImpl::Allow, NonlocalImpl::Allow),\n        };\n\n        if trait_def_id.is_local() {\n            match local_impl {\n                LocalImpl::Allow => {}\n                LocalImpl::Disallow { problematic_kind } => {\n                    return Err(tcx.sess.emit_err(errors::TraitsWithDefaultImpl {\n                        span: tcx.def_span(def_id),\n                        traits: tcx.def_path_str(trait_def_id),\n                        problematic_kind,\n                        self_ty,\n                    }));\n                }\n            }\n        } else {\n            match nonlocal_impl {\n                NonlocalImpl::Allow => {}\n                NonlocalImpl::DisallowBecauseNonlocal => {\n                    return Err(tcx.sess.emit_err(errors::CrossCrateTraitsDefined {\n                        span: tcx.def_span(def_id),\n                        traits: tcx.def_path_str(trait_def_id),\n                    }));\n                }\n                NonlocalImpl::DisallowOther => {\n                    return Err(tcx.sess.emit_err(errors::CrossCrateTraits {\n                        span: tcx.def_span(def_id),\n                        traits: tcx.def_path_str(trait_def_id),\n                        self_ty,\n                    }));\n                }\n            }\n        }\n    }\n\n    Ok(())\n}"
+            }
+          ]
+        },
+        {
+          "id": "E",
+          "name": "Auto trait specific coherence logic in orphan checking is not robust to recovery from parser/type errors in impl items",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "orphan.rs",
+              "file": "compiler/rustc_hir_analysis/src/coherence/orphan.rs",
+              "content": "orphan.rs"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.95
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.96
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.97
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.92
+        },
+        {
+          "source": "E",
+          "target": "I",
+          "weight": 0.8
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 149.321,
+    "stage_times_sec": {
+      "load_bug_context": 0.024,
+      "checkout": 2.101,
+      "load_or_build_graph": 33.648,
+      "symptom_vertices_locating": 86.917,
+      "dynamic_cig_discovering": 24.741,
+      "convert_results": 0.003
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 12,
+      "input_tokens": 107117,
+      "output_tokens": 1575,
+      "total_tokens": 108692,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.792,
+          "input_tokens": 6996,
+          "output_tokens": 122,
+          "total_tokens": 7118
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.188,
+          "input_tokens": 6346,
+          "output_tokens": 18,
+          "total_tokens": 6364
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.359,
+          "input_tokens": 7195,
+          "output_tokens": 46,
+          "total_tokens": 7241
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.609,
+          "input_tokens": 7448,
+          "output_tokens": 74,
+          "total_tokens": 7522
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.405,
+          "input_tokens": 7536,
+          "output_tokens": 69,
+          "total_tokens": 7605
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.615,
+          "input_tokens": 7619,
+          "output_tokens": 45,
+          "total_tokens": 7664
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 4.96,
+          "input_tokens": 7637,
+          "output_tokens": 202,
+          "total_tokens": 7839
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 4.048,
+          "input_tokens": 11415,
+          "output_tokens": 201,
+          "total_tokens": 11616
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 4.182,
+          "input_tokens": 10109,
+          "output_tokens": 200,
+          "total_tokens": 10309
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.515,
+          "input_tokens": 11703,
+          "output_tokens": 198,
+          "total_tokens": 11901
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 4.447,
+          "input_tokens": 11697,
+          "output_tokens": 199,
+          "total_tokens": 11896
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 3.577,
+          "input_tokens": 11416,
+          "output_tokens": 201,
+          "total_tokens": 11617
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,258 @@
+{
+  "bug_id": "132372",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-10-30",
+    "resolved": "1e4f10ba6476e48a42a79b9f846a2d9366525b9e"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_ty_utils/src/assoc.rs",
+    "compiler/rustc_ty_utils/src/implied_bounds.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_ast_lowering/src/item.rs",
+    "compiler/rustc_ast_lowering/src/path.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines trait `Bar` with an associated type `Foo`, exercising associated type projection via `X::Foo`.",
+        "Defines trait `Baz` containing an `async fn` in a trait, using the unstable-internals feature path gated by `allow(async_fn_in_trait)`.",
+        "The method `boom` is generic over `X: Bar`, testing generic parameters inside trait async methods.",
+        "The async method returns `X::Foo`, combining async lowering with associated type normalization in the return type.",
+        "Because `async fn` lowers to an opaque future, rustc must encode a hidden future whose output depends on `X::Foo`.",
+        "This stresses trait lowering/HIR-to-MIR handling for return-position opaque types generated from trait async methods.",
+        "No impls or calls exist; the reproducer targets compilation of trait item signatures rather than runtime behavior.",
+        "Using nightly toolchain suggests the bug is in compiler acceptance/lowering of this signature, not library semantics."
+      ],
+      "summary": "The reproducer is minimal: it declares one trait with an associated type and another trait with a generic async method returning that associated type. It specifically exercises nightly rustc’s lowering and type checking of `async fn` in traits, generic trait methods, associated type projection, and the opaque future generated for the async method, without requiring any implementation or execution."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is a false rejection during compilation of a trait item signature that combines three features: (1) an async fn in a trait, (2) a method-generic type parameter `X: Bar`, and (3) an associated type projection `X::Foo` in the return type. The associated type exists and the bound `X: Bar` is explicitly present, so E0220 indicates rustc is losing or not consulting the method-level generic bound when resolving the return type of the async trait method. Because the reproducer contains only trait declarations and no impls or calls, the bug is likely in signature lowering / early type checking of trait async methods rather than trait selection during use sites. The common thread is that `async fn` in traits is lowered to an opaque future/hidden type, and during that transformation the compiler appears to mishandle the return type projection `X::Foo`, treating `X` as if it had no `Bar` bound. This points to a defect in compiler logic that wires method generics and bounds into the lowered opaque return type or into projection resolution for async trait items.",
+      "possible_causes": [
+        "Bug in HIR/type lowering for `async fn` in traits where method-generic parameters and their bounds are not correctly carried into the desugared opaque future signature, causing `X::Foo` to be resolved without the `X: Bar` predicate.",
+        "Defect in associated type projection resolution for trait async methods: the compiler may be checking `X::Foo` in the wrong parameter environment (`ParamEnv`) or wrong binder level, so method-level bounds are invisible during E0220 validation.",
+        "Incorrect lowering of trait async return types to RPITIT/opaque types, specifically dropping or mis-scoping generic parameter `X` when computing the future output type.",
+        "A bug in early well-formedness/type checking of trait item signatures that special-cases async methods and erroneously validates the written return type before the method's generic bounds are in scope.",
+        "Potential issue in rustc's handling of bound vars/de Bruijn indices for generic parameters inside async trait methods, leading to projection lookup on an unbound or incorrectly substituted `X`.",
+        "Regression in nightly around async_fn_in_trait lowering/typeck interaction, where normal associated type projections work outside async methods but fail once the method is desugared into a hidden future-returning form."
+      ],
+      "evidence": [
+        "`Bar` explicitly defines associated type `Foo`, so `X::Foo` should be valid under the declared bound `X: Bar`.",
+        "The compiler emits E0220 ('associated type `Foo` not found for `X`') at the trait method signature itself, showing rustc is not seeing the `Bar` bound when resolving the projection.",
+        "The problematic construct appears only inside `async fn boom<X: Bar>() -> X::Foo;`, so the interaction is specific to async trait method lowering rather than general associated type syntax.",
+        "No impls, calls, or bodies are present; therefore the failure arises during declaration lowering/type checking of the trait item signature.",
+        "Test behavior explicitly stresses hidden future generation whose output depends on `X::Foo`, matching a likely bug in opaque future/RPITIT lowering for async trait methods.",
+        "The reproducer is minimal and nightly-only, consistent with a compiler regression in unstable or recently evolved async-in-trait machinery rather than user-code misuse."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1856,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+        "reason": "Most suspicious because async fn in traits is lowered via RPITIT machinery, and this file explicitly synthesizes generics for RPITITs by combining trait, method, and opaque-type generics. The observed E0220 strongly suggests the method generic bound `X: Bar` is being lost or mis-indexed when building the desugared opaque return type’s generics, making `X::Foo` appear unresolved."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "Very likely involved because the failure indicates rustc is not seeing the `X: Bar` predicate when validating `X::Foo`. This file computes generic predicates and has special handling for traits and impl-trait-in-trait data, so a bug here could omit or mis-scope method predicates for the async trait method / generated opaque type."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/assoc.rs",
+        "reason": "Highly relevant since it implements queries for synthetic associated types created for impl Trait in associated functions, including RPITIT support. If the generated associated type metadata for the async trait method is malformed or missing links to the method generics, projection checking on the desugared return type can fail."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/implied_bounds.rs",
+        "reason": "Plausible because async trait methods returning `X::Foo` require correct assumed-WF/implied-bounds computation for the RPITIT-associated type and enclosing method signature. If assumed WF types for RPITITs omit the method generic or its bound, early well-formedness/projection validation could emit E0220."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The error arises at signature checking time with no impls or bodies, which matches early well-formedness checking. This file normalizes types and registers WF obligations for item signatures, and could be checking the async method return type / desugared opaque type under the wrong param-env where `X: Bar` is not in scope."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "Possible lower-level cause because E0220 reflects associated type projection failure. If projection during normalization of the async trait method’s return/output type is using an incorrect environment or mishandling the generated RPITIT form, this file would be in the path."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "Relevant due to the hidden future/opaque return type generated by async fn in trait. If opaque type collection or constraint setup for the desugared future output mishandles method generics inside trait context, the compiler may reject `X::Foo` before any impl exists."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Plausible because the bug may stem from remapping enclosing method generics into the opaque type’s generics. This file is specifically about remapping generic arguments for opaque types, and a dropped or incorrectly rewritten method parameter `X` would directly explain why `X::Foo` loses access to the `Bar` bound."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "Secondary suspicion: async fn in traits is initially lowered here at item level, and a lowering bug could synthesize the associated return-position opaque type without correctly preserving method generic parameters/bounds. Less likely than HIR-analysis collection, but still on the critical path."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "Lower probability but still candidate because the written return type `X::Foo` is an associated type projection path. If path lowering within the special async-trait-item context misclassifies or under-resolves this projection before later analysis, it could contribute to the spurious E0220."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 171.926,
+    "stage_times_sec": {
+      "checkout": 5.419,
+      "load_bug_context": 0.071,
+      "test_behavior_analysis": 5.105,
+      "test_failure_analysis": 11.472,
+      "load_file_candidates": 2.053,
+      "search_suspicious_files": 147.804
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 426333,
+      "output_tokens": 7616,
+      "total_tokens": 433949,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.105,
+          "input_tokens": 341,
+          "output_tokens": 275,
+          "total_tokens": 616
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.472,
+          "input_tokens": 939,
+          "output_tokens": 691,
+          "total_tokens": 1630
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.798,
+          "input_tokens": 26651,
+          "output_tokens": 352,
+          "total_tokens": 27003
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.076,
+          "input_tokens": 26612,
+          "output_tokens": 381,
+          "total_tokens": 26993
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.938,
+          "input_tokens": 25986,
+          "output_tokens": 389,
+          "total_tokens": 26375
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 10.343,
+          "input_tokens": 26399,
+          "output_tokens": 431,
+          "total_tokens": 26830
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.87,
+          "input_tokens": 26462,
+          "output_tokens": 390,
+          "total_tokens": 26852
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.938,
+          "input_tokens": 26550,
+          "output_tokens": 363,
+          "total_tokens": 26913
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.255,
+          "input_tokens": 26594,
+          "output_tokens": 394,
+          "total_tokens": 26988
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.582,
+          "input_tokens": 26420,
+          "output_tokens": 402,
+          "total_tokens": 26822
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.941,
+          "input_tokens": 26564,
+          "output_tokens": 318,
+          "total_tokens": 26882
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 10.403,
+          "input_tokens": 26538,
+          "output_tokens": 406,
+          "total_tokens": 26944
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.244,
+          "input_tokens": 26306,
+          "output_tokens": 386,
+          "total_tokens": 26692
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.852,
+          "input_tokens": 26569,
+          "output_tokens": 344,
+          "total_tokens": 26913
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.696,
+          "input_tokens": 26722,
+          "output_tokens": 262,
+          "total_tokens": 26984
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.466,
+          "input_tokens": 26771,
+          "output_tokens": 268,
+          "total_tokens": 27039
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.778,
+          "input_tokens": 26503,
+          "output_tokens": 396,
+          "total_tokens": 26899
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 6.302,
+          "input_tokens": 13344,
+          "output_tokens": 350,
+          "total_tokens": 13694
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 14.291,
+          "input_tokens": 14062,
+          "output_tokens": 818,
+          "total_tokens": 14880
+        }
+      ]
+    }
+  }
+}

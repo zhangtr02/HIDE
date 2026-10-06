@@ -1,0 +1,235 @@
+{
+  "bug_id": "105205",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-12-02",
+    "resolved": "c090c6880c0183ba248bde4a16e29ba29ac4fbba"
+  },
+  "final_top10": [
+    "compiler/rustc_ty_utils/src/consts.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_middle/src/ty/abstract_const.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_const_eval/src/transform/validate.rs",
+    "compiler/rustc_const_eval/src/const_eval/valtrees.rs",
+    "compiler/rustc_const_eval/src/interpret/util.rs",
+    "compiler/rustc_const_eval/src/const_eval/eval_queries.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly `generic_const_exprs`, allowing const arithmetic like `N + 1`, `M * 2`, and `(L - 1) * 2` in types and function signatures.",
+        "Defines `Substs1<const N>` as a tuple struct containing `[u8; N + 1]`, with a where-bound requiring the array-length const expression to be evaluatable.",
+        "`zero_init` constructs `Substs1<N>` by zero-initializing an array `[0; N + 1]`, exercising const expressions in value and return types.",
+        "`substs2` returns `Substs1<{ M * 2 }>` and forwards to `zero_init::<{ M * 2 }>()`, testing substitution of computed const generic arguments.",
+        "`substs3` returns `Substs1<{ (L - 1) * 2 }>` with bound `[(); (L - 1) * 2 + 1]:`, checking whether this proves `Substs1`’s required `N + 1` evaluatability.",
+        "The call inside `substs3` uses a computed const argument, stressing normalization and propagation of nested arithmetic expressions through generic instantiation.",
+        "`main` calls `substs3::<2>()` and compares the inner array to `[0; 3]`, validating that the const arithmetic resolves to length 3 at runtime.",
+        "The reproducer targets compiler reasoning about implied const-evaluatable bounds: whether a caller’s arithmetic bound satisfies a callee/type bound after substitution and normalization."
+      ],
+      "summary": "This reproducer exercises nightly const generics with arithmetic in array lengths, struct fields, where-bounds, and function return types. It builds nested generic functions that transform const parameters, then checks whether rustc correctly normalizes and propagates evaluatability constraints so `Substs1`’s `N + 1` requirement is satisfied by `substs3`’s `(L - 1) * 2 + 1` bound."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on generic const expressions with arithmetic substitution and implied const-evaluatable bounds. The reproducer repeatedly uses array lengths and return types of the form `N + 1`, `M * 2`, and `(L - 1) * 2 + 1`, then passes these through nested generic functions. The ICE occurs specifically while type-checking a const argument inside `substs3`, and the query stack shows the crash happens during THIR construction / abstract-const extraction for that const argument. This strongly suggests a compiler defect in handling abstract consts for const generic arguments after substitution/normalization, especially when proving that one evaluatable bound implies another (`(L - 1) * 2 + 1` satisfying `N + 1` after substituting `N = (L - 1) * 2`). The common theme is not ordinary name resolution or runtime evaluation, but compiler-side reasoning about normalized arithmetic const expressions in the const-generics pipeline.",
+      "possible_causes": [
+        "A bug in `rustc_trait_selection` / const-evaluatable checking where implied bounds on generic const expressions are not correctly propagated after substitution, causing the compiler to enter an invalid state instead of emitting a normal error.",
+        "A defect in abstract-const construction (`thir_abstract_const_of_const_arg`) for const generic arguments involving nested arithmetic expressions, especially after normalization of expressions like `(L - 1) * 2` into the `Substs1<N>` requirement `N + 1`.",
+        "Incorrect handling of unevaluated consts during THIR/typeck for const arguments, possibly assuming the const argument is already well-formed/evaluable and panicking when the required abstract representation cannot be built.",
+        "A normalization/canonicalization bug in const-generic expression comparison or substitution, where equivalent expressions such as `(L - 1) * 2 + 1` and `N + 1` after substitution are not matched properly, leading to ICE during proof of evaluatability obligations.",
+        "Missing validation or error recovery in the compiler path for type-checking const arguments with generic arithmetic, so malformed or unsupported abstract-const shapes trigger a panic instead of a graceful diagnostic."
+      ],
+      "evidence": [
+        "The reproducer exclusively stresses `generic_const_exprs` with arithmetic in array lengths, where-bounds, return types, and nested generic instantiations.",
+        "`Substs1<const N>` requires `[(); N + 1]:`, while `substs3` provides `[(); (L - 1) * 2 + 1]:`, directly testing implied const-evaluatable bound reasoning after substitution.",
+        "`substs2` and `substs3` forward computed const generic arguments, so the compiler must normalize and substitute nested arithmetic expressions across function boundaries.",
+        "The query stack pinpoints the crash in `typeck_const_arg`, `thir_body`, and `thir_abstract_const_of_const_arg`, indicating the failure is in compiler handling of const arguments/abstract consts rather than later codegen or runtime behavior.",
+        "The compiler reports an internal panic instead of a normal user-facing type/const-generic error, which is consistent with a missing-case or invalid-assumption bug in the production compiler’s const-generics logic."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1552,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "Most suspicious because the ICE query stack points directly at `thir_abstract_const_of_const_arg`, and this file is responsible for building abstract consts from THIR for const items/anon consts. The reproducer stresses nested arithmetic const expressions and substitution through const generic arguments, exactly the logic this code handles when converting THIR into abstract-const form."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "Highly suspicious because the bug scenario is about proving const-evaluatable bounds after substitution/normalization (`(L - 1) * 2 + 1` satisfying `N + 1`). This file implements const-evaluatable checking against the param-env under `generic_const_exprs`, including expansion/matching of abstract consts and bound satisfaction logic."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/abstract_const.rs",
+        "reason": "This file defines and expands the core abstract-const representation used by evaluatability checking. A failure in expansion, recursive substitution, or handling of `ConstKind::Unevaluated` for nested arithmetic expressions could easily surface during `thir_abstract_const_of_const_arg` and later const-evaluatable reasoning."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "The query stack starts with `typeck_const_arg` on an anonymous const argument, and this file contains `anon_const_type_of` / `const_arg_anon_type_of` logic that determines the type context for const generic arguments. If the const arg in `substs3` is misclassified or given an inconsistent expected type, later THIR/abstract-const construction can ICE."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "THIR construction appears in the query stack (`thir_body`), and this file performs expression lowering from HIR to THIR. If some malformed or unsupported const-generic arithmetic expression shape is lowered incorrectly, the abstract-const builder could later panic while processing that THIR."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "The reproducer relies on implied well-formedness/evaluatability obligations for const expressions in types and where-bounds. This file generates WF obligations for generic arguments, including consts, so a bug here could produce missing or malformed obligations that later cause the const-arg abstract-const pipeline to hit an invalid state."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/validate.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/valtrees.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/interpret/util.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/const_eval/eval_queries.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 135.348,
+    "stage_times_sec": {
+      "checkout": 0.633,
+      "load_bug_context": 0.07,
+      "test_behavior_analysis": 8.092,
+      "test_failure_analysis": 11.534,
+      "load_file_candidates": 0.11,
+      "search_suspicious_files": 114.909
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 376916,
+      "output_tokens": 6313,
+      "total_tokens": 383229,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 8.092,
+          "input_tokens": 625,
+          "output_tokens": 420,
+          "total_tokens": 1045
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.534,
+          "input_tokens": 2604,
+          "output_tokens": 666,
+          "total_tokens": 3270
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.039,
+          "input_tokens": 28007,
+          "output_tokens": 352,
+          "total_tokens": 28359
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.827,
+          "input_tokens": 27951,
+          "output_tokens": 330,
+          "total_tokens": 28281
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 10.182,
+          "input_tokens": 27839,
+          "output_tokens": 363,
+          "total_tokens": 28202
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.701,
+          "input_tokens": 28067,
+          "output_tokens": 361,
+          "total_tokens": 28428
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.623,
+          "input_tokens": 28103,
+          "output_tokens": 429,
+          "total_tokens": 28532
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.61,
+          "input_tokens": 28272,
+          "output_tokens": 360,
+          "total_tokens": 28632
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.036,
+          "input_tokens": 28138,
+          "output_tokens": 347,
+          "total_tokens": 28485
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.341,
+          "input_tokens": 28071,
+          "output_tokens": 391,
+          "total_tokens": 28462
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.352,
+          "input_tokens": 28193,
+          "output_tokens": 374,
+          "total_tokens": 28567
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.614,
+          "input_tokens": 26748,
+          "output_tokens": 408,
+          "total_tokens": 27156
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.127,
+          "input_tokens": 28243,
+          "output_tokens": 306,
+          "total_tokens": 28549
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.627,
+          "input_tokens": 28335,
+          "output_tokens": 296,
+          "total_tokens": 28631
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.493,
+          "input_tokens": 26183,
+          "output_tokens": 378,
+          "total_tokens": 26561
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 8.307,
+          "input_tokens": 11537,
+          "output_tokens": 532,
+          "total_tokens": 12069
+        }
+      ]
+    }
+  }
+}

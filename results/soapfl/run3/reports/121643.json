@@ -1,0 +1,250 @@
+{
+  "bug_id": "121643",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-26",
+    "resolved": "0ecbd0605770f45c9151715e66ba2b3cae367fcb"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/method/probe.rs",
+    "compiler/rustc_hir_typeck/src/method/confirm.rs",
+    "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+    "compiler/rustc_trait_selection/src/traits/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_hir_typeck/src/method/mod.rs",
+    "compiler/rustc_middle/src/ty/assoc.rs",
+    "compiler/rustc_const_eval/src/util/compare_types.rs",
+    "compiler/rustc_const_eval/src/util/mod.rs",
+    "compiler/rustc_const_eval/src/interpret/traits.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a type alias `Id<T> = <T as IdTrait>::T`, using an associated type projection to normalize a type back to itself.",
+        "Implements `IdTrait` for all `T: ?Sized`, exercising blanket impls, associated types, and unsized type support via `?Sized`.",
+        "Inherent method `Foo::method(self: Id<Self>)` uses a projected `self` type, testing method receiver normalization in inherent impls.",
+        "Calling `foo.method()` succeeds, showing rustc accepts autoderef/autoref-style method lookup when the inherent receiver normalizes to `Self`.",
+        "Trait `FooTrait` declares `fn method2(self: Id<Self>)`, testing projected `Self` in trait method receivers.",
+        "The impl defines `fn method2(self)`; this should match after normalization, exercising trait method signature equivalence across projection aliases.",
+        "Method-call syntax `foo.method2()` fails, probing trait method resolution with a receiver written as an associated-type projection.",
+        "UFCS call `Foo::method2(foo)` works, indicating the bug is in method-call receiver matching/lookup, not trait impl validity itself."
+      ],
+      "summary": "The reproducer checks whether rustc consistently normalizes an associated-type identity alias used as a `self` receiver. Inherent methods work, and UFCS on the trait method works, but trait-method call syntax fails. This isolates a compiler bug in trait method-call resolution for projected `Self` receivers, involving associated type normalization, blanket impls, and receiver matching."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is highly localized to method-call lookup for trait methods whose receiver is written as an associated type projection that normalizes to `Self`. The same projected receiver form works for an inherent method (`foo.method()`), and the trait method itself is accepted and callable via UFCS (`Foo::method2(foo)`), which shows the trait impl is considered valid and the function item can be resolved when lookup is explicit. The only rejected form is dot-call syntax (`foo.method2()`), so the likely defect is not type checking of the impl signature but the compiler path that builds candidate methods for trait method-call resolution. The diagnostic explicitly points to the arbitrary self type `self: Id<Self>`, suggesting the method probe/receiver-matching code does not normalize or equate the projected receiver `<Self as IdTrait>::T` with `Self` for trait candidates, even though inherent lookup does. This indicates an inconsistency between inherent and trait method receiver handling, likely in arbitrary self type processing, receiver normalization, or candidate filtering during probe.",
+      "possible_causes": [
+        "Trait method-call lookup/probe does not normalize associated-type projections in the receiver type (`self: <Self as IdTrait>::T`) before matching against the actual receiver, causing `Id<Self>` to fail to match `Foo` in dot-call syntax.",
+        "The compiler likely has inconsistent handling between inherent and trait methods for arbitrary self types: inherent receiver matching applies normalization of the projected self type, but trait candidate assembly/filtering does not.",
+        "Trait method resolution may be comparing the syntactic receiver form instead of the normalized/instantiated type when checking whether a method is callable via method syntax, especially for `Self`-projection receivers.",
+        "A bug may exist in the arbitrary-self-type method probe path for trait items, where projected receivers involving blanket associated-type impls are not treated as valid dispatch receivers even though UFCS type-checking accepts them.",
+        "Receiver transformation or candidate confirmation for trait methods may skip obligation solving/normalization of `<T as IdTrait>::T = T`, so the method is incorrectly excluded before final trait selection."
+      ],
+      "evidence": [
+        "`foo.method()` succeeds for the inherent method with receiver `self: Id<Self>`, showing projected-self receiver normalization works in inherent method-call lookup.",
+        "`foo.method2()` fails with E0599, isolating the problem to trait method dot-call resolution rather than general typing of `Id<Self>` receivers.",
+        "`Foo::method2(foo)` works, proving the trait method exists, the impl is accepted, and explicit invocation bypasses the failing lookup path.",
+        "The trait declares `fn method2(self: Id<Self>)`, while the impl uses `fn method2(self)`, and rustc accepts the impl, indicating signature equivalence after normalization is already recognized elsewhere.",
+        "The error note says the method might not be found because of the arbitrary self type, directly implicating receiver matching logic.",
+        "`Id<T>` is just `<T as IdTrait>::T` with a blanket impl `type T = T`, so the receiver should normalize to `Self`; failure therefore points to missing normalization/equivalence handling in compiler production code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1744,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/probe.rs",
+        "reason": "Most suspicious. The bug is isolated to dot-call trait method lookup (`foo.method2()`) while UFCS works, which strongly points to method probing/candidate assembly rather than impl checking. This file is responsible for assembling and filtering trait method candidates by receiver compatibility, and the diagnostic explicitly mentions the arbitrary self type. It likely fails to normalize or equate the projected receiver `Id<Self> = <Self as IdTrait>::T` with `Self` when considering trait candidates."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/confirm.rs",
+        "reason": "If probing finds or partially finds the candidate, confirmation is the next likely place for a mismatch in receiver handling. This code applies receiver adjustments and instantiates the method signature for method-call syntax, so an inconsistency in normalizing projected `self` receiver types for trait methods could cause the candidate to be rejected here even though UFCS succeeds."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+        "reason": "The reproducer depends on rustc accepting that trait declaration `fn method2(self: Id<Self>)` is compatible with impl `fn method2(self)`. Since that part succeeds, this file is less likely than method lookup, but it is still relevant because it implements receiver/signature equivalence checks for trait impl methods and may define assumptions later relied on by method-call resolution."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/normalize.rs",
+        "reason": "A plausible root cause is missing normalization of the receiver projection `<Self as IdTrait>::T` during method receiver matching. This file provides deep normalization used by type checking and projection handling, so if the method lookup path is invoking normalization incorrectly or incompletely, the underlying behavior may stem from here."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "`Id<Self>` is an associated type projection that should normalize back to `Self` through a blanket impl. If receiver matching for trait methods fails because projection resolution is not performed or behaves differently in this path, this projection/normalization implementation is a credible source."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/method/mod.rs",
+        "reason": "This module coordinates method lookup and ties together probing and confirmation. If the bug is due to inconsistent handling of arbitrary self types specifically for trait methods versus inherent methods, the shared method-resolution plumbing here is a reasonable suspect."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/assoc.rs",
+        "reason": "Associated item metadata includes whether a function has a self receiver and is used by method resolution. If receiver metadata for trait items with projected `self` types is classified or exposed incorrectly, lookup could fail even though explicit UFCS still works."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/util/compare_types.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/util/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/interpret/traits.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 160.356,
+    "stage_times_sec": {
+      "checkout": 1.751,
+      "load_bug_context": 0.039,
+      "test_behavior_analysis": 6.436,
+      "test_failure_analysis": 13.225,
+      "load_file_candidates": 0.114,
+      "search_suspicious_files": 138.792
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 399627,
+      "output_tokens": 6132,
+      "total_tokens": 405759,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.435,
+          "input_tokens": 488,
+          "output_tokens": 317,
+          "total_tokens": 805
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.225,
+          "input_tokens": 1208,
+          "output_tokens": 640,
+          "total_tokens": 1848
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.653,
+          "input_tokens": 26793,
+          "output_tokens": 338,
+          "total_tokens": 27131
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.641,
+          "input_tokens": 26797,
+          "output_tokens": 286,
+          "total_tokens": 27083
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.484,
+          "input_tokens": 26316,
+          "output_tokens": 297,
+          "total_tokens": 26613
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.775,
+          "input_tokens": 26553,
+          "output_tokens": 330,
+          "total_tokens": 26883
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.69,
+          "input_tokens": 26537,
+          "output_tokens": 366,
+          "total_tokens": 26903
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.13,
+          "input_tokens": 26938,
+          "output_tokens": 367,
+          "total_tokens": 27305
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.405,
+          "input_tokens": 26687,
+          "output_tokens": 309,
+          "total_tokens": 26996
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.048,
+          "input_tokens": 26702,
+          "output_tokens": 388,
+          "total_tokens": 27090
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.332,
+          "input_tokens": 26760,
+          "output_tokens": 324,
+          "total_tokens": 27084
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.782,
+          "input_tokens": 26569,
+          "output_tokens": 328,
+          "total_tokens": 26897
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.484,
+          "input_tokens": 26908,
+          "output_tokens": 264,
+          "total_tokens": 27172
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.447,
+          "input_tokens": 26813,
+          "output_tokens": 162,
+          "total_tokens": 26975
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.92,
+          "input_tokens": 26947,
+          "output_tokens": 245,
+          "total_tokens": 27192
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.423,
+          "input_tokens": 26715,
+          "output_tokens": 290,
+          "total_tokens": 27005
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.032,
+          "input_tokens": 15227,
+          "output_tokens": 296,
+          "total_tokens": 15523
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.518,
+          "input_tokens": 8669,
+          "output_tokens": 585,
+          "total_tokens": 9254
+        }
+      ]
+    }
+  }
+}

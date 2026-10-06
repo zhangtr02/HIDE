@@ -1,0 +1,251 @@
+{
+  "bug_id": "125512",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-05-24",
+    "resolved": "8679004993f08807289911d9f400f4ac4391d2bc"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/object_safety.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/object_safety.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/lint.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_infer/src/traits/error_reporting/mod.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+    "compiler/rustc_infer/src/traits/mod.rs",
+    "compiler/rustc_infer/src/infer/error_reporting/mod.rs",
+    "compiler/rustc_infer/src/infer/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only feature `object_safe_for_dispatch`, exercising experimental trait-object dispatch rules during trait checking.",
+        "Defines trait `B` with associated function `f(a: A) -> A`, using trait names directly in parameter and return positions.",
+        "Defines trait `A` with associated function `concrete(b: B) -> B`, symmetrically referencing `B` as a type.",
+        "Exercises handling of bare trait types in function signatures, which imply trait objects and trigger object-safety diagnostics.",
+        "Uses associated functions without a `self` receiver, testing whether object-safe-for-dispatch affects non-method trait items.",
+        "Creates mutual references between traits `A` and `B`, stressing trait resolution and type well-formedness checks.",
+        "Compiles only declarations with an empty `main`, isolating compiler analysis to parsing, HIR lowering, and trait/object-safety validation.",
+        "Targets nightly `rustc` behavior on invalid or edge-case trait object syntax, likely probing an ICE or faulty diagnostic path."
+      ],
+      "summary": "The reproducer is a minimal nightly crate that enables `object_safe_for_dispatch` and declares two traits whose associated functions use the other trait as a bare type in arguments and returns. This exercises parsing and semantic checking of trait-object-like bare trait types, object-safety-for-dispatch logic, and trait well-formedness/object-safety diagnostics without runtime behavior."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in compiler analysis, specifically during type well-formedness checking of trait items that use bare trait names as types under the nightly `object_safe_for_dispatch` feature. The reproducer is highly symmetric: trait `B` returns `A`, and trait `A` returns `B`, with both also taking the other trait as an argument. These bare trait types are rejected via object-safety diagnostics, but instead of cleanly emitting an error and continuing, rustc crashes while running `check_mod_type_wf` during `rustc_hir_analysis::check_crate`. The diagnostic shown at `fn f(a: A) -> A` proves the compiler recognized `A` as a non-object-safe trait object candidate and entered the object-safety/error-reporting path. The mutual cross-reference between `A` and `B`, combined with associated functions lacking `self`, likely exposes a missing error-handling or cycle-tolerant path in WF/typeck/object-safety integration. In short, the common pattern is: invalid bare trait object usage in trait signatures + experimental object-safe-for-dispatch feature + mutual trait references + non-method associated functions, leading to an ICE in module type well-formedness analysis rather than a normal diagnostic-only failure.",
+      "possible_causes": [
+        "A bug in `check_mod_type_wf` or the trait item well-formedness checker where invalid bare trait object types are not converted into an error type before further analysis, causing a panic after an object-safety diagnostic has already been emitted.",
+        "Incorrect interaction between the experimental `object_safe_for_dispatch` feature and object-safety checking for associated functions without a `self` receiver, especially when such functions use trait objects in argument/return position.",
+        "A missing cycle-breaking or recursive error-handling case when computing WF/object-safety for mutually-referential traits (`A` mentions `B`, `B` mentions `A`), leading to ICE instead of graceful rejection.",
+        "Defect in the diagnostic/type lowering path for bare trait types in return position (`-> A` / `-> B`), where rustc emits a help message (`impl A`) but leaves internal type state inconsistent for subsequent WF checks.",
+        "Failure in trait object eligibility/object-safety queries to handle experimental dispatch rules on trait definitions themselves, particularly when the trait being checked is simultaneously used as a bare trait object type in another trait signature."
+      ],
+      "evidence": [
+        "Stack trace shows the crash occurs in `rustc_query_impl::query_impl::check_mod_type_wf` and `rustc_hir_analysis::check_crate`, indicating the failure happens during semantic analysis / well-formedness checking, not parsing or code generation.",
+        "Compiler output highlights `fn f(a: A) -> A;` with message '`A` is not object safe', confirming rustc entered the object-safety diagnostic path before ICEing.",
+        "The reproducer uses nightly feature `object_safe_for_dispatch`, directly exercising unstable object-safety-for-dispatch logic.",
+        "Both traits use bare trait names as parameter and return types, a known edge area because bare traits imply trait objects and trigger object-safety rules.",
+        "The two traits reference each other symmetrically, which increases the likelihood of recursive query/WF/object-safety interactions.",
+        "Only trait declarations and an empty `main` are present, isolating the bug to compiler analysis of trait signatures rather than borrow checking, MIR, or runtime-related passes.",
+        "The query stack is empty at panic time, consistent with an unexpected internal compiler failure rather than a normal user-facing semantic error path."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1788,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The ICE occurs in `check_mod_type_wf` during `rustc_hir_analysis::check_crate`, making the module/type well-formedness checker the most direct suspect. This reproducer is centered on invalid trait types in trait item signatures, and a likely bug is that WF checking continues after emitting an object-safety diagnostic instead of converting the bad type into an error type or otherwise short-circuiting."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/object_safety.rs",
+        "reason": "The emitted diagnostic is specifically about `A` not being object safe, and the unstable feature `object_safe_for_dispatch` directly exercises object-safety logic. The mutual trait references plus associated functions without `self` strongly suggest a bad interaction in object-safety violation computation or vtable-safety checks that feeds inconsistent state into WF analysis."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/object_safety.rs",
+        "reason": "Bare trait names in type position are lowered through trait-object/object-safety-aware HIR type lowering. Since the compiler successfully recognizes the construct as a trait-object-like misuse and suggests `impl A`, this lowering path is clearly involved and could be producing an invalid lowered type or incomplete error recovery that later crashes WF checking."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/lint.rs",
+        "reason": "The reproducer uses bare trait object syntax in Rust 2021, and this file contains the logic that diagnoses/prohibits bare trait object types and issues suggestions like inserting `dyn` or using `impl Trait`. Because the ICE happens after such a diagnostic/help is emitted, a plausible cause is faulty recovery in this diagnostic-oriented lowering path leaving later analysis with malformed type state."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "If `wfcheck.rs` delegates to trait-selection WF obligation generation on these trait object-like signatures, this file is a strong secondary suspect. The mutually recursive `A`/`B` references and invalid object-safe-for-dispatch usage could trigger missing cycle-breaking or improper obligation generation for erroneous trait-object forms."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/error_reporting/mod.rs",
+        "reason": "The user-facing message about object safety and the `impl A` suggestion are produced from trait-related diagnostic code. A bug here could cause diagnostic emission on an incompletely validated trait/object form and fail to preserve compiler invariants expected by subsequent WF checking, especially in this edge-case nightly feature path."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+        "reason": "This is the central HIR-to-type lowering entry point that coordinates the specialized object-safety and bare-trait-object handling. If the bug is not isolated to the object-safety submodule itself, the broader lowering logic here may be mishandling erroneous trait types or propagating partially lowered types into later analysis."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/error_reporting/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 148.19,
+    "stage_times_sec": {
+      "checkout": 6.464,
+      "load_bug_context": 0.317,
+      "test_behavior_analysis": 5.338,
+      "test_failure_analysis": 10.98,
+      "load_file_candidates": 0.313,
+      "search_suspicious_files": 124.778
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 420219,
+      "output_tokens": 6638,
+      "total_tokens": 426857,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.337,
+          "input_tokens": 339,
+          "output_tokens": 284,
+          "total_tokens": 623
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.98,
+          "input_tokens": 1887,
+          "output_tokens": 727,
+          "total_tokens": 2614
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.672,
+          "input_tokens": 27594,
+          "output_tokens": 391,
+          "total_tokens": 27985
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.625,
+          "input_tokens": 27513,
+          "output_tokens": 310,
+          "total_tokens": 27823
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.165,
+          "input_tokens": 27100,
+          "output_tokens": 393,
+          "total_tokens": 27493
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.421,
+          "input_tokens": 27294,
+          "output_tokens": 343,
+          "total_tokens": 27637
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.784,
+          "input_tokens": 27331,
+          "output_tokens": 340,
+          "total_tokens": 27671
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.629,
+          "input_tokens": 27647,
+          "output_tokens": 395,
+          "total_tokens": 28042
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.833,
+          "input_tokens": 27483,
+          "output_tokens": 366,
+          "total_tokens": 27849
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.764,
+          "input_tokens": 27449,
+          "output_tokens": 334,
+          "total_tokens": 27783
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.29,
+          "input_tokens": 27525,
+          "output_tokens": 371,
+          "total_tokens": 27896
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 10.323,
+          "input_tokens": 27289,
+          "output_tokens": 378,
+          "total_tokens": 27667
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.768,
+          "input_tokens": 27488,
+          "output_tokens": 269,
+          "total_tokens": 27757
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 4.873,
+          "input_tokens": 27510,
+          "output_tokens": 116,
+          "total_tokens": 27626
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.798,
+          "input_tokens": 27726,
+          "output_tokens": 274,
+          "total_tokens": 28000
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.693,
+          "input_tokens": 27599,
+          "output_tokens": 364,
+          "total_tokens": 27963
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.565,
+          "input_tokens": 25091,
+          "output_tokens": 357,
+          "total_tokens": 25448
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 9.546,
+          "input_tokens": 8354,
+          "output_tokens": 626,
+          "total_tokens": 8980
+        }
+      ]
+    }
+  }
+}

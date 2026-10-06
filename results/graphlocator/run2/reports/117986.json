@@ -1,0 +1,275 @@
+{
+  "bug_id": "117986",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-15",
+    "resolved": "dd430bc8c22f57992ec1457a87437d14283fdd65"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/coherence.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_trait_selection/src/traits/coherence.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+        "rank": 1
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/117986.json",
+    "graph_cache_hit": false,
+    "graph_cache_build_mode": "skeleton",
+    "graph_cache_bug_id": "117986",
+    "graph_cache_checkout_commit": "dd430bc8c22f57992ec1457a87437d14283fdd65",
+    "initial_graph_node_count": 53349,
+    "initial_graph_edge_count": 53348,
+    "graph_node_count": 53349,
+    "graph_edge_count": 60352,
+    "lazy_loaded_edge_count": 7004,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"overlap\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/coherence.rs\", \"content\": \"fn overlap<'tcx>(\\n    tcx: TyCtxt<'tcx>,\\n    track_ambiguity_causes: TrackAmbiguityCauses,\\n    skip_leak_check: SkipLeakCheck,\\n    impl1_def_id: DefId,\\n    impl2_def_id: DefId,\\n    overlap_mode: OverlapMode,\\n) -> Option<OverlapResult<'tcx>> {\\n    if overlap_mode.use_negative_impl() {\\n        if impl_intersection_has_negative_obligation(tcx, impl1_def_id, impl2_def_id)\\n            || impl_intersection_has_negative_obligation(tcx, impl2_def_id, impl1_def_id)\\n        {\\n            return None;\\n        }\\n    }\\n\\n    let infcx = tcx\\n        .infer_ctxt()\\n        .with_opaque_type_inference(DefiningAnchor::Bubble)\\n        .skip_leak_check(skip_leak_check.is_yes())\\n        .intercrate(true)\\n        .with_next_trait_solver(tcx.next_trait_solver_in_coherence())\\n        .build();\\n    let selcx = &mut SelectionContext::new(&infcx);\\n    if track_ambiguity_causes.is_yes() {\\n        selcx.enable_tracking_intercrate_ambiguity_causes();\\n    }\\n\\n    // For the purposes of this check, we don't bring any placeholder\\n    // types into scope; instead, we replace the generic types with\\n    // fresh type variables, and hence we do our evaluations in an\\n    // empty environment.\\n    let param_env = ty::ParamEnv::empty();\\n\\n    let impl1_header = fresh_impl_header_normalized(selcx.infcx, param_env, impl1_def_id);\\n    let impl2_header = fresh_impl_header_normalized(selcx.infcx, param_env, impl2_def_id);\\n\\n    // Equate the headers to find their intersection (the general type, with infer vars,\\n    // that may apply both impls).\\n    let mut obligations =\\n        equate_impl_headers(selcx.infcx, param_env, &impl1_header, &impl2_header)?;\\n    debug!(\\\"overlap: unification check succeeded\\\");\\n\\n    obligations.extend(\\n        [&impl1_header.predicates, &impl2_header.predicates].into_iter().flatten().map(\\n            |&predicate| Obligation::new(infcx.tcx, ObligationCause::dummy(), param_env, predicate),\\n        ),\\n    );\\n\\n    if overlap_mode.use_implicit_negative() {\\n        for mode in [TreatInductiveCycleAs::Ambig, TreatInductiveCycleAs::Recur] {\\n            if let Some(failing_obligation) = selcx.with_treat_inductive_cycle_as(mode, |selcx| {\\n                impl_intersection_has_impossible_obligation(selcx, &obligations)\\n            }) {\\n                if matches!(mode, TreatInductiveCycleAs::Recur) {\\n                    let first_local_impl = impl1_header\\n                        .impl_def_id\\n                        .as_local()\\n                        .or(impl2_header.impl_def_id.as_local())\\n                        .expect(\\\"expected one of the impls to be local\\\");\\n                    infcx.tcx.struct_span_lint_hir(\\n                        COINDUCTIVE_OVERLAP_IN_COHERENCE,\\n                        infcx.tcx.local_def_id_to_hir_id(first_local_impl),\\n                        infcx.tcx.def_span(first_local_impl),\\n                        format!(\\n                            \\\"implementations {} will conflict in the future\\\",\\n                            match impl1_header.trait_ref {\\n                                Some(trait_ref) => {\\n                                    let trait_ref = infcx.resolve_vars_if_possible(trait_ref);\\n                                    format!(\\n                                        \\\"of `{}` for `{}`\\\",\\n                                        trait_ref.print_only_trait_path(),\\n                                        trait_ref.self_ty()\\n                                    )\\n                                }\\n                                None => format!(\\n                                    \\\"for `{}`\\\",\\n                                    infcx.resolve_vars_if_possible(impl1_header.self_ty)\\n                                ),\\n                            },\\n                        ),\\n                        |lint| {\\n                            lint.note(\\n                                \\\"impls that are not considered to overlap may be considered to \\\\\\n                                overlap in the future\\\",\\n                            )\\n                            .span_label(\\n                                infcx.tcx.def_span(impl1_header.impl_def_id),\\n                                \\\"the first impl is here\\\",\\n                            )\\n                            .span_label(\\n                                infcx.tcx.def_span(impl2_header.impl_def_id),\\n                                \\\"the second impl is here\\\",\\n                            );\\n                            lint.note(format!(\\n                                \\\"`{}` may be considered to hold in future releases, \\\\\\n                                    causing the impls to overlap\\\",\\n                                infcx.resolve_vars_if_possible(failing_obligation.predicate)\\n                            ));\\n                            lint\\n                        },\\n                    );\\n                }\\n\\n                return None;\\n            }\\n        }\\n    }\\n\\n    // We toggle the `leak_check` by using `skip_leak_check` when constructing the\\n    // inference context, so this may be a noop.\\n    if infcx.leak_check(ty::UniverseIndex::ROOT, None).is_err() {\\n        debug!(\\\"overlap: leak check failed\\\");\\n        return None;\\n    }\\n\\n    let intercrate_ambiguity_causes = if !overlap_mode.use_implicit_negative() {\\n        Default::default()\\n    } else if infcx.next_trait_solver() {\\n        compute_intercrate_ambiguity_causes(&infcx, &obligations)\\n    } else {\\n        selcx.take_intercrate_ambiguity_causes()\\n    };\\n\\n    debug!(\\\"overlap: intercrate_ambiguity_causes={:#?}\\\", intercrate_ambiguity_causes);\\n    let involves_placeholder = infcx\\n        .inner\\n        .borrow_mut()\\n        .unwrap_region_constraints()\\n        .data()\\n        .constraints\\n        .iter()\\n        .any(|c| c.0.involves_placeholders());\\n\\n    let impl_header = selcx.infcx.resolve_vars_if_possible(impl1_header);\\n    Some(OverlapResult { impl_header, intercrate_ambiguity_causes, involves_placeholder })\\n}\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"impl_intersection_has_negative_obligation\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/coherence.rs\", \"content\": \"fn impl_intersection_has_negative_obligation(\\n    tcx: TyCtxt<'_>,\\n    impl1_def_id: DefId,\\n    impl2_def_id: DefId,\\n) -> bool {\\n    debug!(\\\"negative_impl(impl1_def_id={:?}, impl2_def_id={:?})\\\", impl1_def_id, impl2_def_id);\\n\\n    let ref infcx = tcx.infer_ctxt().intercrate(true).with_next_trait_solver(true).build();\\n    let universe = infcx.universe();\\n\\n    let impl1_header = fresh_impl_header(infcx, impl1_def_id);\\n    let param_env =\\n        ty::EarlyBinder::bind(tcx.param_env(impl1_def_id)).instantiate(tcx, impl1_header.impl_args);\\n\\n    let impl2_header = fresh_impl_header(infcx, impl2_def_id);\\n\\n    // Equate the headers to find their intersection (the general type, with infer vars,\\n    // that may apply both impls).\\n    let Some(_equate_obligations) =\\n        equate_impl_headers(infcx, param_env, &impl1_header, &impl2_header)\\n    else {\\n        return false;\\n    };\\n\\n    plug_infer_with_placeholders(infcx, universe, (impl1_header.impl_args, impl2_header.impl_args));\\n\\n    util::elaborate(tcx, tcx.predicates_of(impl2_def_id).instantiate(tcx, impl2_header.impl_args))\\n        .any(|(clause, _)| try_prove_negated_where_clause(infcx, clause, param_env))\\n}\"}",
+      "{\"type\": \"PACKAGE\", \"name\": \"coherence\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/coherence\", \"content\": \"coherence\"}",
+      "{\"type\": \"FILE\", \"name\": \"coherence.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_trait_selection/src/traits/coherence.rs\", \"content\": \"coherence.rs\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_trait_selection/src/traits/coherence.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Negative-coherence overlap short-circuit does not prevent later overlap rejection",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "overlap",
+              "file": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+              "content": "fn overlap<'tcx>(\n    tcx: TyCtxt<'tcx>,\n    track_ambiguity_causes: TrackAmbiguityCauses,\n    skip_leak_check: SkipLeakCheck,\n    impl1_def_id: DefId,\n    impl2_def_id: DefId,\n    overlap_mode: OverlapMode,\n) -> Option<OverlapResult<'tcx>> {\n    if overlap_mode.use_negative_impl() {\n        if impl_intersection_has_negative_obligation(tcx, impl1_def_id, impl2_def_id)\n            || impl_intersection_has_negative_obligation(tcx, impl2_def_id, impl1_def_id)\n        {\n            return None;\n        }\n    }\n\n    let infcx = tcx\n        .infer_ctxt()\n        .with_opaque_type_inference(DefiningAnchor::Bubble)\n        .skip_leak_check(skip_leak_check.is_yes())\n        .intercrate(true)\n        .with_next_trait_solver(tcx.next_trait_solver_in_coherence())\n        .build();\n    let selcx = &mut SelectionContext::new(&infcx);\n    if track_ambiguity_causes.is_yes() {\n        selcx.enable_tracking_intercrate_ambiguity_causes();\n    }\n\n    // For the purposes of this check, we don't bring any placeholder\n    // types into scope; instead, we replace the generic types with\n    // fresh type variables, and hence we do our evaluations in an\n    // empty environment.\n    let param_env = ty::ParamEnv::empty();\n\n    let impl1_header = fresh_impl_header_normalized(selcx.infcx, param_env, impl1_def_id);\n    let impl2_header = fresh_impl_header_normalized(selcx.infcx, param_env, impl2_def_id);\n\n    // Equate the headers to find their intersection (the general type, with infer vars,\n    // that may apply both impls).\n    let mut obligations =\n        equate_impl_headers(selcx.infcx, param_env, &impl1_header, &impl2_header)?;\n    debug!(\"overlap: unification check succeeded\");\n\n    obligations.extend(\n        [&impl1_header.predicates, &impl2_header.predicates].into_iter().flatten().map(\n            |&predicate| Obligation::new(infcx.tcx, ObligationCause::dummy(), param_env, predicate),\n        ),\n    );\n\n    if overlap_mode.use_implicit_negative() {\n        for mode in [TreatInductiveCycleAs::Ambig, TreatInductiveCycleAs::Recur] {\n            if let Some(failing_obligation) = selcx.with_treat_inductive_cycle_as(mode, |selcx| {\n                impl_intersection_has_impossible_obligation(selcx, &obligations)\n            }) {\n                if matches!(mode, TreatInductiveCycleAs::Recur) {\n                    let first_local_impl = impl1_header\n                        .impl_def_id\n                        .as_local()\n                        .or(impl2_header.impl_def_id.as_local())\n                        .expect(\"expected one of the impls to be local\");\n                    infcx.tcx.struct_span_lint_hir(\n                        COINDUCTIVE_OVERLAP_IN_COHERENCE,\n                        infcx.tcx.local_def_id_to_hir_id(first_local_impl),\n                        infcx.tcx.def_span(first_local_impl),\n                        format!(\n                            \"implementations {} will conflict in the future\",\n                            match impl1_header.trait_ref {\n                                Some(trait_ref) => {\n                                    let trait_ref = infcx.resolve_vars_if_possible(trait_ref);\n                                    format!(\n                                        \"of `{}` for `{}`\",\n                                        trait_ref.print_only_trait_path(),\n                                        trait_ref.self_ty()\n                                    )\n                                }\n                                None => format!(\n                                    \"for `{}`\",\n                                    infcx.resolve_vars_if_possible(impl1_header.self_ty)\n                                ),\n                            },\n                        ),\n                        |lint| {\n                            lint.note(\n                                \"impls that are not considered to overlap may be considered to \\\n                                overlap in the future\",\n                            )\n                            .span_label(\n                                infcx.tcx.def_span(impl1_header.impl_def_id),\n                                \"the first impl is here\",\n                            )\n                            .span_label(\n                                infcx.tcx.def_span(impl2_header.impl_def_id),\n                                \"the second impl is here\",\n                            );\n                            lint.note(format!(\n                                \"`{}` may be considered to hold in future releases, \\\n                                    causing the impls to overlap\",\n                                infcx.resolve_vars_if_possible(failing_obligation.predicate)\n                            ));\n                            lint\n                        },\n                    );\n                }\n\n                return None;\n            }\n        }\n    }\n\n    // We toggle the `leak_check` by using `skip_leak_check` when constructing the\n    // inference context, so this may be a noop.\n    if infcx.leak_check(ty::UniverseIndex::ROOT, None).is_err() {\n        debug!(\"overlap: leak check failed\");\n        return None;\n    }\n\n    let intercrate_ambiguity_causes = if !overlap_mode.use_implicit_negative() {\n        Default::default()\n    } else if infcx.next_trait_solver() {\n        compute_intercrate_ambiguity_causes(&infcx, &obligations)\n    } else {\n        selcx.take_intercrate_ambiguity_causes()\n    };\n\n    debug!(\"overlap: intercrate_ambiguity_causes={:#?}\", intercrate_ambiguity_causes);\n    let involves_placeholder = infcx\n        .inner\n        .borrow_mut()\n        .unwrap_region_constraints()\n        .data()\n        .constraints\n        .iter()\n        .any(|c| c.0.involves_placeholders());\n\n    let impl_header = selcx.infcx.resolve_vars_if_possible(impl1_header);\n    Some(OverlapResult { impl_header, intercrate_ambiguity_causes, involves_placeholder })\n}"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Negative obligation intersection check is insufficient or not matching this fn(&T) vs fn(T where T: Marker) case",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "impl_intersection_has_negative_obligation",
+              "file": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+              "content": "fn impl_intersection_has_negative_obligation(\n    tcx: TyCtxt<'_>,\n    impl1_def_id: DefId,\n    impl2_def_id: DefId,\n) -> bool {\n    debug!(\"negative_impl(impl1_def_id={:?}, impl2_def_id={:?})\", impl1_def_id, impl2_def_id);\n\n    let ref infcx = tcx.infer_ctxt().intercrate(true).with_next_trait_solver(true).build();\n    let universe = infcx.universe();\n\n    let impl1_header = fresh_impl_header(infcx, impl1_def_id);\n    let param_env =\n        ty::EarlyBinder::bind(tcx.param_env(impl1_def_id)).instantiate(tcx, impl1_header.impl_args);\n\n    let impl2_header = fresh_impl_header(infcx, impl2_def_id);\n\n    // Equate the headers to find their intersection (the general type, with infer vars,\n    // that may apply both impls).\n    let Some(_equate_obligations) =\n        equate_impl_headers(infcx, param_env, &impl1_header, &impl2_header)\n    else {\n        return false;\n    };\n\n    plug_infer_with_placeholders(infcx, universe, (impl1_header.impl_args, impl2_header.impl_args));\n\n    util::elaborate(tcx, tcx.predicates_of(impl2_def_id).instantiate(tcx, impl2_header.impl_args))\n        .any(|(clause, _)| try_prove_negated_where_clause(infcx, clause, param_env))\n}"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Leak-check/coherence interaction still rejects the overlap even when negative coherence is enabled",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "overlap",
+              "file": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+              "content": "fn overlap<'tcx>(\n    tcx: TyCtxt<'tcx>,\n    track_ambiguity_causes: TrackAmbiguityCauses,\n    skip_leak_check: SkipLeakCheck,\n    impl1_def_id: DefId,\n    impl2_def_id: DefId,\n    overlap_mode: OverlapMode,\n) -> Option<OverlapResult<'tcx>> {\n    if overlap_mode.use_negative_impl() {\n        if impl_intersection_has_negative_obligation(tcx, impl1_def_id, impl2_def_id)\n            || impl_intersection_has_negative_obligation(tcx, impl2_def_id, impl1_def_id)\n        {\n            return None;\n        }\n    }\n\n    let infcx = tcx\n        .infer_ctxt()\n        .with_opaque_type_inference(DefiningAnchor::Bubble)\n        .skip_leak_check(skip_leak_check.is_yes())\n        .intercrate(true)\n        .with_next_trait_solver(tcx.next_trait_solver_in_coherence())\n        .build();\n    let selcx = &mut SelectionContext::new(&infcx);\n    if track_ambiguity_causes.is_yes() {\n        selcx.enable_tracking_intercrate_ambiguity_causes();\n    }\n\n    // For the purposes of this check, we don't bring any placeholder\n    // types into scope; instead, we replace the generic types with\n    // fresh type variables, and hence we do our evaluations in an\n    // empty environment.\n    let param_env = ty::ParamEnv::empty();\n\n    let impl1_header = fresh_impl_header_normalized(selcx.infcx, param_env, impl1_def_id);\n    let impl2_header = fresh_impl_header_normalized(selcx.infcx, param_env, impl2_def_id);\n\n    // Equate the headers to find their intersection (the general type, with infer vars,\n    // that may apply both impls).\n    let mut obligations =\n        equate_impl_headers(selcx.infcx, param_env, &impl1_header, &impl2_header)?;\n    debug!(\"overlap: unification check succeeded\");\n\n    obligations.extend(\n        [&impl1_header.predicates, &impl2_header.predicates].into_iter().flatten().map(\n            |&predicate| Obligation::new(infcx.tcx, ObligationCause::dummy(), param_env, predicate),\n        ),\n    );\n\n    if overlap_mode.use_implicit_negative() {\n        for mode in [TreatInductiveCycleAs::Ambig, TreatInductiveCycleAs::Recur] {\n            if let Some(failing_obligation) = selcx.with_treat_inductive_cycle_as(mode, |selcx| {\n                impl_intersection_has_impossible_obligation(selcx, &obligations)\n            }) {\n                if matches!(mode, TreatInductiveCycleAs::Recur) {\n                    let first_local_impl = impl1_header\n                        .impl_def_id\n                        .as_local()\n                        .or(impl2_header.impl_def_id.as_local())\n                        .expect(\"expected one of the impls to be local\");\n                    infcx.tcx.struct_span_lint_hir(\n                        COINDUCTIVE_OVERLAP_IN_COHERENCE,\n                        infcx.tcx.local_def_id_to_hir_id(first_local_impl),\n                        infcx.tcx.def_span(first_local_impl),\n                        format!(\n                            \"implementations {} will conflict in the future\",\n                            match impl1_header.trait_ref {\n                                Some(trait_ref) => {\n                                    let trait_ref = infcx.resolve_vars_if_possible(trait_ref);\n                                    format!(\n                                        \"of `{}` for `{}`\",\n                                        trait_ref.print_only_trait_path(),\n                                        trait_ref.self_ty()\n                                    )\n                                }\n                                None => format!(\n                                    \"for `{}`\",\n                                    infcx.resolve_vars_if_possible(impl1_header.self_ty)\n                                ),\n                            },\n                        ),\n                        |lint| {\n                            lint.note(\n                                \"impls that are not considered to overlap may be considered to \\\n                                overlap in the future\",\n                            )\n                            .span_label(\n                                infcx.tcx.def_span(impl1_header.impl_def_id),\n                                \"the first impl is here\",\n                            )\n                            .span_label(\n                                infcx.tcx.def_span(impl2_header.impl_def_id),\n                                \"the second impl is here\",\n                            );\n                            lint.note(format!(\n                                \"`{}` may be considered to hold in future releases, \\\n                                    causing the impls to overlap\",\n                                infcx.resolve_vars_if_possible(failing_obligation.predicate)\n                            ));\n                            lint\n                        },\n                    );\n                }\n\n                return None;\n            }\n        }\n    }\n\n    // We toggle the `leak_check` by using `skip_leak_check` when constructing the\n    // inference context, so this may be a noop.\n    if infcx.leak_check(ty::UniverseIndex::ROOT, None).is_err() {\n        debug!(\"overlap: leak check failed\");\n        return None;\n    }\n\n    let intercrate_ambiguity_causes = if !overlap_mode.use_implicit_negative() {\n        Default::default()\n    } else if infcx.next_trait_solver() {\n        compute_intercrate_ambiguity_causes(&infcx, &obligations)\n    } else {\n        selcx.take_intercrate_ambiguity_causes()\n    };\n\n    debug!(\"overlap: intercrate_ambiguity_causes={:#?}\", intercrate_ambiguity_causes);\n    let involves_placeholder = infcx\n        .inner\n        .borrow_mut()\n        .unwrap_region_constraints()\n        .data()\n        .constraints\n        .iter()\n        .any(|c| c.0.involves_placeholders());\n\n    let impl_header = selcx.infcx.resolve_vars_if_possible(impl1_header);\n    Some(OverlapResult { impl_header, intercrate_ambiguity_causes, involves_placeholder })\n}"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Coherence module logic does not correctly integrate negative impl reasoning with overlap detection paths",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "coherence.rs",
+              "file": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+              "content": "coherence.rs"
+            }
+          ]
+        },
+        {
+          "id": "E",
+          "name": "Higher-level coherence pipeline likely propagates the overlap conflict despite negative impl support being requested",
+          "code_elements": [
+            {
+              "type": "PACKAGE",
+              "name": "coherence",
+              "file": "compiler/rustc_hir_analysis/src/coherence",
+              "content": "coherence"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.97
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.95
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.58
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.83
+        },
+        {
+          "source": "E",
+          "target": "I",
+          "weight": 0.62
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 139.528,
+    "stage_times_sec": {
+      "load_bug_context": 0.014,
+      "checkout": 2.075,
+      "load_or_build_graph": 34.656,
+      "symptom_vertices_locating": 79.503,
+      "dynamic_cig_discovering": 21.549,
+      "convert_results": 0.011
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 14,
+      "input_tokens": 74339,
+      "output_tokens": 1496,
+      "total_tokens": 75835,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 2.563,
+          "input_tokens": 1680,
+          "output_tokens": 94,
+          "total_tokens": 1774
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.535,
+          "input_tokens": 1071,
+          "output_tokens": 18,
+          "total_tokens": 1089
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.41,
+          "input_tokens": 1908,
+          "output_tokens": 42,
+          "total_tokens": 1950
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.889,
+          "input_tokens": 1020,
+          "output_tokens": 18,
+          "total_tokens": 1038
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.183,
+          "input_tokens": 2084,
+          "output_tokens": 64,
+          "total_tokens": 2148
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 1.973,
+          "input_tokens": 2162,
+          "output_tokens": 39,
+          "total_tokens": 2201
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.849,
+          "input_tokens": 2353,
+          "output_tokens": 18,
+          "total_tokens": 2371
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.153,
+          "input_tokens": 3307,
+          "output_tokens": 54,
+          "total_tokens": 3361
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 3.861,
+          "input_tokens": 2558,
+          "output_tokens": 203,
+          "total_tokens": 2761
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 4.128,
+          "input_tokens": 18656,
+          "output_tokens": 190,
+          "total_tokens": 18846
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 3.277,
+          "input_tokens": 8045,
+          "output_tokens": 189,
+          "total_tokens": 8234
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 3.635,
+          "input_tokens": 18658,
+          "output_tokens": 189,
+          "total_tokens": 18847
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 3.5,
+          "input_tokens": 7965,
+          "output_tokens": 190,
+          "total_tokens": 8155
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 3.124,
+          "input_tokens": 2872,
+          "output_tokens": 188,
+          "total_tokens": 3060
+        }
+      ]
+    }
+  }
+}

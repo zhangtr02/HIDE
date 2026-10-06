@@ -1,0 +1,235 @@
+{
+  "bug_id": "103330",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-10-19",
+    "resolved": "a24a020e6d926dffe6b472fc647978f92269504e"
+  },
+  "final_top10": [
+    "compiler/rustc_ast_lowering/src/lib.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_middle/src/middle/resolve_lifetime.rs",
+    "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+    "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+    "compiler/rustc_hir_analysis/src/collect.rs",
+    "compiler/rustc_ty_utils/src/implied_bounds.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_hir_analysis/src/check/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `foo` with a named lifetime `'a` shared by two `&str` parameters, exercising explicit lifetime parameter parsing and binding.",
+        "Returns `&str` without an explicit lifetime in the return type, relying on lifetime elision rules for function outputs.",
+        "Because there are multiple input references, output lifetime elision cannot choose a unique source lifetime, so the signature should be rejected.",
+        "Uses a string literal `\"\"` as the body expression, whose type is `&'static str`, testing coercion against the declared return reference type.",
+        "Checks whether rustc incorrectly accepts or mishandles a function whose declared return reference lifetime is elided but ambiguous.",
+        "Exercises borrow checking and region inference around relationships between named input lifetimes and elided output lifetimes.",
+        "`main` is empty, so compilation behavior is driven solely by type-checking and validating the `foo` signature."
+      ],
+      "summary": "The reproducer is a minimal compile-time test focused on function lifetime rules. It declares two inputs sharing lifetime `'a` but an elided `&str` return, which should be invalid because output elision is ambiguous with multiple input references. The body returns a `&'static str` literal, probing whether rustc wrongly accepts, infers, or normalizes the return lifetime."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer targets function signature validation for lifetime elision. Its key pattern is: two borrowed input parameters are present, while the return type is a borrowed reference with elided lifetime. Under Rust lifetime elision rules, output elision is only allowed when there is exactly one input lifetime candidate (or a method receiver rule applies). Here there are two reference inputs, so the return lifetime is ambiguous and the function signature should be rejected before body typing matters. However, the compiler accepted the item and only emitted a dead_code warning. This strongly suggests a defect in compiler logic that validates or lowers elided lifetimes in fn signatures, likely treating the two inputs as a single lifetime source because both use the same named lifetime `'a`, or otherwise skipping the ambiguity check when explicit input lifetime parameters are present. The string literal body returning `&'static str` is secondary evidence that type checking/coercion did not expose the issue; the primary bug is acceptance of an invalid elided output lifetime in the function declaration.",
+      "possible_causes": [
+        "Bug in lifetime elision checking for free functions: rustc may be incorrectly allowing an elided output lifetime when multiple borrowed input parameters exist.",
+        "The elision algorithm may be counting distinct lifetime names instead of distinct input reference positions, so two inputs both typed as `&'a str` are mistakenly treated as one unique elision source.",
+        "Defect in HIR lowering or AST validation for elided lifetimes in function return types, causing the ambiguity error to be skipped for functions with explicit generic lifetime parameters.",
+        "Incorrect region inference fallback may be assigning the elided return reference to the explicit input lifetime `'a` (or another inferred region) instead of rejecting the signature as illegal under elision rules.",
+        "Signature well-formedness checking may be happening too late or relying on body type checking/coercions, allowing the `&'static str` body to mask the invalid return lifetime elision instead of emitting the required diagnostic."
+      ],
+      "evidence": [
+        "Reproducer defines `fn foo<'a>(_: &'a str, _: &'a str) -> &str`, i.e. multiple borrowed inputs with an elided borrowed output.",
+        "Rust lifetime elision rules should reject such a free function because the output lifetime cannot be uniquely determined from multiple input references.",
+        "Both parameters share the same named lifetime `'a`, which is a strong clue that the bug may stem from collapsing multiple inputs into one elision candidate.",
+        "Compiler output shows successful compilation with only a dead_code warning and return code 0, proving the invalid signature was accepted.",
+        "`main` is empty, so acceptance is driven entirely by signature/type validation of `foo`, isolating the defect to compiler handling of lifetimes rather than runtime or usage-related code paths.",
+        "The body expression is a string literal of type `&'static str`, indicating that body typing succeeded and did not trigger rejection, reinforcing that the missing diagnostic is in signature/elision validation."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1514,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_ast_lowering/src/lib.rs",
+        "reason": "Most suspicious because elided output lifetimes in function signatures are synthesized/handled during AST-to-HIR lowering. The bug pattern strongly suggests the lowering logic may be incorrectly accepting `-> &str` for a free function with two reference inputs by collapsing candidates when both inputs use the same named lifetime `'a`."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "Lifetime elision diagnostics and resolution of omitted lifetimes are driven during late resolution. If the compiler accepted this invalid signature, the elision-resolution logic here may be incorrectly treating two `&'a` inputs as one unique elision source instead of two distinct input positions."
+      },
+      {
+        "path": "compiler/rustc_middle/src/middle/resolve_lifetime.rs",
+        "reason": "This file contains the resolved lifetime model and the `Set1` ambiguity-tracking helper. The reproducer specifically looks like an ambiguity was lost when multiple input references shared the same lifetime name, which matches a likely bug in how uniqueness/ambiguity is represented here."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+        "reason": "Collects and classifies HIR lifetime uses, including bound/free/late-bound behavior for function signatures. A mistake here could cause the elided return lifetime to be associated with the explicit `'a` inputs rather than rejected as ambiguous."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+        "reason": "This visitor explicitly collects lifetime uses, including synthetic uses created by elision. Since the failure appears tied to elision handling when multiple inputs mention the same lifetime, incorrect collection/deduplication in this file is a strong possibility."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect.rs",
+        "reason": "This is the entry point for collection queries such as `fn_sig`. If the invalid function signature is accepted, the query pipeline here may be failing to trigger or propagate the expected elision ambiguity check during signature construction."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/implied_bounds.rs",
+        "reason": "Although more downstream, this code liberates function signatures and derives assumptions from free functions. If signature validity is deferred too long, logic here could be masking the issue by treating the return reference as tied to the shared input lifetime instead of requiring prior rejection."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "Well-formedness checking is a plausible place where an invalid reference-returning signature should be rejected if not caught earlier. Acceptance suggests WF checks may be missing or incorrectly considering the signature well formed."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "If the compiler falls through to region inference instead of rejecting the declaration syntactically/semantically, this module could be incorrectly generating outlives constraints that make the elided return lifetime appear satisfiable."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/mod.rs",
+        "reason": "Top-level coordinator for HIR checking and region checking. It is less directly implicated than lowering/resolution, but it is a plausible integration point where the missing lifetime-elision validation should have been invoked and may currently be skipped."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 133.777,
+    "stage_times_sec": {
+      "checkout": 7.022,
+      "load_bug_context": 0.144,
+      "test_behavior_analysis": 5.224,
+      "test_failure_analysis": 10.105,
+      "load_file_candidates": 2.507,
+      "search_suspicious_files": 108.775
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 344269,
+      "output_tokens": 5572,
+      "total_tokens": 349841,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.224,
+          "input_tokens": 342,
+          "output_tokens": 269,
+          "total_tokens": 611
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 10.105,
+          "input_tokens": 933,
+          "output_tokens": 597,
+          "total_tokens": 1530
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.192,
+          "input_tokens": 26569,
+          "output_tokens": 340,
+          "total_tokens": 26909
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.488,
+          "input_tokens": 26094,
+          "output_tokens": 319,
+          "total_tokens": 26413
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.363,
+          "input_tokens": 26149,
+          "output_tokens": 282,
+          "total_tokens": 26431
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.546,
+          "input_tokens": 26340,
+          "output_tokens": 289,
+          "total_tokens": 26629
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 6.275,
+          "input_tokens": 26390,
+          "output_tokens": 278,
+          "total_tokens": 26668
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 6.998,
+          "input_tokens": 26447,
+          "output_tokens": 315,
+          "total_tokens": 26762
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 5.946,
+          "input_tokens": 26487,
+          "output_tokens": 283,
+          "total_tokens": 26770
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.871,
+          "input_tokens": 26375,
+          "output_tokens": 344,
+          "total_tokens": 26719
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.752,
+          "input_tokens": 26077,
+          "output_tokens": 355,
+          "total_tokens": 26432
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.336,
+          "input_tokens": 25100,
+          "output_tokens": 301,
+          "total_tokens": 25401
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.891,
+          "input_tokens": 26125,
+          "output_tokens": 276,
+          "total_tokens": 26401
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.681,
+          "input_tokens": 26421,
+          "output_tokens": 313,
+          "total_tokens": 26734
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.619,
+          "input_tokens": 16547,
+          "output_tokens": 336,
+          "total_tokens": 16883
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 10.787,
+          "input_tokens": 11873,
+          "output_tokens": 675,
+          "total_tokens": 12548
+        }
+      ]
+    }
+  }
+}

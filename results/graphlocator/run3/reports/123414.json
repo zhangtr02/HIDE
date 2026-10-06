@@ -1,0 +1,195 @@
+{
+  "bug_id": "123414",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-04-02",
+    "resolved": "1684a753dbca5d23b2e03568e6fbbb48eb72d0e6"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/diagnostics/mutability_errors.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_borrowck/src/diagnostics/mutability_errors.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/diagnostics/mutability_errors.rs",
+        "rank": 1
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/123414.json",
+    "graph_cache_hit": true,
+    "graph_cache_build_mode": "bug_cache",
+    "graph_cache_bug_id": "123414",
+    "graph_cache_checkout_commit": "1684a753dbca5d23b2e03568e6fbbb48eb72d0e6",
+    "initial_graph_node_count": 55041,
+    "initial_graph_edge_count": 55040,
+    "graph_node_count": 55041,
+    "graph_edge_count": 55780,
+    "lazy_loaded_edge_count": 740,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"suggest_make_local_mut\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/diagnostics/mutability_errors.rs\", \"content\": \"fn suggest_make_local_mut(&self, err: &mut Diag<'_>, local: Local, name: Symbol) {\\n        let local_decl = &self.body.local_decls[local];\\n\\n        let (pointer_sigil, pointer_desc) =\\n            if local_decl.ty.is_ref() { (\\\"&\\\", \\\"reference\\\") } else { (\\\"*const\\\", \\\"pointer\\\") };\\n\\n        let (is_trait_sig, local_trait) = self.is_error_in_trait(local);\\n        if is_trait_sig && local_trait.is_none() {\\n            return;\\n        }\\n\\n        let decl_span = match local_trait {\\n            Some(span) => span,\\n            None => local_decl.source_info.span,\\n        };\\n\\n        let label = match *local_decl.local_info() {\\n            LocalInfo::User(mir::BindingForm::ImplicitSelf(_)) => {\\n                let suggestion = suggest_ampmut_self(self.infcx.tcx, decl_span);\\n                Some((true, decl_span, suggestion))\\n            }\\n\\n            LocalInfo::User(mir::BindingForm::Var(mir::VarBindingForm {\\n                binding_mode: BindingAnnotation(ByRef::No, _),\\n                opt_ty_info,\\n                ..\\n            })) => {\\n                // check if the RHS is from desugaring\\n                let opt_assignment_rhs_span =\\n                    self.body.find_assignments(local).first().map(|&location| {\\n                        if let Some(mir::Statement {\\n                            source_info: _,\\n                            kind:\\n                                mir::StatementKind::Assign(box (\\n                                    _,\\n                                    mir::Rvalue::Use(mir::Operand::Copy(place)),\\n                                )),\\n                        }) = self.body[location.block].statements.get(location.statement_index)\\n                        {\\n                            self.body.local_decls[place.local].source_info.span\\n                        } else {\\n                            self.body.source_info(location).span\\n                        }\\n                    });\\n                match opt_assignment_rhs_span.and_then(|s| s.desugaring_kind()) {\\n                    // on for loops, RHS points to the iterator part\\n                    Some(DesugaringKind::ForLoop) => {\\n                        let span = opt_assignment_rhs_span.unwrap();\\n                        self.suggest_similar_mut_method_for_for_loop(err, span);\\n                        err.span_label(\\n                            span,\\n                            format!(\\\"this iterator yields `{pointer_sigil}` {pointer_desc}s\\\",),\\n                        );\\n                        None\\n                    }\\n                    // don't create labels for compiler-generated spans\\n                    Some(_) => None,\\n                    None => {\\n                        let label = if name != kw::SelfLower {\\n                            suggest_ampmut(\\n                                self.infcx.tcx,\\n                                local_decl.ty,\\n                                decl_span,\\n                                opt_assignment_rhs_span,\\n                                opt_ty_info,\\n                            )\\n                        } else {\\n                            match local_decl.local_info() {\\n                                LocalInfo::User(mir::BindingForm::Var(mir::VarBindingForm {\\n                                    opt_ty_info: None,\\n                                    ..\\n                                })) => {\\n                                    let sugg = suggest_ampmut_self(self.infcx.tcx, decl_span);\\n                                    (true, decl_span, sugg)\\n                                }\\n                                // explicit self (eg `self: &'a Self`)\\n                                _ => suggest_ampmut(\\n                                    self.infcx.tcx,\\n                                    local_decl.ty,\\n                                    decl_span,\\n                                    opt_assignment_rhs_span,\\n                                    opt_ty_info,\\n                                ),\\n                            }\\n                        };\\n                        Some(label)\\n                    }\\n                }\\n            }\\n\\n            LocalInfo::User(mir::BindingForm::Var(mir::VarBindingForm {\\n                binding_mode: BindingAnnotation(ByRef::Yes(_), _),\\n                ..\\n            })) => {\\n                let pattern_span: Span = local_decl.source_info.span;\\n                suggest_ref_mut(self.infcx.tcx, pattern_span)\\n                    .map(|span| (true, span, \\\"mut \\\".to_owned()))\\n            }\\n\\n            _ => unreachable!(),\\n        };\\n\\n        match label {\\n            Some((true, err_help_span, suggested_code)) => {\\n                err.span_suggestion_verbose(\\n                    err_help_span,\\n                    format!(\\\"consider changing this to be a mutable {pointer_desc}\\\"),\\n                    suggested_code,\\n                    Applicability::MachineApplicable,\\n                );\\n            }\\n            Some((false, err_label_span, message)) => {\\n                let def_id = self.body.source.def_id();\\n                let hir_id = if let Some(local_def_id) = def_id.as_local()\\n                    && let Some(body_id) = self.infcx.tcx.hir().maybe_body_owned_by(local_def_id)\\n                {\\n                    let body = self.infcx.tcx.hir().body(body_id);\\n                    BindingFinder { span: err_label_span }.visit_body(body).break_value()\\n                } else {\\n                    None\\n                };\\n\\n                if let Some(hir_id) = hir_id\\n                    && let hir::Node::LetStmt(local) = self.infcx.tcx.hir_node(hir_id)\\n                {\\n                    let tables = self.infcx.tcx.typeck(def_id.as_local().unwrap());\\n                    if let Some(clone_trait) = self.infcx.tcx.lang_items().clone_trait()\\n                        && let Some(expr) = local.init\\n                        && let ty = tables.node_type_opt(expr.hir_id)\\n                        && let Some(ty) = ty\\n                        && let ty::Ref(..) = ty.kind()\\n                    {\\n                        match self\\n                            .infcx\\n                            .type_implements_trait_shallow(\\n                                clone_trait,\\n                                ty.peel_refs(),\\n                                self.param_env,\\n                            )\\n                            .as_deref()\\n                        {\\n                            Some([]) => {\\n                                // FIXME: This error message isn't useful, since we're just\\n                                // vaguely suggesting to clone a value that already\\n                                // implements `Clone`.\\n                                //\\n                                // A correct suggestion here would take into account the fact\\n                                // that inference may be affected by missing types on bindings,\\n                                // etc., to improve \\\"tests/ui/borrowck/issue-91206.stderr\\\", for\\n                                // example.\\n                            }\\n                            None => {\\n                                if let hir::ExprKind::MethodCall(segment, _rcvr, [], span) =\\n                                    expr.kind\\n                                    && segment.ident.name == sym::clone\\n                                {\\n                                    err.span_help(\\n                                        span,\\n                                        format!(\\n                                            \\\"`{}` doesn't implement `Clone`, so this call clones \\\\\\n                                             the reference `{ty}`\\\",\\n                                            ty.peel_refs(),\\n                                        ),\\n                                    );\\n                                }\\n                                // The type doesn't implement Clone.\\n                                let trait_ref = ty::Binder::dummy(ty::TraitRef::new(\\n                                    self.infcx.tcx,\\n                                    clone_trait,\\n                                    [ty.peel_refs()],\\n                                ));\\n                                let obligation = traits::Obligation::new(\\n                                    self.infcx.tcx,\\n                                    traits::ObligationCause::dummy(),\\n                                    self.param_env,\\n                                    trait_ref,\\n                                );\\n                                self.infcx.err_ctxt().suggest_derive(\\n                                    &obligation,\\n                                    err,\\n                                    trait_ref.to_predicate(self.infcx.tcx),\\n                                );\\n                            }\\n                            Some(errors) => {\\n                                if let hir::ExprKind::MethodCall(segment, _rcvr, [], span) =\\n                                    expr.kind\\n                                    && segment.ident.name == sym::clone\\n                                {\\n                                    err.span_help(\\n                                        span,\\n                                        format!(\\n                                            \\\"`{}` doesn't implement `Clone` because its \\\\\\n                                             implementations trait bounds could not be met, so \\\\\\n                                             this call clones the reference `{ty}`\\\",\\n                                            ty.peel_refs(),\\n                                        ),\\n                                    );\\n                                    err.note(format!(\\n                                        \\\"the following trait bounds weren't met: {}\\\",\\n                                        errors\\n                                            .iter()\\n                                            .map(|e| e.obligation.predicate.to_string())\\n                                            .collect::<Vec<_>>()\\n                                            .join(\\\"\\\\n\\\"),\\n                                    ));\\n                                }\\n                                // The type doesn't implement Clone because of unmet obligations.\\n                                for error in errors {\\n                                    if let traits::FulfillmentErrorCode::SelectionError(\\n                                        traits::SelectionError::Unimplemented,\\n                                    ) = error.code\\n                                        && let ty::PredicateKind::Clause(ty::ClauseKind::Trait(\\n                                            pred,\\n                                        )) = error.obligation.predicate.kind().skip_binder()\\n                                    {\\n                                        self.infcx.err_ctxt().suggest_derive(\\n                                            &error.obligation,\\n                                            err,\\n                                            error.obligation.predicate.kind().rebind(pred),\\n                                        );\\n                                    }\\n                                }\\n                            }\\n                        }\\n                    }\\n                    let (changing, span, sugg) = match local.ty {\\n                        Some(ty) => (\\\"changing\\\", ty.span, message),\\n                        None => {\\n                            (\\\"specifying\\\", local.pat.span.shrink_to_hi(), format!(\\\": {message}\\\"))\\n                        }\\n                    };\\n                    err.span_suggestion_verbose(\\n                        span,\\n                        format!(\\\"consider {changing} this binding's type\\\"),\\n                        sugg,\\n                        Applicability::HasPlaceholders,\\n                    );\\n                } else {\\n                    err.span_label(\\n                        err_label_span,\\n                        format!(\\\"consider changing this binding's type to be: `{message}`\\\"),\\n                    );\\n                }\\n            }\\n            None => {}\\n        }\\n    }\"}",
+      "{\"type\": \"FILE\", \"name\": \"mutability_errors.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/diagnostics/mutability_errors.rs\", \"content\": \"mutability_errors.rs\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"suggest_ampmut_self\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/diagnostics/mutability_errors.rs\", \"content\": \"fn suggest_ampmut_self<'tcx>(tcx: TyCtxt<'tcx>, span: Span) -> String {\\n    match tcx.sess.source_map().span_to_snippet(span) {\\n        Ok(snippet) => {\\n            let lt_pos = snippet.find('\\\\'');\\n            if let Some(lt_pos) = lt_pos {\\n                format!(\\\"&{}mut self\\\", &snippet[lt_pos..snippet.len() - 4])\\n            } else {\\n                \\\"&mut self\\\".to_string()\\n            }\\n        }\\n        _ => \\\"&mut self\\\".to_string(),\\n    }\\n}\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_borrowck/src/diagnostics/mutability_errors.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Invalid snippet slicing in self-suggestion logic for lifetime-bearing `self` forms",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "suggest_ampmut_self",
+              "file": "compiler/rustc_borrowck/src/diagnostics/mutability_errors.rs",
+              "content": "fn suggest_ampmut_self<'tcx>(tcx: TyCtxt<'tcx>, span: Span) -> String {\n    match tcx.sess.source_map().span_to_snippet(span) {\n        Ok(snippet) => {\n            let lt_pos = snippet.find('\\'');\n            if let Some(lt_pos) = lt_pos {\n                format!(\"&{}mut self\", &snippet[lt_pos..snippet.len() - 4])\n            } else {\n                \"&mut self\".to_string()\n            }\n        }\n        _ => \"&mut self\".to_string(),\n    }\n}"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Borrow-check mutability diagnostics invoked on an already erroneous trait/impl signature mismatch, reaching fragile suggestion code",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "suggest_make_local_mut",
+              "file": "compiler/rustc_borrowck/src/diagnostics/mutability_errors.rs",
+              "content": "fn suggest_make_local_mut(&self, err: &mut Diag<'_>, local: Local, name: Symbol) {\n        let local_decl = &self.body.local_decls[local];\n\n        let (pointer_sigil, pointer_desc) =\n            if local_decl.ty.is_ref() { (\"&\", \"reference\") } else { (\"*const\", \"pointer\") };\n\n        let (is_trait_sig, local_trait) = self.is_error_in_trait(local);\n        if is_trait_sig && local_trait.is_none() {\n            return;\n        }\n\n        let decl_span = match local_trait {\n            Some(span) => span,\n            None => local_decl.source_info.span,\n        };\n\n        let label = match *local_decl.local_info() {\n            LocalInfo::User(mir::BindingForm::ImplicitSelf(_)) => {\n                let suggestion = suggest_ampmut_self(self.infcx.tcx, decl_span);\n                Some((true, decl_span, suggestion))\n            }\n\n            LocalInfo::User(mir::BindingForm::Var(mir::VarBindingForm {\n                binding_mode: BindingAnnotation(ByRef::No, _),\n                opt_ty_info,\n                ..\n            })) => {\n                // check if the RHS is from desugaring\n                let opt_assignment_rhs_span =\n                    self.body.find_assignments(local).first().map(|&location| {\n                        if let Some(mir::Statement {\n                            source_info: _,\n                            kind:\n                                mir::StatementKind::Assign(box (\n                                    _,\n                                    mir::Rvalue::Use(mir::Operand::Copy(place)),\n                                )),\n                        }) = self.body[location.block].statements.get(location.statement_index)\n                        {\n                            self.body.local_decls[place.local].source_info.span\n                        } else {\n                            self.body.source_info(location).span\n                        }\n                    });\n                match opt_assignment_rhs_span.and_then(|s| s.desugaring_kind()) {\n                    // on for loops, RHS points to the iterator part\n                    Some(DesugaringKind::ForLoop) => {\n                        let span = opt_assignment_rhs_span.unwrap();\n                        self.suggest_similar_mut_method_for_for_loop(err, span);\n                        err.span_label(\n                            span,\n                            format!(\"this iterator yields `{pointer_sigil}` {pointer_desc}s\",),\n                        );\n                        None\n                    }\n                    // don't create labels for compiler-generated spans\n                    Some(_) => None,\n                    None => {\n                        let label = if name != kw::SelfLower {\n                            suggest_ampmut(\n                                self.infcx.tcx,\n                                local_decl.ty,\n                                decl_span,\n                                opt_assignment_rhs_span,\n                                opt_ty_info,\n                            )\n                        } else {\n                            match local_decl.local_info() {\n                                LocalInfo::User(mir::BindingForm::Var(mir::VarBindingForm {\n                                    opt_ty_info: None,\n                                    ..\n                                })) => {\n                                    let sugg = suggest_ampmut_self(self.infcx.tcx, decl_span);\n                                    (true, decl_span, sugg)\n                                }\n                                // explicit self (eg `self: &'a Self`)\n                                _ => suggest_ampmut(\n                                    self.infcx.tcx,\n                                    local_decl.ty,\n                                    decl_span,\n                                    opt_assignment_rhs_span,\n                                    opt_ty_info,\n                                ),\n                            }\n                        };\n                        Some(label)\n                    }\n                }\n            }\n\n            LocalInfo::User(mir::BindingForm::Var(mir::VarBindingForm {\n                binding_mode: BindingAnnotation(ByRef::Yes(_), _),\n                ..\n            })) => {\n                let pattern_span: Span = local_decl.source_info.span;\n                suggest_ref_mut(self.infcx.tcx, pattern_span)\n                    .map(|span| (true, span, \"mut \".to_owned()))\n            }\n\n            _ => unreachable!(),\n        };\n\n        match label {\n            Some((true, err_help_span, suggested_code)) => {\n                err.span_suggestion_verbose(\n                    err_help_span,\n                    format!(\"consider changing this to be a mutable {pointer_desc}\"),\n                    suggested_code,\n                    Applicability::MachineApplicable,\n                );\n            }\n            Some((false, err_label_span, message)) => {\n                let def_id = self.body.source.def_id();\n                let hir_id = if let Some(local_def_id) = def_id.as_local()\n                    && let Some(body_id) = self.infcx.tcx.hir().maybe_body_owned_by(local_def_id)\n                {\n                    let body = self.infcx.tcx.hir().body(body_id);\n                    BindingFinder { span: err_label_span }.visit_body(body).break_value()\n                } else {\n                    None\n                };\n\n                if let Some(hir_id) = hir_id\n                    && let hir::Node::LetStmt(local) = self.infcx.tcx.hir_node(hir_id)\n                {\n                    let tables = self.infcx.tcx.typeck(def_id.as_local().unwrap());\n                    if let Some(clone_trait) = self.infcx.tcx.lang_items().clone_trait()\n                        && let Some(expr) = local.init\n                        && let ty = tables.node_type_opt(expr.hir_id)\n                        && let Some(ty) = ty\n                        && let ty::Ref(..) = ty.kind()\n                    {\n                        match self\n                            .infcx\n                            .type_implements_trait_shallow(\n                                clone_trait,\n                                ty.peel_refs(),\n                                self.param_env,\n                            )\n                            .as_deref()\n                        {\n                            Some([]) => {\n                                // FIXME: This error message isn't useful, since we're just\n                                // vaguely suggesting to clone a value that already\n                                // implements `Clone`.\n                                //\n                                // A correct suggestion here would take into account the fact\n                                // that inference may be affected by missing types on bindings,\n                                // etc., to improve \"tests/ui/borrowck/issue-91206.stderr\", for\n                                // example.\n                            }\n                            None => {\n                                if let hir::ExprKind::MethodCall(segment, _rcvr, [], span) =\n                                    expr.kind\n                                    && segment.ident.name == sym::clone\n                                {\n                                    err.span_help(\n                                        span,\n                                        format!(\n                                            \"`{}` doesn't implement `Clone`, so this call clones \\\n                                             the reference `{ty}`\",\n                                            ty.peel_refs(),\n                                        ),\n                                    );\n                                }\n                                // The type doesn't implement Clone.\n                                let trait_ref = ty::Binder::dummy(ty::TraitRef::new(\n                                    self.infcx.tcx,\n                                    clone_trait,\n                                    [ty.peel_refs()],\n                                ));\n                                let obligation = traits::Obligation::new(\n                                    self.infcx.tcx,\n                                    traits::ObligationCause::dummy(),\n                                    self.param_env,\n                                    trait_ref,\n                                );\n                                self.infcx.err_ctxt().suggest_derive(\n                                    &obligation,\n                                    err,\n                                    trait_ref.to_predicate(self.infcx.tcx),\n                                );\n                            }\n                            Some(errors) => {\n                                if let hir::ExprKind::MethodCall(segment, _rcvr, [], span) =\n                                    expr.kind\n                                    && segment.ident.name == sym::clone\n                                {\n                                    err.span_help(\n                                        span,\n                                        format!(\n                                            \"`{}` doesn't implement `Clone` because its \\\n                                             implementations trait bounds could not be met, so \\\n                                             this call clones the reference `{ty}`\",\n                                            ty.peel_refs(),\n                                        ),\n                                    );\n                                    err.note(format!(\n                                        \"the following trait bounds weren't met: {}\",\n                                        errors\n                                            .iter()\n                                            .map(|e| e.obligation.predicate.to_string())\n                                            .collect::<Vec<_>>()\n                                            .join(\"\\n\"),\n                                    ));\n                                }\n                                // The type doesn't implement Clone because of unmet obligations.\n                                for error in errors {\n                                    if let traits::FulfillmentErrorCode::SelectionError(\n                                        traits::SelectionError::Unimplemented,\n                                    ) = error.code\n                                        && let ty::PredicateKind::Clause(ty::ClauseKind::Trait(\n                                            pred,\n                                        )) = error.obligation.predicate.kind().skip_binder()\n                                    {\n                                        self.infcx.err_ctxt().suggest_derive(\n                                            &error.obligation,\n                                            err,\n                                            error.obligation.predicate.kind().rebind(pred),\n                                        );\n                                    }\n                                }\n                            }\n                        }\n                    }\n                    let (changing, span, sugg) = match local.ty {\n                        Some(ty) => (\"changing\", ty.span, message),\n                        None => {\n                            (\"specifying\", local.pat.span.shrink_to_hi(), format!(\": {message}\"))\n                        }\n                    };\n                    err.span_suggestion_verbose(\n                        span,\n                        format!(\"consider {changing} this binding's type\"),\n                        sugg,\n                        Applicability::HasPlaceholders,\n                    );\n                } else {\n                    err.span_label(\n                        err_label_span,\n                        format!(\"consider changing this binding's type to be: `{message}`\"),\n                    );\n                }\n            }\n            None => {}\n        }\n    }"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.995
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.86
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 178.001,
+    "stage_times_sec": {
+      "load_bug_context": 0.012,
+      "checkout": 0.663,
+      "load_or_build_graph": 40.653,
+      "symptom_vertices_locating": 124.477,
+      "dynamic_cig_discovering": 10.177,
+      "convert_results": 0.003
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 10,
+      "input_tokens": 43337,
+      "output_tokens": 712,
+      "total_tokens": 44049,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 2.95,
+          "input_tokens": 3083,
+          "output_tokens": 109,
+          "total_tokens": 3192
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.877,
+          "input_tokens": 2418,
+          "output_tokens": 17,
+          "total_tokens": 2435
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 1.851,
+          "input_tokens": 3206,
+          "output_tokens": 26,
+          "total_tokens": 3232
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.662,
+          "input_tokens": 3314,
+          "output_tokens": 57,
+          "total_tokens": 3371
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.39,
+          "input_tokens": 3590,
+          "output_tokens": 110,
+          "total_tokens": 3700
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.297,
+          "input_tokens": 4753,
+          "output_tokens": 68,
+          "total_tokens": 4821
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.524,
+          "input_tokens": 2418,
+          "output_tokens": 17,
+          "total_tokens": 2435
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 3.872,
+          "input_tokens": 3403,
+          "output_tokens": 134,
+          "total_tokens": 3537
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 2.839,
+          "input_tokens": 4252,
+          "output_tokens": 87,
+          "total_tokens": 4339
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 3.46,
+          "input_tokens": 12900,
+          "output_tokens": 87,
+          "total_tokens": 12987
+        }
+      ]
+    }
+  }
+}

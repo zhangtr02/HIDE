@@ -1,0 +1,292 @@
+{
+  "bug_id": "113794",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-07-16",
+    "resolved": "4c8bb79d9f565115637cc6da739f8389e79f3a29"
+  },
+  "final_top10": [
+    "compiler/rustc_middle/src/ty/mod.rs",
+    "compiler/rustc_infer/src/infer/error_reporting/note.rs",
+    "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+    "compiler/rustc_hir_analysis/src/astconv/bounds.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_middle/src/ty/mod.rs",
+      "compiler/rustc_infer/src/infer/error_reporting/note.rs",
+      "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+      "compiler/rustc_hir_analysis/src/astconv/bounds.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_middle/src/ty/mod.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/error_reporting/note.rs",
+        "rank": 2
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+        "rank": 3
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/bounds.rs",
+        "rank": 4
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/113794.json",
+    "graph_cache_hit": false,
+    "graph_cache_build_mode": "skeleton",
+    "graph_cache_bug_id": "113794",
+    "graph_cache_checkout_commit": "4c8bb79d9f565115637cc6da739f8389e79f3a29",
+    "initial_graph_node_count": 52352,
+    "initial_graph_edge_count": 52351,
+    "graph_node_count": 52352,
+    "graph_edge_count": 229315,
+    "lazy_loaded_edge_count": 176964,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"check_type_bounds\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/check/compare_impl_item.rs\", \"content\": \"pub(super) fn check_type_bounds<'tcx>(\\n    tcx: TyCtxt<'tcx>,\\n    trait_ty: ty::AssocItem,\\n    impl_ty: ty::AssocItem,\\n    impl_trait_ref: ty::TraitRef<'tcx>,\\n) -> Result<(), ErrorGuaranteed> {\\n    let param_env = tcx.param_env(impl_ty.def_id);\\n    let container_id = impl_ty.container_id(tcx);\\n    // Given\\n    //\\n    // impl<A, B> Foo<u32> for (A, B) {\\n    //     type Bar<C> = Wrapper<A, B, C>\\n    // }\\n    //\\n    // - `impl_trait_ref` would be `<(A, B) as Foo<u32>>`\\n    // - `normalize_impl_ty_args` would be `[A, B, ^0.0]` (`^0.0` here is the bound var with db 0 and index 0)\\n    // - `normalize_impl_ty` would be `Wrapper<A, B, ^0.0>`\\n    // - `rebased_args` would be `[(A, B), u32, ^0.0]`, combining the args from\\n    //    the *trait* with the generic associated type parameters (as bound vars).\\n    //\\n    // A note regarding the use of bound vars here:\\n    // Imagine as an example\\n    // ```\\n    // trait Family {\\n    //     type Member<C: Eq>;\\n    // }\\n    //\\n    // impl Family for VecFamily {\\n    //     type Member<C: Eq> = i32;\\n    // }\\n    // ```\\n    // Here, we would generate\\n    // ```notrust\\n    // forall<C> { Normalize(<VecFamily as Family>::Member<C> => i32) }\\n    // ```\\n    // when we really would like to generate\\n    // ```notrust\\n    // forall<C> { Normalize(<VecFamily as Family>::Member<C> => i32) :- Implemented(C: Eq) }\\n    // ```\\n    // But, this is probably fine, because although the first clause can be used with types C that\\n    // do not implement Eq, for it to cause some kind of problem, there would have to be a\\n    // VecFamily::Member<X> for some type X where !(X: Eq), that appears in the value of type\\n    // Member<C: Eq> = .... That type would fail a well-formedness check that we ought to be doing\\n    // elsewhere, which would check that any <T as Family>::Member<X> meets the bounds declared in\\n    // the trait (notably, that X: Eq and T: Family).\\n    let mut bound_vars: smallvec::SmallVec<[ty::BoundVariableKind; 8]> =\\n        smallvec::SmallVec::with_capacity(tcx.generics_of(impl_ty.def_id).params.len());\\n    // Extend the impl's identity args with late-bound GAT vars\\n    let normalize_impl_ty_args = ty::GenericArgs::identity_for_item(tcx, container_id).extend_to(\\n        tcx,\\n        impl_ty.def_id,\\n        |param, _| match param.kind {\\n            GenericParamDefKind::Type { .. } => {\\n                let kind = ty::BoundTyKind::Param(param.def_id, param.name);\\n                let bound_var = ty::BoundVariableKind::Ty(kind);\\n                bound_vars.push(bound_var);\\n                Ty::new_bound(\\n                    tcx,\\n                    ty::INNERMOST,\\n                    ty::BoundTy { var: ty::BoundVar::from_usize(bound_vars.len() - 1), kind },\\n                )\\n                .into()\\n            }\\n            GenericParamDefKind::Lifetime => {\\n                let kind = ty::BoundRegionKind::BrNamed(param.def_id, param.name);\\n                let bound_var = ty::BoundVariableKind::Region(kind);\\n                bound_vars.push(bound_var);\\n                ty::Region::new_late_bound(\\n                    tcx,\\n                    ty::INNERMOST,\\n                    ty::BoundRegion { var: ty::BoundVar::from_usize(bound_vars.len() - 1), kind },\\n                )\\n                .into()\\n            }\\n            GenericParamDefKind::Const { .. } => {\\n                let bound_var = ty::BoundVariableKind::Const;\\n                bound_vars.push(bound_var);\\n                ty::Const::new_bound(\\n                    tcx,\\n                    ty::INNERMOST,\\n                    ty::BoundVar::from_usize(bound_vars.len() - 1),\\n                    tcx.type_of(param.def_id)\\n                        .no_bound_vars()\\n                        .expect(\\\"const parameter types cannot be generic\\\"),\\n                )\\n                .into()\\n            }\\n        },\\n    );\\n    // When checking something like\\n    //\\n    // trait X { type Y: PartialEq<<Self as X>::Y> }\\n    // impl X for T { default type Y = S; }\\n    //\\n    // We will have to prove the bound S: PartialEq<<T as X>::Y>. In this case\\n    // we want <T as X>::Y to normalize to S. This is valid because we are\\n    // checking the default value specifically here. Add this equality to the\\n    // ParamEnv for normalization specifically.\\n    let normalize_impl_ty = tcx.type_of(impl_ty.def_id).instantiate(tcx, normalize_impl_ty_args);\\n    let rebased_args = normalize_impl_ty_args.rebase_onto(tcx, container_id, impl_trait_ref.args);\\n    let bound_vars = tcx.mk_bound_variable_kinds(&bound_vars);\\n    let normalize_param_env = {\\n        let mut predicates = param_env.caller_bounds().iter().collect::<Vec<_>>();\\n        match normalize_impl_ty.kind() {\\n            ty::Alias(ty::Projection, proj)\\n                if proj.def_id == trait_ty.def_id && proj.args == rebased_args =>\\n            {\\n                // Don't include this predicate if the projected type is\\n                // exactly the same as the projection. This can occur in\\n                // (somewhat dubious) code like this:\\n                //\\n                // impl<T> X for T where T: X { type Y = <T as X>::Y; }\\n            }\\n            _ => predicates.push(\\n                ty::Binder::bind_with_vars(\\n                    ty::ProjectionPredicate {\\n                        projection_ty: tcx.mk_alias_ty(trait_ty.def_id, rebased_args),\\n                        term: normalize_impl_ty.into(),\\n                    },\\n                    bound_vars,\\n                )\\n                .to_predicate(tcx),\\n            ),\\n        };\\n        ty::ParamEnv::new(tcx.mk_clauses(&predicates), Reveal::UserFacing, param_env.constness())\\n    };\\n    debug!(?normalize_param_env);\\n\\n    let impl_ty_def_id = impl_ty.def_id.expect_local();\\n    let impl_ty_args = GenericArgs::identity_for_item(tcx, impl_ty.def_id);\\n    let rebased_args = impl_ty_args.rebase_onto(tcx, container_id, impl_trait_ref.args);\\n\\n    let infcx = tcx.infer_ctxt().build();\\n    let ocx = ObligationCtxt::new(&infcx);\\n\\n    // A synthetic impl Trait for RPITIT desugaring has no HIR, which we currently use to get the\\n    // span for an impl's associated type. Instead, for these, use the def_span for the synthesized\\n    // associated type.\\n    let impl_ty_span = if impl_ty.is_impl_trait_in_trait() {\\n        tcx.def_span(impl_ty_def_id)\\n    } else {\\n        match tcx.hir().get_by_def_id(impl_ty_def_id) {\\n            hir::Node::TraitItem(hir::TraitItem {\\n                kind: hir::TraitItemKind::Type(_, Some(ty)),\\n                ..\\n            }) => ty.span,\\n            hir::Node::ImplItem(hir::ImplItem { kind: hir::ImplItemKind::Type(ty), .. }) => ty.span,\\n            _ => bug!(),\\n        }\\n    };\\n    let assumed_wf_types = ocx.assumed_wf_types_and_report_errors(param_env, impl_ty_def_id)?;\\n\\n    let normalize_cause = ObligationCause::new(\\n        impl_ty_span,\\n        impl_ty_def_id,\\n        ObligationCauseCode::CheckAssociatedTypeBounds {\\n            impl_item_def_id: impl_ty.def_id.expect_local(),\\n            trait_item_def_id: trait_ty.def_id,\\n        },\\n    );\\n    let mk_cause = |span: Span| {\\n        let code = if span.is_dummy() {\\n            traits::ItemObligation(trait_ty.def_id)\\n        } else {\\n            traits::BindingObligation(trait_ty.def_id, span)\\n        };\\n        ObligationCause::new(impl_ty_span, impl_ty_def_id, code)\\n    };\\n\\n    let obligations: Vec<_> = tcx\\n        .explicit_item_bounds(trait_ty.def_id)\\n        .arg_iter_copied(tcx, rebased_args)\\n        .map(|(concrete_ty_bound, span)| {\\n            debug!(\\\"check_type_bounds: concrete_ty_bound = {:?}\\\", concrete_ty_bound);\\n            traits::Obligation::new(tcx, mk_cause(span), param_env, concrete_ty_bound)\\n        })\\n        .collect();\\n    debug!(\\\"check_type_bounds: item_bounds={:?}\\\", obligations);\\n\\n    for mut obligation in util::elaborate(tcx, obligations) {\\n        let normalized_predicate =\\n            ocx.normalize(&normalize_cause, normalize_param_env, obligation.predicate);\\n        debug!(\\\"compare_projection_bounds: normalized predicate = {:?}\\\", normalized_predicate);\\n        obligation.predicate = normalized_predicate;\\n\\n        ocx.register_obligation(obligation);\\n    }\\n    // Check that all obligations are satisfied by the implementation's\\n    // version.\\n    let errors = ocx.select_all_or_error();\\n    if !errors.is_empty() {\\n        let reported = infcx.err_ctxt().report_fulfillment_errors(&errors);\\n        return Err(reported);\\n    }\\n\\n    // Finally, resolve all regions. This catches wily misuses of\\n    // lifetime parameters.\\n    let implied_bounds = infcx.implied_bounds_tys(param_env, impl_ty_def_id, assumed_wf_types);\\n    let outlives_env = OutlivesEnvironment::with_bounds(param_env, implied_bounds);\\n    ocx.resolve_regions_and_report_errors(impl_ty_def_id, &outlives_env)\\n}\"}",
+      "{\"type\": \"FILE\", \"name\": \"bounds.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/astconv/bounds.rs\", \"content\": \"bounds.rs\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"item_name\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/ty/mod.rs\", \"content\": \"pub fn item_name(self, id: DefId) -> Symbol {\\n        self.opt_item_name(id).unwrap_or_else(|| {\\n            bug!(\\\"item_name: no name for {:?}\\\", self.def_path(id));\\n        })\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"item_name\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_metadata/src/rmeta/decoder.rs\", \"content\": \"fn item_name(self, item_index: DefIndex) -> Symbol {\\n        self.opt_item_name(item_index).expect(\\\"no encoded ident for item\\\")\\n    }\"}",
+      "{\"type\": \"PACKAGE\", \"name\": \"check\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/check\", \"content\": \"check\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"report_concrete_failure\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_infer/src/infer/error_reporting/note.rs\", \"content\": \"pub(super) fn report_concrete_failure(\\n        &self,\\n        origin: SubregionOrigin<'tcx>,\\n        sub: Region<'tcx>,\\n        sup: Region<'tcx>,\\n    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {\\n        let mut err = match origin {\\n            infer::Subtype(box trace) => {\\n                let terr = TypeError::RegionsDoesNotOutlive(sup, sub);\\n                let mut err = self.report_and_explain_type_error(trace, terr);\\n                match (*sub, *sup) {\\n                    (ty::RePlaceholder(_), ty::RePlaceholder(_)) => {}\\n                    (ty::RePlaceholder(_), _) => {\\n                        note_and_explain_region(\\n                            self.tcx,\\n                            &mut err,\\n                            \\\"\\\",\\n                            sup,\\n                            \\\" doesn't meet the lifetime requirements\\\",\\n                            None,\\n                        );\\n                    }\\n                    (_, ty::RePlaceholder(_)) => {\\n                        note_and_explain_region(\\n                            self.tcx,\\n                            &mut err,\\n                            \\\"the required lifetime does not necessarily outlive \\\",\\n                            sub,\\n                            \\\"\\\",\\n                            None,\\n                        );\\n                    }\\n                    _ => {\\n                        note_and_explain_region(self.tcx, &mut err, \\\"\\\", sup, \\\"...\\\", None);\\n                        note_and_explain_region(\\n                            self.tcx,\\n                            &mut err,\\n                            \\\"...does not necessarily outlive \\\",\\n                            sub,\\n                            \\\"\\\",\\n                            None,\\n                        );\\n                    }\\n                }\\n                err\\n            }\\n            infer::Reborrow(span) => {\\n                let reference_valid = note_and_explain::RegionExplanation::new(\\n                    self.tcx,\\n                    sub,\\n                    None,\\n                    note_and_explain::PrefixKind::RefValidFor,\\n                    note_and_explain::SuffixKind::Continues,\\n                );\\n                let content_valid = note_and_explain::RegionExplanation::new(\\n                    self.tcx,\\n                    sup,\\n                    None,\\n                    note_and_explain::PrefixKind::ContentValidFor,\\n                    note_and_explain::SuffixKind::Empty,\\n                );\\n                OutlivesContent {\\n                    span,\\n                    notes: reference_valid.into_iter().chain(content_valid).collect(),\\n                }\\n                .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\\n            }\\n            infer::RelateObjectBound(span) => {\\n                let object_valid = note_and_explain::RegionExplanation::new(\\n                    self.tcx,\\n                    sub,\\n                    None,\\n                    note_and_explain::PrefixKind::TypeObjValidFor,\\n                    note_and_explain::SuffixKind::Empty,\\n                );\\n                let pointer_valid = note_and_explain::RegionExplanation::new(\\n                    self.tcx,\\n                    sup,\\n                    None,\\n                    note_and_explain::PrefixKind::SourcePointerValidFor,\\n                    note_and_explain::SuffixKind::Empty,\\n                );\\n                OutlivesBound {\\n                    span,\\n                    notes: object_valid.into_iter().chain(pointer_valid).collect(),\\n                }\\n                .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\\n            }\\n            infer::RelateParamBound(span, ty, opt_span) => {\\n                let prefix = match *sub {\\n                    ty::ReStatic => note_and_explain::PrefixKind::TypeSatisfy,\\n                    _ => note_and_explain::PrefixKind::TypeOutlive,\\n                };\\n                let suffix = if opt_span.is_some() {\\n                    note_and_explain::SuffixKind::ReqByBinding\\n                } else {\\n                    note_and_explain::SuffixKind::Empty\\n                };\\n                let note = note_and_explain::RegionExplanation::new(\\n                    self.tcx, sub, opt_span, prefix, suffix,\\n                );\\n                FulfillReqLifetime { span, ty: self.resolve_vars_if_possible(ty), note }\\n                    .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\\n            }\\n            infer::RelateRegionParamBound(span) => {\\n                let param_instantiated = note_and_explain::RegionExplanation::new(\\n                    self.tcx,\\n                    sup,\\n                    None,\\n                    note_and_explain::PrefixKind::LfParamInstantiatedWith,\\n                    note_and_explain::SuffixKind::Empty,\\n                );\\n                let param_must_outlive = note_and_explain::RegionExplanation::new(\\n                    self.tcx,\\n                    sub,\\n                    None,\\n                    note_and_explain::PrefixKind::LfParamMustOutlive,\\n                    note_and_explain::SuffixKind::Empty,\\n                );\\n                LfBoundNotSatisfied {\\n                    span,\\n                    notes: param_instantiated.into_iter().chain(param_must_outlive).collect(),\\n                }\\n                .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\\n            }\\n            infer::ReferenceOutlivesReferent(ty, span) => {\\n                let pointer_valid = note_and_explain::RegionExplanation::new(\\n                    self.tcx,\\n                    sub,\\n                    None,\\n                    note_and_explain::PrefixKind::PointerValidFor,\\n                    note_and_explain::SuffixKind::Empty,\\n                );\\n                let data_valid = note_and_explain::RegionExplanation::new(\\n                    self.tcx,\\n                    sup,\\n                    None,\\n                    note_and_explain::PrefixKind::DataValidFor,\\n                    note_and_explain::SuffixKind::Empty,\\n                );\\n                RefLongerThanData {\\n                    span,\\n                    ty: self.resolve_vars_if_possible(ty),\\n                    notes: pointer_valid.into_iter().chain(data_valid).collect(),\\n                }\\n                .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\\n            }\\n            infer::CompareImplItemObligation { span, impl_item_def_id, trait_item_def_id } => {\\n                let mut err = self.report_extra_impl_obligation(\\n                    span,\\n                    impl_item_def_id,\\n                    trait_item_def_id,\\n                    &format!(\\\"`{}: {}`\\\", sup, sub),\\n                );\\n                // We should only suggest rewriting the `where` clause if the predicate is within that `where` clause\\n                if let Some(generics) = self.tcx.hir().get_generics(impl_item_def_id)\\n                    && generics.where_clause_span.contains(span)\\n                {\\n                    self.suggest_copy_trait_method_bounds(\\n                        trait_item_def_id,\\n                        impl_item_def_id,\\n                        &mut err,\\n                    );\\n                }\\n                err\\n            }\\n            infer::CheckAssociatedTypeBounds { impl_item_def_id, trait_item_def_id, parent } => {\\n                let mut err = self.report_concrete_failure(*parent, sub, sup);\\n                let trait_item_span = self.tcx.def_span(trait_item_def_id);\\n                let item_name = self.tcx.item_name(impl_item_def_id.to_def_id());\\n                err.span_label(\\n                    trait_item_span,\\n                    format!(\\\"definition of `{}` from trait\\\", item_name),\\n                );\\n                self.suggest_copy_trait_method_bounds(\\n                    trait_item_def_id,\\n                    impl_item_def_id,\\n                    &mut err,\\n                );\\n                err\\n            }\\n            infer::AscribeUserTypeProvePredicate(span) => {\\n                let instantiated = note_and_explain::RegionExplanation::new(\\n                    self.tcx,\\n                    sup,\\n                    None,\\n                    note_and_explain::PrefixKind::LfInstantiatedWith,\\n                    note_and_explain::SuffixKind::Empty,\\n                );\\n                let must_outlive = note_and_explain::RegionExplanation::new(\\n                    self.tcx,\\n                    sub,\\n                    None,\\n                    note_and_explain::PrefixKind::LfMustOutlive,\\n                    note_and_explain::SuffixKind::Empty,\\n                );\\n                LfBoundNotSatisfied {\\n                    span,\\n                    notes: instantiated.into_iter().chain(must_outlive).collect(),\\n                }\\n                .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\\n            }\\n        };\\n        if sub.is_error() || sup.is_error() {\\n            err.delay_as_bug();\\n        }\\n        err\\n    }\"}",
+      "{\"type\": \"FILE\", \"name\": \"check.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_hir_analysis/src/check/check.rs\", \"content\": \"check.rs\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_middle/src/ty/mod.rs",
+      "compiler/rustc_infer/src/infer/error_reporting/note.rs",
+      "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+      "compiler/rustc_hir_analysis/src/astconv/bounds.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "RPITIT associated opaque item lacks a stable item name/DefPath naming support",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "item_name",
+              "file": "compiler/rustc_middle/src/ty/mod.rs",
+              "content": "pub fn item_name(self, id: DefId) -> Symbol {\n        self.opt_item_name(id).unwrap_or_else(|| {\n            bug!(\"item_name: no name for {:?}\", self.def_path(id));\n        })\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Lifetime error reporting for associated type bounds calls item_name on impl_item_def_id without handling unnamed ImplTraitAssocTy",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "report_concrete_failure",
+              "file": "compiler/rustc_infer/src/infer/error_reporting/note.rs",
+              "content": "pub(super) fn report_concrete_failure(\n        &self,\n        origin: SubregionOrigin<'tcx>,\n        sub: Region<'tcx>,\n        sup: Region<'tcx>,\n    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {\n        let mut err = match origin {\n            infer::Subtype(box trace) => {\n                let terr = TypeError::RegionsDoesNotOutlive(sup, sub);\n                let mut err = self.report_and_explain_type_error(trace, terr);\n                match (*sub, *sup) {\n                    (ty::RePlaceholder(_), ty::RePlaceholder(_)) => {}\n                    (ty::RePlaceholder(_), _) => {\n                        note_and_explain_region(\n                            self.tcx,\n                            &mut err,\n                            \"\",\n                            sup,\n                            \" doesn't meet the lifetime requirements\",\n                            None,\n                        );\n                    }\n                    (_, ty::RePlaceholder(_)) => {\n                        note_and_explain_region(\n                            self.tcx,\n                            &mut err,\n                            \"the required lifetime does not necessarily outlive \",\n                            sub,\n                            \"\",\n                            None,\n                        );\n                    }\n                    _ => {\n                        note_and_explain_region(self.tcx, &mut err, \"\", sup, \"...\", None);\n                        note_and_explain_region(\n                            self.tcx,\n                            &mut err,\n                            \"...does not necessarily outlive \",\n                            sub,\n                            \"\",\n                            None,\n                        );\n                    }\n                }\n                err\n            }\n            infer::Reborrow(span) => {\n                let reference_valid = note_and_explain::RegionExplanation::new(\n                    self.tcx,\n                    sub,\n                    None,\n                    note_and_explain::PrefixKind::RefValidFor,\n                    note_and_explain::SuffixKind::Continues,\n                );\n                let content_valid = note_and_explain::RegionExplanation::new(\n                    self.tcx,\n                    sup,\n                    None,\n                    note_and_explain::PrefixKind::ContentValidFor,\n                    note_and_explain::SuffixKind::Empty,\n                );\n                OutlivesContent {\n                    span,\n                    notes: reference_valid.into_iter().chain(content_valid).collect(),\n                }\n                .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\n            }\n            infer::RelateObjectBound(span) => {\n                let object_valid = note_and_explain::RegionExplanation::new(\n                    self.tcx,\n                    sub,\n                    None,\n                    note_and_explain::PrefixKind::TypeObjValidFor,\n                    note_and_explain::SuffixKind::Empty,\n                );\n                let pointer_valid = note_and_explain::RegionExplanation::new(\n                    self.tcx,\n                    sup,\n                    None,\n                    note_and_explain::PrefixKind::SourcePointerValidFor,\n                    note_and_explain::SuffixKind::Empty,\n                );\n                OutlivesBound {\n                    span,\n                    notes: object_valid.into_iter().chain(pointer_valid).collect(),\n                }\n                .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\n            }\n            infer::RelateParamBound(span, ty, opt_span) => {\n                let prefix = match *sub {\n                    ty::ReStatic => note_and_explain::PrefixKind::TypeSatisfy,\n                    _ => note_and_explain::PrefixKind::TypeOutlive,\n                };\n                let suffix = if opt_span.is_some() {\n                    note_and_explain::SuffixKind::ReqByBinding\n                } else {\n                    note_and_explain::SuffixKind::Empty\n                };\n                let note = note_and_explain::RegionExplanation::new(\n                    self.tcx, sub, opt_span, prefix, suffix,\n                );\n                FulfillReqLifetime { span, ty: self.resolve_vars_if_possible(ty), note }\n                    .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\n            }\n            infer::RelateRegionParamBound(span) => {\n                let param_instantiated = note_and_explain::RegionExplanation::new(\n                    self.tcx,\n                    sup,\n                    None,\n                    note_and_explain::PrefixKind::LfParamInstantiatedWith,\n                    note_and_explain::SuffixKind::Empty,\n                );\n                let param_must_outlive = note_and_explain::RegionExplanation::new(\n                    self.tcx,\n                    sub,\n                    None,\n                    note_and_explain::PrefixKind::LfParamMustOutlive,\n                    note_and_explain::SuffixKind::Empty,\n                );\n                LfBoundNotSatisfied {\n                    span,\n                    notes: param_instantiated.into_iter().chain(param_must_outlive).collect(),\n                }\n                .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\n            }\n            infer::ReferenceOutlivesReferent(ty, span) => {\n                let pointer_valid = note_and_explain::RegionExplanation::new(\n                    self.tcx,\n                    sub,\n                    None,\n                    note_and_explain::PrefixKind::PointerValidFor,\n                    note_and_explain::SuffixKind::Empty,\n                );\n                let data_valid = note_and_explain::RegionExplanation::new(\n                    self.tcx,\n                    sup,\n                    None,\n                    note_and_explain::PrefixKind::DataValidFor,\n                    note_and_explain::SuffixKind::Empty,\n                );\n                RefLongerThanData {\n                    span,\n                    ty: self.resolve_vars_if_possible(ty),\n                    notes: pointer_valid.into_iter().chain(data_valid).collect(),\n                }\n                .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\n            }\n            infer::CompareImplItemObligation { span, impl_item_def_id, trait_item_def_id } => {\n                let mut err = self.report_extra_impl_obligation(\n                    span,\n                    impl_item_def_id,\n                    trait_item_def_id,\n                    &format!(\"`{}: {}`\", sup, sub),\n                );\n                // We should only suggest rewriting the `where` clause if the predicate is within that `where` clause\n                if let Some(generics) = self.tcx.hir().get_generics(impl_item_def_id)\n                    && generics.where_clause_span.contains(span)\n                {\n                    self.suggest_copy_trait_method_bounds(\n                        trait_item_def_id,\n                        impl_item_def_id,\n                        &mut err,\n                    );\n                }\n                err\n            }\n            infer::CheckAssociatedTypeBounds { impl_item_def_id, trait_item_def_id, parent } => {\n                let mut err = self.report_concrete_failure(*parent, sub, sup);\n                let trait_item_span = self.tcx.def_span(trait_item_def_id);\n                let item_name = self.tcx.item_name(impl_item_def_id.to_def_id());\n                err.span_label(\n                    trait_item_span,\n                    format!(\"definition of `{}` from trait\", item_name),\n                );\n                self.suggest_copy_trait_method_bounds(\n                    trait_item_def_id,\n                    impl_item_def_id,\n                    &mut err,\n                );\n                err\n            }\n            infer::AscribeUserTypeProvePredicate(span) => {\n                let instantiated = note_and_explain::RegionExplanation::new(\n                    self.tcx,\n                    sup,\n                    None,\n                    note_and_explain::PrefixKind::LfInstantiatedWith,\n                    note_and_explain::SuffixKind::Empty,\n                );\n                let must_outlive = note_and_explain::RegionExplanation::new(\n                    self.tcx,\n                    sub,\n                    None,\n                    note_and_explain::PrefixKind::LfMustOutlive,\n                    note_and_explain::SuffixKind::Empty,\n                );\n                LfBoundNotSatisfied {\n                    span,\n                    notes: instantiated.into_iter().chain(must_outlive).collect(),\n                }\n                .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)\n            }\n        };\n        if sub.is_error() || sup.is_error() {\n            err.delay_as_bug();\n        }\n        err\n    }"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "check_type_bounds triggers region resolution and associated type bound diagnostics for invalid lifetimes in RPITIT context",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "check_type_bounds",
+              "file": "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+              "content": "pub(super) fn check_type_bounds<'tcx>(\n    tcx: TyCtxt<'tcx>,\n    trait_ty: ty::AssocItem,\n    impl_ty: ty::AssocItem,\n    impl_trait_ref: ty::TraitRef<'tcx>,\n) -> Result<(), ErrorGuaranteed> {\n    let param_env = tcx.param_env(impl_ty.def_id);\n    let container_id = impl_ty.container_id(tcx);\n    // Given\n    //\n    // impl<A, B> Foo<u32> for (A, B) {\n    //     type Bar<C> = Wrapper<A, B, C>\n    // }\n    //\n    // - `impl_trait_ref` would be `<(A, B) as Foo<u32>>`\n    // - `normalize_impl_ty_args` would be `[A, B, ^0.0]` (`^0.0` here is the bound var with db 0 and index 0)\n    // - `normalize_impl_ty` would be `Wrapper<A, B, ^0.0>`\n    // - `rebased_args` would be `[(A, B), u32, ^0.0]`, combining the args from\n    //    the *trait* with the generic associated type parameters (as bound vars).\n    //\n    // A note regarding the use of bound vars here:\n    // Imagine as an example\n    // ```\n    // trait Family {\n    //     type Member<C: Eq>;\n    // }\n    //\n    // impl Family for VecFamily {\n    //     type Member<C: Eq> = i32;\n    // }\n    // ```\n    // Here, we would generate\n    // ```notrust\n    // forall<C> { Normalize(<VecFamily as Family>::Member<C> => i32) }\n    // ```\n    // when we really would like to generate\n    // ```notrust\n    // forall<C> { Normalize(<VecFamily as Family>::Member<C> => i32) :- Implemented(C: Eq) }\n    // ```\n    // But, this is probably fine, because although the first clause can be used with types C that\n    // do not implement Eq, for it to cause some kind of problem, there would have to be a\n    // VecFamily::Member<X> for some type X where !(X: Eq), that appears in the value of type\n    // Member<C: Eq> = .... That type would fail a well-formedness check that we ought to be doing\n    // elsewhere, which would check that any <T as Family>::Member<X> meets the bounds declared in\n    // the trait (notably, that X: Eq and T: Family).\n    let mut bound_vars: smallvec::SmallVec<[ty::BoundVariableKind; 8]> =\n        smallvec::SmallVec::with_capacity(tcx.generics_of(impl_ty.def_id).params.len());\n    // Extend the impl's identity args with late-bound GAT vars\n    let normalize_impl_ty_args = ty::GenericArgs::identity_for_item(tcx, container_id).extend_to(\n        tcx,\n        impl_ty.def_id,\n        |param, _| match param.kind {\n            GenericParamDefKind::Type { .. } => {\n                let kind = ty::BoundTyKind::Param(param.def_id, param.name);\n                let bound_var = ty::BoundVariableKind::Ty(kind);\n                bound_vars.push(bound_var);\n                Ty::new_bound(\n                    tcx,\n                    ty::INNERMOST,\n                    ty::BoundTy { var: ty::BoundVar::from_usize(bound_vars.len() - 1), kind },\n                )\n                .into()\n            }\n            GenericParamDefKind::Lifetime => {\n                let kind = ty::BoundRegionKind::BrNamed(param.def_id, param.name);\n                let bound_var = ty::BoundVariableKind::Region(kind);\n                bound_vars.push(bound_var);\n                ty::Region::new_late_bound(\n                    tcx,\n                    ty::INNERMOST,\n                    ty::BoundRegion { var: ty::BoundVar::from_usize(bound_vars.len() - 1), kind },\n                )\n                .into()\n            }\n            GenericParamDefKind::Const { .. } => {\n                let bound_var = ty::BoundVariableKind::Const;\n                bound_vars.push(bound_var);\n                ty::Const::new_bound(\n                    tcx,\n                    ty::INNERMOST,\n                    ty::BoundVar::from_usize(bound_vars.len() - 1),\n                    tcx.type_of(param.def_id)\n                        .no_bound_vars()\n                        .expect(\"const parameter types cannot be generic\"),\n                )\n                .into()\n            }\n        },\n    );\n    // When checking something like\n    //\n    // trait X { type Y: PartialEq<<Self as X>::Y> }\n    // impl X for T { default type Y = S; }\n    //\n    // We will have to prove the bound S: PartialEq<<T as X>::Y>. In this case\n    // we want <T as X>::Y to normalize to S. This is valid because we are\n    // checking the default value specifically here. Add this equality to the\n    // ParamEnv for normalization specifically.\n    let normalize_impl_ty = tcx.type_of(impl_ty.def_id).instantiate(tcx, normalize_impl_ty_args);\n    let rebased_args = normalize_impl_ty_args.rebase_onto(tcx, container_id, impl_trait_ref.args);\n    let bound_vars = tcx.mk_bound_variable_kinds(&bound_vars);\n    let normalize_param_env = {\n        let mut predicates = param_env.caller_bounds().iter().collect::<Vec<_>>();\n        match normalize_impl_ty.kind() {\n            ty::Alias(ty::Projection, proj)\n                if proj.def_id == trait_ty.def_id && proj.args == rebased_args =>\n            {\n                // Don't include this predicate if the projected type is\n                // exactly the same as the projection. This can occur in\n                // (somewhat dubious) code like this:\n                //\n                // impl<T> X for T where T: X { type Y = <T as X>::Y; }\n            }\n            _ => predicates.push(\n                ty::Binder::bind_with_vars(\n                    ty::ProjectionPredicate {\n                        projection_ty: tcx.mk_alias_ty(trait_ty.def_id, rebased_args),\n                        term: normalize_impl_ty.into(),\n                    },\n                    bound_vars,\n                )\n                .to_predicate(tcx),\n            ),\n        };\n        ty::ParamEnv::new(tcx.mk_clauses(&predicates), Reveal::UserFacing, param_env.constness())\n    };\n    debug!(?normalize_param_env);\n\n    let impl_ty_def_id = impl_ty.def_id.expect_local();\n    let impl_ty_args = GenericArgs::identity_for_item(tcx, impl_ty.def_id);\n    let rebased_args = impl_ty_args.rebase_onto(tcx, container_id, impl_trait_ref.args);\n\n    let infcx = tcx.infer_ctxt().build();\n    let ocx = ObligationCtxt::new(&infcx);\n\n    // A synthetic impl Trait for RPITIT desugaring has no HIR, which we currently use to get the\n    // span for an impl's associated type. Instead, for these, use the def_span for the synthesized\n    // associated type.\n    let impl_ty_span = if impl_ty.is_impl_trait_in_trait() {\n        tcx.def_span(impl_ty_def_id)\n    } else {\n        match tcx.hir().get_by_def_id(impl_ty_def_id) {\n            hir::Node::TraitItem(hir::TraitItem {\n                kind: hir::TraitItemKind::Type(_, Some(ty)),\n                ..\n            }) => ty.span,\n            hir::Node::ImplItem(hir::ImplItem { kind: hir::ImplItemKind::Type(ty), .. }) => ty.span,\n            _ => bug!(),\n        }\n    };\n    let assumed_wf_types = ocx.assumed_wf_types_and_report_errors(param_env, impl_ty_def_id)?;\n\n    let normalize_cause = ObligationCause::new(\n        impl_ty_span,\n        impl_ty_def_id,\n        ObligationCauseCode::CheckAssociatedTypeBounds {\n            impl_item_def_id: impl_ty.def_id.expect_local(),\n            trait_item_def_id: trait_ty.def_id,\n        },\n    );\n    let mk_cause = |span: Span| {\n        let code = if span.is_dummy() {\n            traits::ItemObligation(trait_ty.def_id)\n        } else {\n            traits::BindingObligation(trait_ty.def_id, span)\n        };\n        ObligationCause::new(impl_ty_span, impl_ty_def_id, code)\n    };\n\n    let obligations: Vec<_> = tcx\n        .explicit_item_bounds(trait_ty.def_id)\n        .arg_iter_copied(tcx, rebased_args)\n        .map(|(concrete_ty_bound, span)| {\n            debug!(\"check_type_bounds: concrete_ty_bound = {:?}\", concrete_ty_bound);\n            traits::Obligation::new(tcx, mk_cause(span), param_env, concrete_ty_bound)\n        })\n        .collect();\n    debug!(\"check_type_bounds: item_bounds={:?}\", obligations);\n\n    for mut obligation in util::elaborate(tcx, obligations) {\n        let normalized_predicate =\n            ocx.normalize(&normalize_cause, normalize_param_env, obligation.predicate);\n        debug!(\"compare_projection_bounds: normalized predicate = {:?}\", normalized_predicate);\n        obligation.predicate = normalized_predicate;\n\n        ocx.register_obligation(obligation);\n    }\n    // Check that all obligations are satisfied by the implementation's\n    // version.\n    let errors = ocx.select_all_or_error();\n    if !errors.is_empty() {\n        let reported = infcx.err_ctxt().report_fulfillment_errors(&errors);\n        return Err(reported);\n    }\n\n    // Finally, resolve all regions. This catches wily misuses of\n    // lifetime parameters.\n    let implied_bounds = infcx.implied_bounds_tys(param_env, impl_ty_def_id, assumed_wf_types);\n    let outlives_env = OutlivesEnvironment::with_bounds(param_env, implied_bounds);\n    ocx.resolve_regions_and_report_errors(impl_ty_def_id, &outlives_env)\n}"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Undeclared lifetime 'a in trait method RPITIT causes region/bound failure path to be exercised",
+          "code_elements": [
+            {
+              "type": "FILE",
+              "name": "bounds.rs",
+              "file": "compiler/rustc_hir_analysis/src/astconv/bounds.rs",
+              "content": "bounds.rs"
+            }
+          ]
+        },
+        {
+          "id": "E",
+          "name": "Nightly return_position_impl_trait_in_trait feature introduces ImplTraitAssocTy in trait items, exposing unsupported diagnostic path",
+          "code_elements": [
+            {
+              "type": "PACKAGE",
+              "name": "check",
+              "file": "compiler/rustc_hir_analysis/src/check",
+              "content": "check"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.98
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.98
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.93
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.83
+        },
+        {
+          "source": "E",
+          "target": "I",
+          "weight": 0.78
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 1892.679,
+    "stage_times_sec": {
+      "load_bug_context": 0.019,
+      "checkout": 3.248,
+      "load_or_build_graph": 32.269,
+      "symptom_vertices_locating": 1815.641,
+      "dynamic_cig_discovering": 39.453,
+      "convert_results": 0.07
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 13,
+      "input_tokens": 173636,
+      "output_tokens": 1666,
+      "total_tokens": 175302,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.547,
+          "input_tokens": 6561,
+          "output_tokens": 126,
+          "total_tokens": 6687
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.938,
+          "input_tokens": 6903,
+          "output_tokens": 63,
+          "total_tokens": 6966
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.98,
+          "input_tokens": 5901,
+          "output_tokens": 17,
+          "total_tokens": 5918
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.573,
+          "input_tokens": 6980,
+          "output_tokens": 64,
+          "total_tokens": 7044
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.893,
+          "input_tokens": 7935,
+          "output_tokens": 79,
+          "total_tokens": 8014
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.649,
+          "input_tokens": 9253,
+          "output_tokens": 59,
+          "total_tokens": 9312
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.456,
+          "input_tokens": 5904,
+          "output_tokens": 18,
+          "total_tokens": 5922
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 5.405,
+          "input_tokens": 8369,
+          "output_tokens": 209,
+          "total_tokens": 8578
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 6.587,
+          "input_tokens": 65105,
+          "output_tokens": 207,
+          "total_tokens": 65312
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 6.213,
+          "input_tokens": 15863,
+          "output_tokens": 207,
+          "total_tokens": 16070
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 5.347,
+          "input_tokens": 19532,
+          "output_tokens": 206,
+          "total_tokens": 19738
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 3.911,
+          "input_tokens": 7754,
+          "output_tokens": 205,
+          "total_tokens": 7959
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 11.932,
+          "input_tokens": 7576,
+          "output_tokens": 206,
+          "total_tokens": 7782
+        }
+      ]
+    }
+  }
+}

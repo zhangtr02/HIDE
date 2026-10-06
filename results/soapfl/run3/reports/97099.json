@@ -1,0 +1,231 @@
+{
+  "bug_id": "97099",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-05-15",
+    "resolved": "70b3681bf621bc0de91ffab711b2350068b4c466"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_typeck/src/collect/type_of.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_borrowck/src/type_check/canonical.rs",
+    "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+    "compiler/rustc_infer/src/traits/project.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with a lifetime parameter and an associated type, exercising generic associated-type equality through `Assoc`.",
+        "Implements the trait for `Struct`, setting `Assoc = &'a u32`, so the associated type depends on the higher-ranked lifetime.",
+        "Uses return-position `impl Trait` in `blah`, returning an opaque concrete type instead of naming `Struct` directly.",
+        "Adds a higher-ranked trait bound `for<'a> Trait<'a, ...>` on the opaque return type, requiring the returned type to implement the trait for all lifetimes.",
+        "Constrains the associated type inside the HRTB with `Assoc = impl Sized`, nesting an opaque associated-type equality inside another opaque return type.",
+        "Exercises nightly handling of opaque types, lifetime binders, and normalization/unification of associated type equalities under `for<'a>` binders.",
+        "Checks whether the compiler can relate the hidden concrete associated type `&'a u32` to the nested opaque `impl Sized` across all lifetimes.",
+        "`main` is empty; the reproducer isolates type checking and trait solving behavior rather than runtime execution."
+      ],
+      "summary": "The reproducer targets rustc’s type system around nested `impl Trait`. `blah` returns an opaque type required to implement `Trait<'a>` for every lifetime, while also hiding the associated type behind `Assoc = impl Sized`. Since `Struct` actually uses `Assoc = &'a u32`, this stresses higher-ranked trait bounds, associated type equality, opaque type inference, and normalization under lifetime binders."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on rustc type checking an RPIT (`fn blah() -> impl ...`) whose bounds include both a higher-ranked trait bound (`for<'a> Trait<'a>`) and an associated-type equality where the associated type itself is another opaque type (`Assoc = impl Sized`). The concrete impl for `Struct` makes `Assoc` lifetime-dependent (`&'a u32`), so the compiler must reason under a binder and relate a family of associated types indexed by `'a` to a nested opaque type. The query stack shows the ICE occurs while borrow-checking `blah`, after `type_of` for the opaque return type is being computed, which strongly suggests the panic is not due to user-code borrow errors but due to compiler internal handling of opaque type revelation/normalization during MIR type checking. The common theme across behavior, output, and stack is an interaction bug between nested opaque types, HRTB binders, and associated type equality normalization/inference. A likely defect is that rustc incorrectly instantiates or equates the nested `impl Sized` inside `Assoc = ...` across `for<'a>` binders, possibly losing binder structure, creating an invalid opaque type key, or assuming a non-higher-ranked associated type when computing the hidden type of the outer opaque. Because the panic arises in `mir_borrowck` while computing `type_of` for the opaque, the production bug is likely in compiler code that lowers, reveals, or checks RPIT/opaque types with higher-ranked associated type obligations rather than in parsing or user code.",
+      "possible_causes": [
+        "Bug in opaque type (`impl Trait`) handling for nested RPIT inside associated-type equality constraints, especially when computing the hidden type of the outer opaque return type.",
+        "Incorrect normalization or projection of `Trait<'a>::Assoc` under a `for<'a>` binder, causing rustc to mishandle lifetime-bound associated types like `&'a u32` when matching against `Assoc = impl Sized`.",
+        "Failure in trait solver / fulfillment code to preserve higher-ranked binders while equating an associated type family with a nested opaque type, leading to an invalid assumption or panic later in MIR borrow checking.",
+        "Defect in `type_of` / opaque type key generation or instantiation for return-position opaque types that appear inside another opaque bound, potentially producing a malformed hidden type under HRTB.",
+        "Compiler bug in borrow-check/type-check interaction where MIR borrowck forces revelation of an opaque type whose defining use contains higher-ranked associated type equality, triggering an unexpected internal state instead of a normal type error.",
+        "Missing validation or unsupported-case handling in rustc for `for<'a> Trait<'a, Assoc = impl Sized>` syntax/semantics, where the compiler reaches an ICE instead of rejecting or correctly solving the nested opaque associated type constraint."
+      ],
+      "evidence": [
+        "Reproducer uses an outer return-position `impl Trait` plus an inner `Assoc = impl Sized`, i.e. nested opaque types.",
+        "Trait implementation makes the associated type depend on the quantified lifetime: `type Assoc = &'a u32;`.",
+        "The bound is higher-ranked: `for<'a> Trait<'a, Assoc = ...>`, so the compiler must reason about associated type equality under binders.",
+        "Behavior summary explicitly stresses opaque types, lifetime binders, and normalization/unification of associated type equalities under `for<'a>`.",
+        "Query stack shows `#0 [mir_borrowck] borrow-checking 'blah'` and `#1 [type_of] computing type of 'blah::{opaque#0}'`, indicating the ICE happens during internal computation of the opaque return type rather than runtime or macro expansion.",
+        "Compiler output is `internal compiler error: unexpected panic`, confirming a compiler-side defect rather than a user-facing type error.",
+        "`main` is empty, isolating the crash to compilation of `blah` and its type obligations."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1426,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Most suspicious because the ICE happens in `mir_borrowck` while computing `type_of` for `blah::{opaque#0}`, and this file is exactly where borrowck turns collected opaque type instantiations into final hidden types. The reproducer stresses opaque hidden-type inference under higher-ranked lifetimes and nested `impl Trait`, which matches this file’s region remapping and opaque canonicalization responsibilities."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/opaque_types.rs",
+        "reason": "Highly suspicious because it reconstructs an opaque type’s defining hidden type from an instantiation, including remapping generic arguments/regions back to the opaque’s definition site. That is precisely the kind of logic likely to fail for `for<'a> Trait<'a, Assoc = impl Sized>` where the associated type depends on the bound lifetime and is hidden behind another opaque."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Central inference-layer handling for opaque types. The bug involves nested RPIT/opaque types and likely malformed opaque-type inference state or instantiation when replacing opaques with inference vars and generating obligations, especially under HRTB binders."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/collect/type_of.rs",
+        "reason": "The query stack explicitly includes `type_of` for the opaque return type. This file computes declared types for items and contains opaque-type-related collection logic, so it is a strong candidate for mishandling the outer RPIT or the nested `Assoc = impl Sized` form before borrowck later trips over the bad state."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The reproducer depends on normalizing and equating the associated type projection `Trait<'a>::Assoc` under a `for<'a>` binder. This file implements projection and normalization of associated types during trait solving, making it a strong candidate for bugs involving binder-sensitive associated type equality with nested opaques."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "Normalization across escaping bound variables is explicitly relevant here: the test combines HRTB binders, associated type equality, and nested opaque types. This file’s query normalization logic mentions handling escaping bound vars and recursive normalization, which is a likely failure point."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "The core semantic stressor is `for<'a>`. If the compiler incorrectly instantiates placeholders/fresh vars or loses binder structure while comparing higher-ranked obligations involving opaque/projection types, this file would be implicated."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/canonical.rs",
+        "reason": "Borrowck invokes inference-heavy type operations and trait proving through this layer. Since the ICE arises during MIR borrow checking and likely involves canonicalized normalization/proving of binder-heavy obligations for the opaque return type, this file is a plausible bridge where invalid state is produced or mishandled."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+        "reason": "Borrowck type relation code may be the first place that tries to equate the hidden type family `&'a u32` with the nested opaque `impl Sized` across all lifetimes. Given the MIR-borrowck query origin, relating binder-sensitive types here is plausibly involved."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "Inference-layer projection support is another plausible source if deferred or cached associated-type normalization under binders interacts badly with nested opaque types. It is slightly less direct than the trait-selection projection code but still closely matches the failure shape."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 137.049,
+    "stage_times_sec": {
+      "checkout": 2.648,
+      "load_bug_context": 0.025,
+      "test_behavior_analysis": 5.503,
+      "test_failure_analysis": 13.412,
+      "load_file_candidates": 0.074,
+      "search_suspicious_files": 115.387
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 342975,
+      "output_tokens": 6219,
+      "total_tokens": 349194,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.502,
+          "input_tokens": 392,
+          "output_tokens": 318,
+          "total_tokens": 710
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.412,
+          "input_tokens": 2185,
+          "output_tokens": 800,
+          "total_tokens": 2985
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.757,
+          "input_tokens": 27989,
+          "output_tokens": 367,
+          "total_tokens": 28356
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.661,
+          "input_tokens": 27591,
+          "output_tokens": 318,
+          "total_tokens": 27909
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 10.766,
+          "input_tokens": 27751,
+          "output_tokens": 312,
+          "total_tokens": 28063
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.296,
+          "input_tokens": 27765,
+          "output_tokens": 378,
+          "total_tokens": 28143
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.865,
+          "input_tokens": 27814,
+          "output_tokens": 443,
+          "total_tokens": 28257
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.765,
+          "input_tokens": 27808,
+          "output_tokens": 342,
+          "total_tokens": 28150
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.499,
+          "input_tokens": 27818,
+          "output_tokens": 423,
+          "total_tokens": 28241
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.969,
+          "input_tokens": 27505,
+          "output_tokens": 345,
+          "total_tokens": 27850
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.322,
+          "input_tokens": 27091,
+          "output_tokens": 369,
+          "total_tokens": 27460
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.348,
+          "input_tokens": 27612,
+          "output_tokens": 323,
+          "total_tokens": 27935
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.249,
+          "input_tokens": 27540,
+          "output_tokens": 362,
+          "total_tokens": 27902
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.879,
+          "input_tokens": 25002,
+          "output_tokens": 339,
+          "total_tokens": 25341
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.948,
+          "input_tokens": 11112,
+          "output_tokens": 780,
+          "total_tokens": 11892
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,252 @@
+{
+  "bug_id": "125843",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-05-31",
+    "resolved": "6f3df08aadf71e8d4bf7e49f5dc10dfa6f254cb4"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+    "compiler/rustc_ast_lowering/src/lib.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+    "compiler/rustc_parse/src/parser/ty.rs",
+    "compiler/rustc_parse/src/parser/generics.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_middle/src/middle/resolve_bound_vars.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables unstable `non_lifetime_binders`, allowing `for<...>` binders over non-lifetime generic parameters in type positions.",
+        "Defines a trait using unusual generic syntax (`trait v0<> {}`), stressing parser and generic-parameter handling.",
+        "Declares a function parameter with `impl Trait`, exercising opaque parameter type lowering.",
+        "Uses a higher-ranked binder `for<v4>` inside `impl Trait`, testing HRTB-like quantification over a non-lifetime parameter.",
+        "Combines placeholder lifetime `'_` in trait arguments with the non-lifetime binder, stressing inference and region handling.",
+        "Uses an associated-type equality constraint (`v2 = ...`) inside the trait object-like bound, testing bound parsing and projection/equality handling.",
+        "Nests `impl Trait` inside another `impl Trait` bound (`impl v0<v4> + '_`), stressing opaque-type nesting and normalization.",
+        "The file has no runtime behavior; it is a compile-only reproducer targeting parser, name resolution, and trait-bound/type-checking paths."
+      ],
+      "summary": "This reproducer is a minimal compile-time test for nightly-only generic binder syntax. It mixes `non_lifetime_binders`, higher-ranked non-lifetime quantification, placeholder lifetimes, nested `impl Trait`, and an associated-type equality bound inside a function parameter. The goal is to stress parsing and type-checking around opaque types and unusual trait-bound syntax rather than runtime execution."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is that the reproducer combines several still-unstable and edge-case type-system features in a single function parameter type: `impl Trait`, nested opaque types, `for<...>` binders enabled by `non_lifetime_binders`, placeholder lifetime `'_`, and an associated-item equality constraint. The crash does not happen in codegen or runtime; it happens during semantic analysis, specifically while rustc is computing well-formedness for an opaque type created from nested `impl Trait`. The query stack shows the ICE arises in bound-variable resolution (`resolve_bound_vars` / `late_bound_vars_map`) when processing `kind::{opaque#0}::{opaque#0}`. This strongly suggests the compiler incorrectly lowers or tracks bound variables for nested opaque types that appear under a non-lifetime binder, especially when mixed with invalid generic arguments and `'_` elision placeholders. In other words, error recovery for malformed generic/bound syntax appears to leave the HIR/Ty representation of the opaque type in an inconsistent state, and later well-formedness checking assumes only lifetime late-bound vars or otherwise well-formed binder contents. The likely defect is therefore in compiler handling of late-bound variable collection/lowering for nested `impl Trait` under `for<non-lifetime-param>` binders, not in the reproducer itself.",
+      "possible_causes": [
+        "Bug in `rustc_resolve`/bound-var resolution where `resolve_bound_vars` mishandles `for<...>` binders introduced by `non_lifetime_binders` when they occur inside nested `impl Trait` bounds, producing an inconsistent late-bound-vars map.",
+        "Bug in HIR lowering or AST validation for malformed generic/bound syntax that still creates opaque types (`kind::{opaque#0}::{opaque#0}`) whose binder information is incomplete or invalid, later triggering an ICE during WF checking instead of graceful diagnostics.",
+        "Bug in opaque type lowering/checking (`impl Trait` in argument position, especially nested `impl Trait`) where binders from the outer trait bound are not correctly propagated into the inner opaque type.",
+        "Compiler assumption in late-bound variable handling that only lifetime binders appear in this path; `non_lifetime_binders` violates that assumption and causes a panic while resolving or indexing bound vars.",
+        "Defect in error-recovery interaction between associated-type equality constraints/projection bounds and higher-ranked non-lifetime binders, leading to malformed item bounds for the synthesized opaque type.",
+        "Bug in well-formedness checking of synthesized opaque types, where `explicit_item_bounds` / `check_well_formed` re-enters bound-var resolution on an already erroneous type and hits an internal invariant violation instead of short-circuiting after earlier parse/type errors."
+      ],
+      "evidence": [
+        "Query stack pinpoints the failure in `resolve_bound_vars` and `late_bound_vars_map`, not runtime or code generation.",
+        "The failing item is `kind::{opaque#0}::{opaque#0}`, showing nested opaque types are central to the ICE.",
+        "The reproducer explicitly uses nested `impl Trait` (`impl for<v4> ... v2 = impl v0<v4> + '_'`), which forces synthesis of opaque types inside another opaque context.",
+        "Feature gate `non_lifetime_binders` is enabled and the code uses `for<v4>`, so the crash path likely involves newer binder-handling logic for non-lifetime parameters.",
+        "Behavior summary stresses unusual combinations: placeholder lifetime `'_`, higher-ranked non-lifetime binder, associated-type equality constraint, and nested opaque types; these all converge on bound resolution and WF checking.",
+        "Compiler already emitted normal user-facing errors (E0106, E0107, E0220, E0412), which suggests the ICE occurs during analysis after error recovery, indicating a compiler robustness bug in handling invalid-yet-recoverable syntax/types.",
+        "`check_well_formed` and `explicit_item_bounds` in the query stack indicate the compiler is computing bounds for an opaque item and crashes while examining its bound variables, consistent with defective binder/opaque-type lowering."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1785,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "Most suspicious because the query stack explicitly panics in `resolve_bound_vars` / `late_bound_vars_map` while resolving lifetimes for a nested opaque type. The reproducer uses `non_lifetime_binders`, nested `impl Trait`, and `'_`, exactly the sort of bound-variable bookkeeping this file performs."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+        "reason": "Very likely involved because the bad state may originate when lowering the unusual `impl for<v4> ...` bound structure into `ty` for synthesized opaque types. Incorrect propagation of non-lifetime binders or nested opaque binder scopes here would later crash bound-var resolution."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/lib.rs",
+        "reason": "AST-to-HIR lowering is a plausible source if malformed-but-recoverable syntax with nested `impl Trait` and `for<...>` binders is lowered into HIR with inconsistent binder ownership or opaque-type structure, later triggering the ICE during analysis."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The ICE occurs during `check_well_formed` for `kind::{opaque#0}::{opaque#0}`. This file drives WF checking and may be re-entering bound-var resolution on erroneous nested opaque types without properly short-circuiting after earlier errors."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+        "reason": "The query stack includes `explicit_item_bounds` for the synthesized opaque item. This file computes item bounds and is a likely place where malformed nested opaque bounds involving associated-type equality and non-lifetime binders are assembled incorrectly."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/ty.rs",
+        "reason": "The reproducer intentionally stresses exotic type syntax. If parser recovery for `impl Trait`, placeholder lifetimes, and associated-type equality inside bounds mis-shapes the AST, later lowering and bound-var resolution could ICE instead of emitting only diagnostics."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/generics.rs",
+        "reason": "`for<v4>` under `#![feature(non_lifetime_binders)]` directly exercises generic-binder parsing. A recovery or feature-gated parsing bug here could create invalid generic parameter kinds that downstream bound-var logic does not expect."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "AST validation is a plausible robustness gap: invalid combinations of nested `impl Trait`, non-lifetime binders, and equality constraints may be insufficiently rejected here, allowing inconsistent AST/HIR to reach WF checking and bound-var collection."
+      },
+      {
+        "path": "compiler/rustc_middle/src/middle/resolve_bound_vars.rs",
+        "reason": "Less likely than the analysis-layer resolver, but this file defines the data structures for resolved bound vars and late-bound argument tracking. If assumptions here still effectively model only lifetimes in some paths, `non_lifetime_binders` could expose the bug."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Nested opaque types are central (`kind::{opaque#0}::{opaque#0}`). If generic-argument remapping for opaques mishandles binders or captured arguments under non-lifetime binders, it could produce the inconsistent state later observed in bound-var resolution and WF checks."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 150.796,
+    "stage_times_sec": {
+      "checkout": 9.066,
+      "load_bug_context": 0.226,
+      "test_behavior_analysis": 6.103,
+      "test_failure_analysis": 13.104,
+      "load_file_candidates": 0.114,
+      "search_suspicious_files": 122.182
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 429599,
+      "output_tokens": 7145,
+      "total_tokens": 436744,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.103,
+          "input_tokens": 342,
+          "output_tokens": 297,
+          "total_tokens": 639
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.104,
+          "input_tokens": 2140,
+          "output_tokens": 827,
+          "total_tokens": 2967
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.412,
+          "input_tokens": 27947,
+          "output_tokens": 374,
+          "total_tokens": 28321
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 6.632,
+          "input_tokens": 27866,
+          "output_tokens": 316,
+          "total_tokens": 28182
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.057,
+          "input_tokens": 27453,
+          "output_tokens": 374,
+          "total_tokens": 27827
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.322,
+          "input_tokens": 27748,
+          "output_tokens": 351,
+          "total_tokens": 28099
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.236,
+          "input_tokens": 27670,
+          "output_tokens": 405,
+          "total_tokens": 28075
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.491,
+          "input_tokens": 28000,
+          "output_tokens": 380,
+          "total_tokens": 28380
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.601,
+          "input_tokens": 27842,
+          "output_tokens": 322,
+          "total_tokens": 28164
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 6.764,
+          "input_tokens": 27786,
+          "output_tokens": 339,
+          "total_tokens": 28125
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.425,
+          "input_tokens": 27884,
+          "output_tokens": 383,
+          "total_tokens": 28267
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.364,
+          "input_tokens": 27637,
+          "output_tokens": 358,
+          "total_tokens": 27995
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.133,
+          "input_tokens": 27845,
+          "output_tokens": 379,
+          "total_tokens": 28224
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.588,
+          "input_tokens": 27852,
+          "output_tokens": 315,
+          "total_tokens": 28167
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.896,
+          "input_tokens": 28102,
+          "output_tokens": 304,
+          "total_tokens": 28406
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.062,
+          "input_tokens": 27921,
+          "output_tokens": 362,
+          "total_tokens": 28283
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.542,
+          "input_tokens": 24835,
+          "output_tokens": 350,
+          "total_tokens": 25185
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.627,
+          "input_tokens": 12729,
+          "output_tokens": 709,
+          "total_tokens": 13438
+        }
+      ]
+    }
+  }
+}

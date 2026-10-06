@@ -1,0 +1,250 @@
+{
+  "bug_id": "121414",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-22",
+    "resolved": "3406ada96f8e16e49e947a91db3eba0db45245fa"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_hir_analysis/src/impl_wf_check.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+    "compiler/rustc_ast_lowering/src/path.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with an associated type, exercising trait item resolution for `<T as Trait>::Assoc` projections.",
+        "Introduces `Foo<'a>` with a lifetime parameter, so the compiler must track region parameters in trait impls and projections.",
+        "The impl `impl<'a> Bar for Foo<'f> {}` intentionally uses an undeclared lifetime `'f`, testing name resolution and lifetime binder validation in impl headers.",
+        "Because the impl omits `type Type = ...`, it also exercises checking that trait impls define all required associated types.",
+        "`test` uses a higher-ranked trait bound: `for<'a> <Foo<'a> as Bar>::Type: Sized`, exercising HRTB lowering and placeholder lifetime handling.",
+        "The where-clause forces normalization/projection of an associated type under a `for<'a>` binder, stressing trait solving and well-formedness checks.",
+        "`Sized` is used as a simple bound on the projected associated type, so the compiler must verify the projection is valid before applying auto trait-like bounds.",
+        "`main` is empty; the reproducer isolates front-end compilation behavior rather than runtime execution."
+      ],
+      "summary": "The reproducer is a compile-only test for trait impl validation and associated-type projection under higher-ranked lifetimes. It defines a trait with an associated type, a lifetime-parameterized struct, and an intentionally malformed impl using an undeclared lifetime and missing associated type definition. A function then projects `<Foo<'a> as Bar>::Type` inside `for<'a> ... : Sized`, exercising HRTB handling, projection normalization, and error reporting in trait solving."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in the compiler's type-checking / well-formedness pipeline while computing the parameter environment for `test`. The reproducer combines three stressors: (1) an invalid impl header with an undeclared lifetime (`Foo<'f>` inside `impl<'a> ...`), (2) an incomplete trait impl missing the required associated type definition, and (3) a higher-ranked bound requiring normalization of the projection `<Foo<'a> as Bar>::Type` under `for<'a>`. The query stack shows the crash occurs in `param_env` while normalizing predicates of `test`, before ordinary error handling finishes. That strongly suggests rustc continues into projection normalization / predicate elaboration using an erroneous impl or malformed trait reference, instead of treating previous errors as tainted and short-circuiting. The common theme is invalid lifetime binding in trait impls interacting with associated type projection under an HRTB, causing the compiler to build or normalize a malformed projection predicate during well-formedness checking.",
+      "possible_causes": [
+        "A defect in `param_env` / predicate normalization where associated type projections under `for<'a>` are normalized even when the relevant trait impl contains prior hard errors (undeclared lifetime and missing associated type), leading to an ICE instead of graceful error propagation.",
+        "Incorrect validation or recovery in impl header lowering for lifetimes: the undeclared lifetime `'f` in `impl<'a> Bar for Foo<'f>` may leave an invalid generic argument or region reference in the trait-ref/self-type, which later crashes normalization or well-formedness code.",
+        "A bug in projection/well-formedness handling for `<Foo<'a> as Bar>::Type` under higher-ranked binders, where placeholder/late-bound lifetime substitution interacts badly with an already-invalid impl and produces an unexpected internal state.",
+        "Missing defensive checks in trait selection / associated item lookup when an impl is both malformed and incomplete; rustc may attempt to resolve `Bar::Type` from an impl that failed validation, hitting an unreachable assumption about associated type definitions.",
+        "Error recovery bug in normalized predicates of functions: `check_well_formed` for `test` likely assumes projected associated types have a valid `ParamEnv` and trait implementation context, but malformed impl generics can violate this assumption and trigger a panic."
+      ],
+      "evidence": [
+        "Query stack pinpoints the ICE at `#0 [param_env] computing normalized predicates of test`, then `check_well_formed`, indicating the crash happens during predicate normalization for the function's where-clause.",
+        "The where-clause is exactly `for<'a> <Foo<'a> as Bar>::Type: Sized`, so the failing path necessarily involves associated type projection plus HRTB/lifetime binder handling.",
+        "The impl header `impl<'a> Bar for Foo<'f> {}` uses undeclared lifetime `'f`, which should produce E0261 and indicates malformed region binding in the impl's self type.",
+        "The impl also omits `type Type = ...`, producing E0046, so the compiler is dealing with an incomplete/invalid trait impl while later normalizing projections of that associated type.",
+        "Compiler output reports ordinary user errors (E0046, E0261) but still ends in an ICE, showing the bug is in compiler recovery/robustness rather than primary diagnosis.",
+        "The reproducer has no runtime behavior and isolates front-end logic around trait impl validation, associated type resolution, and HRTB normalization."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1742,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The query stack explicitly shows the ICE during `param_env` computation while `check_well_formed` is checking `test`. This file drives WF checking, normalizes predicates for item signatures/where-clauses, and is the most direct place where `for<'a> <Foo<'a> as Bar>::Type: Sized` would be normalized despite earlier errors in the impl."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "The crashing path involves normalization of an associated type projection under a higher-ranked binder. This file is the query-based normalization entry point used during type checking and explicitly handles escaping bound vars / skipped universes, making it highly suspicious for an ICE triggered by `for<'a>` projection normalization."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "`<Foo<'a> as Bar>::Type` requires associated-type projection resolution. If rustc is attempting to project through a malformed impl with an undeclared lifetime and missing associated type, candidate gathering or projection error recovery here could be assuming invariants that the invalid impl violates."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "The reproducer stresses late-bound lifetime handling with `for<'a>` plus an impl header containing an undeclared `'f`. This file resolves HIR lifetime references into early/late-bound variables and de Bruijn indices, so a bad recovery around malformed lifetime binding could poison later normalization/WF checks."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The undeclared lifetime `'f` should be diagnosed during late resolution (E0261). If resolver recovery leaves behind an inconsistent lifetime resolution in the impl self type, that malformed state could later crash param-env normalization. This file is therefore a strong suspect on the front-end side of the bug."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/impl_wf_check.rs",
+        "reason": "The impl is malformed in two ways: it uses an undeclared lifetime and omits the required associated type. This file performs early impl WF validation intended to prevent bad impl headers from reaching later trait logic; a missed or incomplete short-circuit here could allow invalid impl data into projection normalization."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The panic happens in `param_env` while computing normalized predicates of `test`. This file constructs generic predicates and can feed the where-clause predicates that later require normalization, so an issue in how binder-wrapped projection predicates are collected or retained after earlier errors is plausible."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "This file generates WF obligations and then normalizes them. Since the failure arises while proving the projected associated type is well formed under `for<'a>`, it is a plausible location for missing defensive handling of malformed projections or escaping bound regions."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+        "reason": "Although less direct than the HIR-analysis and trait-selection files, the bug includes invalid lifetime binding syntax in an impl header. This file participates in collecting referenced lifetimes during lowering, and an incorrect classification of free vs bound lifetimes could contribute to a malformed HIR/type representation that later ICEs under HRTB normalization."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "The reproducer relies on lowering qualified associated-type paths like `<Foo<'a> as Bar>::Type`. If lowering of the qpath or its generic arguments under error recovery is wrong, later trait projection code may see inconsistent HIR. It is less likely than normalization/WF code, but still a credible candidate from the listed files."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 155.236,
+    "stage_times_sec": {
+      "checkout": 0.123,
+      "load_bug_context": 0.061,
+      "test_behavior_analysis": 6.386,
+      "test_failure_analysis": 12.614,
+      "load_file_candidates": 0.091,
+      "search_suspicious_files": 135.96
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 420397,
+      "output_tokens": 6982,
+      "total_tokens": 427379,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.386,
+          "input_tokens": 359,
+          "output_tokens": 335,
+          "total_tokens": 694
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.614,
+          "input_tokens": 2206,
+          "output_tokens": 711,
+          "total_tokens": 2917
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.657,
+          "input_tokens": 27865,
+          "output_tokens": 403,
+          "total_tokens": 28268
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.176,
+          "input_tokens": 27869,
+          "output_tokens": 323,
+          "total_tokens": 28192
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.973,
+          "input_tokens": 27388,
+          "output_tokens": 341,
+          "total_tokens": 27729
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.399,
+          "input_tokens": 27625,
+          "output_tokens": 296,
+          "total_tokens": 27921
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.477,
+          "input_tokens": 27609,
+          "output_tokens": 348,
+          "total_tokens": 27957
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.945,
+          "input_tokens": 28010,
+          "output_tokens": 394,
+          "total_tokens": 28404
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.901,
+          "input_tokens": 27735,
+          "output_tokens": 392,
+          "total_tokens": 28127
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.941,
+          "input_tokens": 27759,
+          "output_tokens": 320,
+          "total_tokens": 28079
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 6.679,
+          "input_tokens": 27846,
+          "output_tokens": 316,
+          "total_tokens": 28162
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.655,
+          "input_tokens": 27660,
+          "output_tokens": 369,
+          "total_tokens": 28029
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 11.251,
+          "input_tokens": 27976,
+          "output_tokens": 374,
+          "total_tokens": 28350
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.251,
+          "input_tokens": 27895,
+          "output_tokens": 265,
+          "total_tokens": 28160
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.562,
+          "input_tokens": 28019,
+          "output_tokens": 272,
+          "total_tokens": 28291
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.669,
+          "input_tokens": 27780,
+          "output_tokens": 368,
+          "total_tokens": 28148
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.318,
+          "input_tokens": 15882,
+          "output_tokens": 355,
+          "total_tokens": 16237
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.078,
+          "input_tokens": 12914,
+          "output_tokens": 800,
+          "total_tokens": 13714
+        }
+      ]
+    }
+  }
+}

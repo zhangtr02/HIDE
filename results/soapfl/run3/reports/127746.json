@@ -1,0 +1,257 @@
+{
+  "bug_id": "127746",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-07-13",
+    "resolved": "c6727fc9b5c64cefa7263486497ee95e529bd0f8"
+  },
+  "final_top10": [
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/errors.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_infer/src/infer/opaque_types/mod.rs",
+    "compiler/rustc_middle/src/middle/lang_items.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+    "compiler/rustc_ast_lowering/src/path.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `auto_traits` and `unboxed_closures`, forcing rustc to handle unstable trait-system and callable-signature features together.",
+        "Defines a normal trait `T` and uses it as `Fn(T)` in `impl Fn(T)`, exercising parenthetical trait syntax parsing for callable traits.",
+        "Function `f` returns `impl Fn(T)`, so the compiler must infer an opaque return type implementing a callable trait-like interface.",
+        "The closure `|_| p` captures local `p = ()` by reference or copy, testing closure environment lowering and inferred return type `()`.",
+        "Declares a user-defined auto trait named `Fn`, intentionally colliding with the standard callable trait name and stressing name resolution.",
+        "Gives the auto trait an associated type `Output`, which is unusual for auto traits and exercises trait item validation.",
+        "Combines `impl Trait` with a closure and a custom `Fn`-named trait, probing whether rustc incorrectly treats the custom trait as callable.",
+        "`main` is empty; the reproducer isolates compilation behavior, targeting type checking, trait resolution, and compiler diagnostics rather than runtime execution."
+      ],
+      "summary": "This reproducer is compile-only. It mixes unstable auto traits, closure syntax, and parenthetical `Fn(...)` trait notation. The key stress point is a custom auto trait named `Fn` with an associated type, while `f` returns `impl Fn(T)` using a closure. That setup probes rustc’s parsing, name resolution, trait validation, closure lowering, and opaque return type handling when a user-defined trait conflicts with the built-in callable `Fn` trait family."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on rustc confusing a user-defined trait named `Fn` with the lang-item callable `Fn` family while type-checking an `impl Trait` opaque return whose hidden type is a closure. The reproducer combines three stressors: parenthetical trait syntax `Fn(T)`, a closure return `|_| p`, and a custom `auto trait Fn { type Output; }`. Parenthetical `Trait(Args) -> Ret` notation is only meaningful for the special callable traits, but name resolution here can still bind `Fn` to the user-defined trait. The compiler emits ordinary user errors first (consistent with invalid generic/trait-item usage such as E0107/E0380), but then proceeds into opaque type computation and well-formedness checking, where it appears to assume the resolved `Fn` trait is callable/lang-item-shaped. The query stack shows the ICE happens during `typeck` of `f`, then `type_of_opaque` for `f::{opaque#0}`, indicating the hidden type of the closure is being related to `impl Fn(T)` and some compiler path mishandles the invalid trait reference instead of producing a graceful error. The common pattern is a missing validation boundary between parsing/resolution of parenthetical `Fn` syntax and later opaque-type/closure signature logic, especially when a non-callable user trait shadows the standard `Fn` name.",
+      "possible_causes": [
+        "rustc likely accepts or partially lowers parenthetical trait syntax `Fn(T)` for a user-defined trait named `Fn`, then later code in type checking or opaque type computation incorrectly assumes any such trait ref is the built-in callable `Fn` lang item.",
+        "A compiler defect may exist in closure-to-`impl Trait` handling where the hidden closure type is normalized against a trait named `Fn` without first verifying that the resolved trait is actually one of the callable lang traits (`Fn`, `FnMut`, `FnOnce`).",
+        "The opaque return type (`type_of_opaque` / well-formedness) path may be re-entering trait-signature extraction on an already-invalid trait reference, leading to an ICE after diagnostics instead of short-circuiting on prior errors.",
+        "There may be a missing guard in trait resolution / HIR-to-Ty lowering for associated items on auto traits named like lang items, causing callable-signature code to inspect a trait that has incompatible structure (e.g., custom associated type `Output` on an auto trait) and panic.",
+        "A likely defect is insufficient error recovery when a closure is checked against an invalid callable-style bound: rustc emits E0107/E0380 but still stores malformed predicate or projection information for the opaque type, which later crashes during WF checking."
+      ],
+      "evidence": [
+        "The reproducer declares `auto trait Fn { type Output; }`, intentionally shadowing the standard callable trait name.",
+        "`f` returns `impl Fn(T)` and the hidden type is a closure `|_| p`, forcing rustc to connect closure-call semantics with the shadowing trait.",
+        "Parenthetical trait syntax `Fn(T)` is special syntax associated with callable traits, making it a likely source of misclassification if resolution does not enforce lang-item identity.",
+        "The query stack shows the panic occurs during `typeck` of `f` and then `type_of_opaque` / `check_well_formed` for `f::{opaque#0}`, directly implicating opaque return type handling rather than general parsing alone.",
+        "Compiler output mentions prior errors E0107 and E0380, so rustc had already recognized invalid source conditions but still proceeded into a crashing internal path instead of stopping cleanly.",
+        "The test behavior specifically stresses name resolution, trait validation, closure lowering, and `impl Trait` with a custom `Fn`-named trait; all these components intersect at the failing query stack."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1815,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The ICE fires inside `rustc_trait_selection::traits::project::opt_normalize_projection_term`, so projection normalization is the prime suspect. The reproducer engineers a collision between the callable-trait syntax `Fn(T)` and a user-defined `auto trait Fn { type Output; }`; projection code may then be normalizing a built-in `Fn`-family associated type such as `Output` against a non-lang-item trait or a malformed trait reference."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+        "reason": "Most suspicious because the reproducer hinges on lowering parenthetical trait syntax `Fn(T)` while `Fn` resolves to a user-defined auto trait rather than the callable lang item. This module handles HIR type lowering for trait refs/bounds and is a likely place where rustc may incorrectly accept or encode callable-style syntax for a non-lang-item trait, letting malformed predicates reach later opaque-type checking."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/errors.rs",
+        "reason": "Directly relevant to diagnostics and recovery around `Fn`-family trait syntax. The compiler reports ordinary errors first (E0107/E0380) and then ICEs, suggesting an error-recovery bug where invalid `Fn` syntax on a non-callable trait is diagnosed but not fully blocked. This file contains specialized logic like `complain_about_internal_fn_trait`, making it suspicious for incomplete guarding or bad recovery."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "The hidden type of `f` is a closure, and the ICE occurs during `typeck` of `f` before `type_of_opaque`. This file derives closure signatures from contextual expectations; if it assumes any `Fn(...)` bound refers to the builtin callable traits, a user-defined `Fn` could cause invalid signature extraction or malformed obligations that later crash opaque-type processing."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "The query stack explicitly enters `type_of_opaque` for `f::{opaque#0}` after type-checking `f`. This file computes hidden types for opaque `impl Trait` definitions, so it is a prime suspect for failing to short-circuit after earlier trait-lowering/typeck errors and instead trying to validate a closure against an invalid `impl Fn(T)` bound."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types/mod.rs",
+        "reason": "`impl Trait` inference replaces opaque aliases with inference vars and records hidden-type obligations. If the invalid callable-style bound on the user-defined `Fn` produces malformed obligations, this module could be where those constraints are created or propagated without checking that the trait is actually a callable lang item."
+      },
+      {
+        "path": "compiler/rustc_middle/src/middle/lang_items.rs",
+        "reason": "The bug likely depends on confusion between a user-defined trait named `Fn` and the builtin `Fn` lang item. This file provides the APIs for identifying lang items, so a missing or incorrect lang-item identity check in code using these helpers could underlie the misclassification."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "The panic query stack includes `check_well_formed` on the opaque type. WF obligation generation is therefore directly involved, and this module may be trying to prove well-formedness of a malformed trait predicate or projection stemming from the bogus callable interpretation of the custom `Fn` trait."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+        "reason": "Relating the closure hidden type to the opaque `impl Fn(T)` return likely goes through inference-time type relation logic. If that relation path assumes callable-trait structure after syntax lowering, it could mishandle an invalid trait ref and contribute to the ICE during opaque type computation."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/path.rs",
+        "reason": "Lowering of path syntax is less directly implicated than HIR type lowering, but the reproducer uses special parenthetical trait syntax that starts as a path-like construct. If the AST/HIR boundary preserves `Fn(T)` in a way that does not enforce callable-trait restrictions, this file could be an earlier source of the malformed representation."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 163.01,
+    "stage_times_sec": {
+      "checkout": 6.25,
+      "load_bug_context": 0.196,
+      "test_behavior_analysis": 6.42,
+      "test_failure_analysis": 13.088,
+      "load_file_candidates": 0.125,
+      "search_suspicious_files": 136.931
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 439735,
+      "output_tokens": 8045,
+      "total_tokens": 447780,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.42,
+          "input_tokens": 359,
+          "output_tokens": 340,
+          "total_tokens": 699
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.088,
+          "input_tokens": 2169,
+          "output_tokens": 782,
+          "total_tokens": 2951
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.3,
+          "input_tokens": 27929,
+          "output_tokens": 402,
+          "total_tokens": 28331
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.86,
+          "input_tokens": 27854,
+          "output_tokens": 339,
+          "total_tokens": 28193
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.235,
+          "input_tokens": 27391,
+          "output_tokens": 340,
+          "total_tokens": 27731
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.074,
+          "input_tokens": 27721,
+          "output_tokens": 422,
+          "total_tokens": 28143
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.155,
+          "input_tokens": 27668,
+          "output_tokens": 391,
+          "total_tokens": 28059
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.59,
+          "input_tokens": 27981,
+          "output_tokens": 402,
+          "total_tokens": 28383
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.117,
+          "input_tokens": 27823,
+          "output_tokens": 389,
+          "total_tokens": 28212
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.214,
+          "input_tokens": 27778,
+          "output_tokens": 346,
+          "total_tokens": 28124
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.262,
+          "input_tokens": 27839,
+          "output_tokens": 366,
+          "total_tokens": 28205
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.697,
+          "input_tokens": 27864,
+          "output_tokens": 431,
+          "total_tokens": 28295
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.069,
+          "input_tokens": 27618,
+          "output_tokens": 381,
+          "total_tokens": 27999
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.904,
+          "input_tokens": 27888,
+          "output_tokens": 362,
+          "total_tokens": 28250
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.435,
+          "input_tokens": 28050,
+          "output_tokens": 284,
+          "total_tokens": 28334
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.269,
+          "input_tokens": 27977,
+          "output_tokens": 441,
+          "total_tokens": 28418
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.72,
+          "input_tokens": 27865,
+          "output_tokens": 371,
+          "total_tokens": 28236
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 6.492,
+          "input_tokens": 6127,
+          "output_tokens": 391,
+          "total_tokens": 6518
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.506,
+          "input_tokens": 13834,
+          "output_tokens": 865,
+          "total_tokens": 14699
+        }
+      ]
+    }
+  }
+}

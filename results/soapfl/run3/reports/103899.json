@@ -1,0 +1,236 @@
+{
+  "bug_id": "103899",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-11-01",
+    "resolved": "95a3a7277b44bbd2dd3485703d9a05f64652b60e"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_traits/src/normalize_projection_ty.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+    "compiler/rustc_borrowck/src/type_check/canonical.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines traits with associated types, where `LayerT::DataType` must implement `DataTypePrimitive`, creating nested associated-type projections like `L::DataType` and `T::DataTypeHolder`.",
+        "Uses `PhantomData` in `Pooled<B>` to model ownership/type dependence without storing `B`, exercising zero-sized generic marker behavior.",
+        "Defines `NdBufferView<B, T>` containing both a generic buffer and `T::DataTypeHolder`, forcing the compiler to normalize associated types inside generic structs.",
+        "Builds layered type aliases: `NdBuffer<T> = NdBufferView<(), T>` and `PooledNdBuffer<T> = Pooled<NdBuffer<T>>`, stressing alias expansion through nested generics.",
+        "`LayerPage<L>` stores `Arc<PooledNdBuffer<L::DataType>>`, combining `Arc`, type aliases, and an associated type projection inside a struct field.",
+        "Comments show simpler alternatives compile, isolating the problematic shape to the aliased nested type using `L::DataType` rather than `Vec<L::DataType>` or direct `Vec`.",
+        "Defines `type Layer<L> = HashMap<u32, LayerPage<L>>`, making the projected associated type flow through another alias and collection type.",
+        "`layer_from_proto<T, L: LayerT<DataType = T>>` constrains a generic parameter to equal an associated type; returning `Layer<L>` triggers rustc type normalization/trait solving and causes the ICE."
+      ],
+      "summary": "The reproducer minimizes an internal compiler error around associated-type normalization. It combines trait-associated types, nested type aliases, `PhantomData`, `Arc`, and a `HashMap` alias. The key trigger is `Arc<PooledNdBuffer<L::DataType>>` inside `LayerPage<L>`, then returning `Layer<L>` from a generic function with `L: LayerT<DataType = T>`. Simpler field types avoid the crash, indicating rustc mishandles this specific nested alias plus associated-type projection pattern."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an internal compiler bug in type normalization/trait solving rather than any problem in the reproducer. The reproducer repeatedly combines: (1) associated type projections (`L::DataType`, `T::DataTypeHolder`), (2) nested type aliases (`NdBuffer`, `PooledNdBuffer`, `Layer`), and (3) generic wrappers (`Arc`, `HashMap`, `PhantomData`). The ICE is isolated to the specific field shape `Arc<PooledNdBuffer<L::DataType>>`; equivalent non-aliased or simpler container forms compile. That strongly suggests rustc mishandles normalization of an associated type projection when it is substituted through multiple alias layers and then used inside a struct field that is later propagated through another alias in a generic function signature. The `layer_from_proto<T, L: LayerT<DataType = T>> -> Result<Layer<L>, ()>` signature likely forces eager normalization/equality reasoning for `L::DataType = T`, while `NdBufferView<(), T>` also requires using `T::DataTypeHolder`, making the compiler recursively normalize projected associated types through aliases. A plausible defect is in the compiler’s handling of projection/equality obligations or hidden type traversal during well-formedness/analysis of aliased ADT field types, especially where `PhantomData` suppresses concrete storage of the generic but still preserves type dependency. In short, the bug is most likely in rustc’s projection normalization / alias expansion / wf-check interaction for nested associated types inside generic type aliases.",
+      "possible_causes": [
+        "Bug in rustc trait solver / projection normalization when expanding nested type aliases containing associated type projections such as `PooledNdBuffer<L::DataType>` -> `Pooled<NdBufferView<(), L::DataType>>`.",
+        "Defect in well-formedness checking of struct fields where an associated type projection (`L::DataType`) flows through multiple aliases and triggers normalization of another associated type (`T::DataTypeHolder`).",
+        "Incorrect handling of projection equality constraints from `L: LayerT<DataType = T>` combined with return type alias expansion `Layer<L> = HashMap<u32, LayerPage<L>>`, causing an ICE during analysis rather than a normal type error.",
+        "Compiler bug in generic argument substitution through aliased ADTs wrapped in containers (`Arc`, `HashMap`) where zero-sized marker types (`PhantomData`) preserve hidden type dependencies and expose a normalization edge case.",
+        "Possible cycle/mismanaged obligation stack in rustc when computing the normalized field type of `LayerPage<L>`: `Arc<PooledNdBuffer<L::DataType>>` indirectly requires proving `L::DataType: DataTypePrimitive` and normalizing `DataTypeHolder`, which may be mishandled in the old nightly compiler."
+      ],
+      "evidence": [
+        "The crash only occurs with `buffer: Arc<PooledNdBuffer<L::DataType>>`; commented alternatives `Arc<Pooled<Vec<L::DataType>>>` and `Arc<Vec<L::DataType>>` compile, isolating the bug to the nested alias + associated projection shape.",
+        "`NdBufferView<B, T>` contains `T::DataTypeHolder`, so using `L::DataType` inside `NdBuffer<T>` forces rustc to normalize associated types inside another generic struct.",
+        "The reproducer stacks aliases: `NdBuffer<T> = NdBufferView<(), T>`, `PooledNdBuffer<T> = Pooled<NdBuffer<T>>`, and `Layer<L> = HashMap<u32, LayerPage<L>>`, which stresses alias expansion before/while solving projection obligations.",
+        "The function `layer_from_proto<T, L: LayerT<DataType = T>>` adds an explicit associated-type equality constraint, likely forcing the compiler to equate and normalize `L::DataType` during analysis of the return type.",
+        "`Pooled<B>` uses `PhantomData<B>`, meaning the problematic generic type is present only at the type level; this often exercises compiler logic around hidden ownership/type dependence rather than runtime layout.",
+        "The compiler output is an ICE/backtrace during rustc analysis query processing, with no user-facing type error, confirming a production compiler internal failure rather than invalid source code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1520,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "Most suspicious because the ICE is triggered during the analysis query, and the reproducer specifically stresses well-formedness/normalization of a struct field type containing nested aliases and associated-type projections (`Arc<PooledNdBuffer<L::DataType>>`). This file explicitly normalizes item/signature types and registers WF obligations, which matches the failure pattern."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "Core projection/associated-type normalization logic. The bug shape strongly suggests mishandling of `<L as LayerT>::DataType` flowing through multiple alias expansions and then forcing normalization of `T::DataTypeHolder` inside `NdBufferView`, which is exactly the sort of projection pipeline this file implements."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/normalize.rs",
+        "reason": "This is the recursive normalization entry point used by type checking and trait solving to walk type structures and normalize projections. The reproducer’s nested aliases plus projected associated types are a direct stress case for this machinery."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "Likely involved because proving that the aliased field type is well formed requires generating obligations such as `L::DataType: DataTypePrimitive` and then normalizing nested associated types. A bug in WF obligation generation for aliased/projection-heavy types would fit the reproducer."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "Inference-layer projection cache and normalization support are plausible contributors if the crash comes from recursive projection, ambiguous/in-progress projection handling, or bad caching during normalization of the nested alias/projection chain."
+      },
+      {
+        "path": "compiler/rustc_traits/src/normalize_projection_ty.rs",
+        "reason": "Implements query providers for canonicalized projection normalization. Since the stack mentions analysis query execution and the reproducer appears to trigger a compiler-internal normalization path rather than a user error, this query-backed normalization layer is a strong suspect."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Computing item and field types may be where the aliased field type is first expanded and handed to WF/normalization. Because the crash is tied to a particular struct field shape, `type_of` collection is a plausible entry point involved in triggering the bad path."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The function signature introduces an associated-type equality constraint `L: LayerT<DataType = T>`, and this file computes generic predicates for items. If predicate construction or propagation around that equality is malformed, it could provoke the later ICE during analysis."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/relate_tys.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/type_check/canonical.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 139.453,
+    "stage_times_sec": {
+      "checkout": 3.189,
+      "load_bug_context": 0.054,
+      "test_behavior_analysis": 6.626,
+      "test_failure_analysis": 12.978,
+      "load_file_candidates": 0.111,
+      "search_suspicious_files": 116.494
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 374118,
+      "output_tokens": 6070,
+      "total_tokens": 380188,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.626,
+          "input_tokens": 618,
+          "output_tokens": 419,
+          "total_tokens": 1037
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.978,
+          "input_tokens": 2596,
+          "output_tokens": 866,
+          "total_tokens": 3462
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.675,
+          "input_tokens": 28500,
+          "output_tokens": 344,
+          "total_tokens": 28844
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.843,
+          "input_tokens": 28031,
+          "output_tokens": 330,
+          "total_tokens": 28361
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.493,
+          "input_tokens": 28080,
+          "output_tokens": 364,
+          "total_tokens": 28444
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.981,
+          "input_tokens": 28271,
+          "output_tokens": 348,
+          "total_tokens": 28619
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.241,
+          "input_tokens": 28347,
+          "output_tokens": 346,
+          "total_tokens": 28693
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.115,
+          "input_tokens": 28430,
+          "output_tokens": 334,
+          "total_tokens": 28764
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.848,
+          "input_tokens": 28381,
+          "output_tokens": 353,
+          "total_tokens": 28734
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.662,
+          "input_tokens": 28333,
+          "output_tokens": 346,
+          "total_tokens": 28679
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.919,
+          "input_tokens": 27988,
+          "output_tokens": 372,
+          "total_tokens": 28360
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.191,
+          "input_tokens": 27143,
+          "output_tokens": 328,
+          "total_tokens": 27471
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.268,
+          "input_tokens": 28052,
+          "output_tokens": 216,
+          "total_tokens": 28268
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 5.738,
+          "input_tokens": 28468,
+          "output_tokens": 188,
+          "total_tokens": 28656
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.938,
+          "input_tokens": 19624,
+          "output_tokens": 344,
+          "total_tokens": 19968
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.553,
+          "input_tokens": 13256,
+          "output_tokens": 572,
+          "total_tokens": 13828
+        }
+      ]
+    }
+  }
+}

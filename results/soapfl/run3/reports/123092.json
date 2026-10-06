@@ -1,0 +1,250 @@
+{
+  "bug_id": "123092",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-03-25",
+    "resolved": "0824b300eb0dae5d9ed59719d3f2732016683d66"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/thir/pattern/check_match.rs",
+    "compiler/rustc_pattern_analysis/src/rustc.rs",
+    "compiler/rustc_pattern_analysis/src/constructor.rs",
+    "compiler/rustc_mir_build/src/thir/pattern/const_to_pat.rs",
+    "compiler/rustc_hir_typeck/src/pat.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_parse/src/parser/item.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_ast_lowering/src/pat.rs",
+    "compiler/rustc_pattern_analysis/src/usefulness.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with associated constants, exercising trait-level const items and type-based constant lookup.",
+        "Implements the trait for `TwoDigits`, but `const FIRST` omits its type, creating malformed associated-const syntax.",
+        "Uses `TwoDigits::FIRST` and `TwoDigits::LAST` in an inclusive range pattern inside `match`, testing constant pattern resolution.",
+        "The `digits` function matches a `u8` against a single range arm, exercising exhaustiveness analysis for integer range patterns.",
+        "Because the only arm covers `10..=99`, the compiler must also detect non-exhaustive matching for remaining `u8` values.",
+        "The invalid impl item likely causes early parsing or item-validation failure before later type checking fully proceeds.",
+        "This mixes trait associated constants with pattern contexts, stressing name resolution and const-evaluation during match checking.",
+        "Nightly toolchain usage suggests the reproducer targets a compiler crash or bad diagnostic in erroneous code handling."
+      ],
+      "summary": "The reproducer defines a trait with associated constants, implements it incorrectly for `TwoDigits`, and then uses those constants in a `match` range pattern. It exercises parser recovery, associated-const validation, path resolution in patterns, and match exhaustiveness checking. The key malformed code is `const FIRST: = 10;`, which should trigger a compiler error and may expose a bug in how nightly rustc handles invalid associated constants referenced from pattern ranges."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern indicates an ICE during the match-checking pipeline, not during initial parsing. The reproducer combines malformed associated-const syntax in an impl (`const FIRST: = 10;`) with later use of that associated const in a range pattern (`TwoDigits::FIRST..=TwoDigits::LAST`). This suggests rustc performs enough error recovery to continue building later representations, but leaves an invalid or partially-typed associated constant in a state that match checking/exhaustiveness analysis does not defensively handle. The query stack shows the panic occurs in `check_match` while analyzing `digits`, meaning the defect is likely in pattern lowering, constant pattern evaluation, or range-pattern exhaustiveness logic when referenced constants originated from erroneous associated items. A common theme across the behavior and stack is: erroneous associated const definition + path-based constant use in pattern context + integer range exhaustiveness analysis. The compiler should emit a normal diagnostic for the malformed const and possibly for non-exhaustive match, but instead crashes because a later phase assumes the associated const path has a valid type/value after recovery.",
+      "possible_causes": [
+        "Match-checking/exhaustiveness code does not correctly handle `PatKind::Range` endpoints that resolve to associated constants with prior type errors or incomplete HIR/type information after parser recovery.",
+        "Constant pattern evaluation or lowering likely assumes associated constants used in range patterns have a valid inferred/declared type, and crashes when an impl const item was parsed with a missing type (`const FIRST: = 10;`).",
+        "Name/type resolution for impl-associated constants may produce an error placeholder for `TwoDigits::FIRST`, but downstream match analysis fails to propagate or short-circuit on that error value.",
+        "The compiler may incorrectly continue exhaustiveness analysis on an invalid integer range pattern whose lower bound is an error node, leading to an unexpected `bug!`/panic in range construction or scalar-int extraction.",
+        "There may be a defect in error recovery for malformed associated const items inside trait impls: recovery preserves enough structure for later path resolution, but not enough invariants for match-checking code that expects well-formed associated const definitions."
+      ],
+      "evidence": [
+        "Query stack pinpoints the ICE in `check_match` for `digits`, then `mir_built`, showing the crash happens during match analysis rather than pure parsing.",
+        "The reproducer intentionally uses associated constants in a range pattern: `TwoDigits::FIRST..=TwoDigits::LAST`, directly exercising constant pattern/range handling.",
+        "`const FIRST: = 10;` is syntactically malformed, so the compiler is operating on erroneous recovered AST/HIR; robust behavior should be a diagnostic, not a panic.",
+        "The matched value is `u8`, and the only arm is `10..=99`, so exhaustiveness checking for integer ranges is definitely invoked.",
+        "The behavior summary explicitly highlights parser recovery, associated-const validation, path resolution in patterns, and match exhaustiveness checking as the interacting components.",
+        "`TwoDigits::LAST` is well-typed (`u8`), while `TwoDigits::FIRST` is malformed, making the lower bound of the range the likely trigger for an unhandled error state in compiler internals."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1765,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/thir/pattern/check_match.rs",
+        "reason": "The query stack pinpoints the ICE in `check_match` while analyzing `digits`. This file drives match checking and exhaustiveness analysis over THIR patterns, making it the most direct place where an invalid range pattern endpoint from an erroneous associated const could be mishandled instead of being short-circuited after earlier errors."
+      },
+      {
+        "path": "compiler/rustc_pattern_analysis/src/rustc.rs",
+        "reason": "This is the rustc-specific integration layer between THIR patterns and the generic usefulness engine. The reproducer specifically stresses integer range patterns whose endpoints come from associated const paths with prior errors, so this adapter is a likely place for invalid/error constants to be converted into assumptions that later panic."
+      },
+      {
+        "path": "compiler/rustc_pattern_analysis/src/constructor.rs",
+        "reason": "Integer range exhaustiveness relies on constructor and `IntRange` machinery defined here. If the malformed `TwoDigits::FIRST` recovers into an error placeholder or missing scalar value, range-construction logic in this file could easily hit an unexpected invariant and ICE during usefulness checking."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/pattern/const_to_pat.rs",
+        "reason": "The failing code uses associated constants inside a pattern range. This file converts constants into THIR pattern forms and evaluates unevaluated constants for pattern use; it is a strong candidate for mishandling an associated const whose declaration was syntactically malformed but still referenced later in pattern context."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/pat.rs",
+        "reason": "Before match checking, pattern type checking must assign types to pattern paths and range endpoints. Since `TwoDigits::FIRST` comes from a malformed associated const declaration with a missing type, this file may be failing to propagate an error type robustly, leaving downstream match analysis with invalid assumptions."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "The root bad input is `const FIRST: = 10;` inside a trait impl. If AST validation does not reject or properly mark this malformed associated const early enough, later phases may see a partially-recovered impl item that violates invariants. This makes early validation/recovery logic suspicious as an upstream enabler of the ICE."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/item.rs",
+        "reason": "The malformed associated const syntax originates in item parsing. A parser recovery bug could construct an impl associated const item with an inconsistent AST shape that survives into later stages, especially since the crash occurs only after the constant is referenced in a match range pattern."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Associated consts need a declared type for later pattern/range analysis. Because `FIRST` omits its type, this file is a plausible place where `type_of` for the impl const is left in an invalid or error-recovery state that later consumers do not handle correctly."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/pat.rs",
+        "reason": "Although the panic is later, this file lowers pattern syntax and pattern paths into HIR. Since the reproducer combines path-based associated const references with range pattern syntax, any lowering-time mishandling of erroneous pattern endpoints could contribute to downstream invalid THIR or typeck state."
+      },
+      {
+        "path": "compiler/rustc_pattern_analysis/src/usefulness.rs",
+        "reason": "This is the core exhaustiveness/usefulness engine ultimately exercised by the single-arm `u8` match over `10..=99`. If an error-valued lower bound leaks through as though it were a real range endpoint, the generic usefulness algorithm may panic on violated invariants rather than treating the pattern as erroneous."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 146.172,
+    "stage_times_sec": {
+      "checkout": 0.954,
+      "load_bug_context": 0.256,
+      "test_behavior_analysis": 6.44,
+      "test_failure_analysis": 11.471,
+      "load_file_candidates": 0.106,
+      "search_suspicious_files": 126.945
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 422560,
+      "output_tokens": 6684,
+      "total_tokens": 429244,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.439,
+          "input_tokens": 393,
+          "output_tokens": 293,
+          "total_tokens": 686
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.471,
+          "input_tokens": 2185,
+          "output_tokens": 646,
+          "total_tokens": 2831
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.773,
+          "input_tokens": 27841,
+          "output_tokens": 328,
+          "total_tokens": 28169
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.764,
+          "input_tokens": 27709,
+          "output_tokens": 309,
+          "total_tokens": 28018
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.681,
+          "input_tokens": 27328,
+          "output_tokens": 361,
+          "total_tokens": 27689
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.146,
+          "input_tokens": 27515,
+          "output_tokens": 329,
+          "total_tokens": 27844
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.113,
+          "input_tokens": 27526,
+          "output_tokens": 301,
+          "total_tokens": 27827
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.504,
+          "input_tokens": 27911,
+          "output_tokens": 356,
+          "total_tokens": 28267
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.978,
+          "input_tokens": 27675,
+          "output_tokens": 355,
+          "total_tokens": 28030
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.657,
+          "input_tokens": 27660,
+          "output_tokens": 327,
+          "total_tokens": 27987
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.532,
+          "input_tokens": 27754,
+          "output_tokens": 355,
+          "total_tokens": 28109
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.015,
+          "input_tokens": 27594,
+          "output_tokens": 360,
+          "total_tokens": 27954
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.715,
+          "input_tokens": 27881,
+          "output_tokens": 327,
+          "total_tokens": 28208
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.034,
+          "input_tokens": 27717,
+          "output_tokens": 300,
+          "total_tokens": 28017
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.495,
+          "input_tokens": 27970,
+          "output_tokens": 310,
+          "total_tokens": 28280
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.003,
+          "input_tokens": 27709,
+          "output_tokens": 309,
+          "total_tokens": 28018
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.507,
+          "input_tokens": 20588,
+          "output_tokens": 345,
+          "total_tokens": 20933
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.999,
+          "input_tokens": 11604,
+          "output_tokens": 773,
+          "total_tokens": 12377
+        }
+      ]
+    }
+  }
+}

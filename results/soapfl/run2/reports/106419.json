@@ -1,0 +1,244 @@
+{
+  "bug_id": "106419",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-01-02",
+    "resolved": "77429957a0e9c90a26c89def061ffdd4bae5ccb9"
+  },
+  "final_top10": [
+    "compiler/rustc_builtin_macros/src/deriving/clone.rs",
+    "compiler/rustc_builtin_macros/src/deriving/generic/mod.rs",
+    "compiler/rustc_builtin_macros/src/deriving/generic/ty.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+    "compiler/rustc_middle/src/ty/abstract_const.rs",
+    "compiler/rustc_ty_utils/src/consts.rs",
+    "compiler/rustc_middle/src/ty/subst.rs",
+    "compiler/rustc_middle/src/ty/consts.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `generic_const_exprs`, exercising unstable generic constant expressions in type-level contexts.",
+        "Defines `Bar<const A: usize, const B: usize>`, using const generics with two `usize` parameters.",
+        "Adds `where [(); A as usize]:, [(); B as usize]:` to force evaluation of const expressions through array-length types.",
+        "Uses array types in bounds as a compile-time well-formedness check for const generic parameters.",
+        "Casts `A` and `B` to `usize` inside const expressions, probing normalization/type-checking of trivial const casts.",
+        "Derives `Clone` for a const-generic struct, exercising builtin trait derivation over types with const parameters.",
+        "Declares an empty struct body, isolating compiler behavior to generic parameter and where-clause processing.",
+        "Main does nothing, so the reproducer targets compile-time analysis only, not runtime behavior."
+      ],
+      "summary": "The reproducer is a minimal compile-only test for nightly Rust’s `generic_const_exprs`. It defines an empty const-generic struct with array-length bounds that depend on the generic consts, plus trivial `as usize` casts. This exercises const-generic well-formedness checking, const expression evaluation/normalization, and trait derivation on const-generic types."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on builtin `#[derive(Clone)]` code generation for a const-generic type that has two distinct const parameters and `generic_const_exprs`-dependent where-clause obligations. The struct itself is empty and otherwise trivial, so the reported type mismatch (`expected A, found B`) strongly suggests the compiler is mis-handling const generic parameter identity/substitution during derive expansion or subsequent type checking of the generated `Clone` impl. The error originates at the derive site rather than in user-written logic, and the mismatch specifically swaps one const parameter for another on the same nominal type `Bar<_, _>`. Because the where-clause uses `[(); A as usize]` and `[(); B as usize]`, the reproducer also exercises normalization/canonicalization of trivial const expressions under generic const exprs; a likely commonality is that compiler code treating these const arguments or predicates fails to preserve which const parameter each expression refers to. In short, the bug is likely in rustc production code that builds, instantiates, or checks derived impls for const-generic ADTs with generic-const-expr predicates, causing accidental unification/confusion of `A` and `B` or incorrect substitution in the generated `clone` return/self types.",
+      "possible_causes": [
+        "A defect in builtin derive (`Clone`) impl generation for const-generic structs, where the generated impl incorrectly reuses or substitutes const generic arguments, causing `Bar<A, B>` to be treated as `Bar<B, _>` in the expanded method body or signature.",
+        "A bug in generic parameter substitution/instantiation for derived impls in rustc, specifically mishandling the ordering or identity of multiple const parameters when constructing the self type or return type.",
+        "Incorrect normalization/canonicalization of generic const expressions like `A as usize` and `B as usize` in where-clause predicates, leading rustc to confuse distinct const vars during trait derivation type checking.",
+        "A flaw in type checking of derived trait impls for empty ADTs with const generics, where fieldless `Clone` synthesis reconstructs the ADT using the wrong generic arguments.",
+        "A bug in const-generic argument equality or inference during obligation solving, making distinct const params appear interchangeable or incorrectly matched when derive-generated code is validated."
+      ],
+      "evidence": [
+        "The error is emitted at `#[derive(Clone)]`, indicating the failure is in compiler-generated code rather than user-authored methods.",
+        "The diagnostic explicitly says `expected A, found B`, showing confusion between two distinct const generic parameters of the same type (`usize`).",
+        "The expected/found note is `expected struct Bar<A, _> found struct Bar<B, _>`, which is characteristic of wrong const argument substitution/order rather than a semantic issue in the empty struct definition.",
+        "The struct body is empty, so there is no user field logic that could legitimately create a `Bar<B, _>` when `Bar<A, B>` is expected.",
+        "The reproducer uses `#![feature(generic_const_exprs)]` plus `[(); A as usize]:, [(); B as usize]:`, directly exercising unstable const-expression normalization and well-formedness machinery in combination with derive.",
+        "Both const expressions are trivial casts to the same type (`usize`), so a correct compiler should preserve parameter identity; failure suggests internal mishandling of const expr representation/substitution.",
+        "`main` is empty and compilation fails before codegen/runtime, isolating the problem to compile-time trait derivation and const-generic type checking."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1573,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_builtin_macros/src/deriving/clone.rs",
+        "reason": "The error originates directly from `#[derive(Clone)]`, and the synthesized `Clone` impl for a fieldless const-generic struct is the most likely place where `Bar<A, B>` is being reconstructed with the wrong const arguments or wrong ordering, producing the observed `expected A, found B` mismatch."
+      },
+      {
+        "path": "compiler/rustc_builtin_macros/src/deriving/generic/mod.rs",
+        "reason": "Built-in derive generation shares generic impl/header construction here. If const generic parameters or where-clauses are copied/instantiated incorrectly when forming the derived impl or method signature, this framework could easily confuse distinct const params `A` and `B`."
+      },
+      {
+        "path": "compiler/rustc_builtin_macros/src/deriving/generic/ty.rs",
+        "reason": "This module lowers derive-internal type/path representations into AST with explicit generics. A bug in how it emits paths/types for the derived `Self` or ADT instantiations could swap or collapse const generic arguments during `Clone` expansion."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The reproducer relies on `generic_const_exprs` well-formedness via `[(); A as usize]` and `[(); B as usize]`. If WF normalization or obligation registration mishandles trivial const casts and loses parameter identity, it could surface during type-checking of the generated derive impl as `A` versus `B` confusion."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "WF obligation generation for generic arguments is heavily exercised by the array-length bounds. A bug here could incorrectly normalize or equate distinct const params while validating the derive-generated `Clone` impl."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "`generic_const_exprs` specifically routes through const-evaluatability logic for expressions like `A as usize` and `B as usize`. If abstract const matching against param-env obligations mishandles parameter identity, the two consts could be spuriously interchanged during derive validation."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/abstract_const.rs",
+        "reason": "The reproducer uses trivial cast-based generic const expressions, which are represented through abstract const machinery. If expansion/instantiation of abstract consts does not preserve whether the source param was `A` or `B`, later type checking of the derived impl could report exactly this mismatch."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This file builds abstract const representations from THIR, including casts. Since the repro depends on `A as usize` and `B as usize`, a bug in constructing or structurally comparing those abstract consts could cause the compiler to treat the two expressions as the wrong parameter in obligations attached to the derived impl."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/subst.rs",
+        "reason": "The diagnostic strongly suggests bad generic argument substitution or ordering. This file is central to representing and manipulating generic args, including const args, so a substitution bug here could make `Bar<A, B>` appear as `Bar<B, _>` during derive-generated type construction or checking."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/consts.rs",
+        "reason": "Const-generic parameter identity is represented through `ty::Const`. If interned const params or trivial cast constants are created/compared incorrectly, distinct params of the same type (`usize`) could be confused when validating the derived `Clone` implementation."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 143.101,
+    "stage_times_sec": {
+      "checkout": 3.432,
+      "load_bug_context": 0.03,
+      "test_behavior_analysis": 5.379,
+      "test_failure_analysis": 13.397,
+      "load_file_candidates": 0.08,
+      "search_suspicious_files": 120.783
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 363522,
+      "output_tokens": 6532,
+      "total_tokens": 370054,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.379,
+          "input_tokens": 373,
+          "output_tokens": 270,
+          "total_tokens": 643
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.396,
+          "input_tokens": 1150,
+          "output_tokens": 719,
+          "total_tokens": 1869
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 6.288,
+          "input_tokens": 26609,
+          "output_tokens": 283,
+          "total_tokens": 26892
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.424,
+          "input_tokens": 26752,
+          "output_tokens": 356,
+          "total_tokens": 27108
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.27,
+          "input_tokens": 26140,
+          "output_tokens": 375,
+          "total_tokens": 26515
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.631,
+          "input_tokens": 26714,
+          "output_tokens": 310,
+          "total_tokens": 27024
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.709,
+          "input_tokens": 26680,
+          "output_tokens": 342,
+          "total_tokens": 27022
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.916,
+          "input_tokens": 26870,
+          "output_tokens": 385,
+          "total_tokens": 27255
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.569,
+          "input_tokens": 26779,
+          "output_tokens": 333,
+          "total_tokens": 27112
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.379,
+          "input_tokens": 26693,
+          "output_tokens": 309,
+          "total_tokens": 27002
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.883,
+          "input_tokens": 26748,
+          "output_tokens": 368,
+          "total_tokens": 27116
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.261,
+          "input_tokens": 25331,
+          "output_tokens": 334,
+          "total_tokens": 25665
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.862,
+          "input_tokens": 26875,
+          "output_tokens": 376,
+          "total_tokens": 27251
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.007,
+          "input_tokens": 26912,
+          "output_tokens": 311,
+          "total_tokens": 27223
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.979,
+          "input_tokens": 26538,
+          "output_tokens": 340,
+          "total_tokens": 26878
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.741,
+          "input_tokens": 4621,
+          "output_tokens": 369,
+          "total_tokens": 4990
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.837,
+          "input_tokens": 11737,
+          "output_tokens": 752,
+          "total_tokens": 12489
+        }
+      ]
+    }
+  }
+}

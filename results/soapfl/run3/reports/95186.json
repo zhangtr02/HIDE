@@ -1,0 +1,229 @@
+{
+  "bug_id": "95186",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-03-21",
+    "resolved": "c84f39e6c08397d4ab9b51b472002a8bfc3b5b59"
+  },
+  "final_top10": [
+    "compiler/rustc_typeck/src/impl_wf_check/min_specialization.rs",
+    "compiler/rustc_trait_selection/src/traits/specialize/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+    "compiler/rustc_trait_selection/src/traits/coherence.rs",
+    "compiler/rustc_typeck/src/impl_wf_check.rs",
+    "compiler/rustc_middle/src/ty/trait_def.rs",
+    "compiler/rustc_infer/src/traits/util.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_infer/src/infer/resolve.rs",
+    "compiler/rustc_infer/src/infer/canonical/canonicalizer.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only features: `rustc_attrs`, `min_specialization`, and `const_trait_impl`, so the test targets unstable trait-system and const-evaluation behavior.",
+        "Declares `#[rustc_specialization_trait] trait Specialize {}` to mark a trait as usable in specialization checks, an internal compiler-only attribute.",
+        "Defines a normal trait `Foo` and gives a blanket `impl<T> const Foo for T {}`, making every type implement `Foo` in const contexts.",
+        "Adds a second blanket `impl<T> const Foo for T where T: ~const Specialize {}` with an extra `~const` bound, creating overlapping implementations.",
+        "Exercises `~const Trait` syntax, where a bound is required to hold in const contexts, interacting with const trait implementation rules.",
+        "Uses min-specialization machinery to see whether the compiler treats the bounded impl as a valid specialization of the unconstrained blanket impl.",
+        "Stresses coherence/overlap checking for const trait impls, especially whether specialization and const-qualified bounds are compared correctly.",
+        "`main` is empty; all exercised behavior occurs during type checking and trait/coherence analysis at compile time."
+      ],
+      "summary": "This reproducer is a compile-time-only test for nightly trait-system internals. It combines const trait impls, `~const` bounds, and specialization-related machinery by defining two overlapping blanket `const Foo` implementations, one unconditional and one gated by `T: ~const Specialize`. The bug is triggered in rustc’s specialization/coherence handling rather than at runtime."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure is entirely in compile-time trait/coherence analysis. The reproducer combines three unstable mechanisms that all affect impl comparison: min-specialization, const trait impls, and `~const` trait predicates. The two impls have the same self type and trait (`impl<T> const Foo for T`), with the second adding only a `where T: ~const Specialize` bound. Under min-specialization, this should be analyzed as an overlap/specialization relation between a blanket impl and a more constrained blanket impl. However, rustc rejects it with `cannot specialize on Binder(~const TraitPredicate(<T as Specialize>, polarity:Positive), [])`, which strongly suggests the specialization checker does not properly recognize or permit `~const` predicates even when the trait is marked `#[rustc_specialization_trait]`. The common pattern is that the compiler is attempting to validate whether the specializing impl only adds allowed specialization predicates, but it treats the `~const`-qualified predicate as unsupported or non-specializable. This points to a defect in the compiler’s specialization/coherence logic for predicate comparison and filtering, specifically around normalization/handling of `~const` trait bounds inside binder-wrapped predicates.",
+      "possible_causes": [
+        "The specialization overlap checker likely does not support `~const` trait predicates when determining whether one impl is a valid specialization of another, causing it to reject an otherwise intended specialization candidate.",
+        "The code that recognizes `#[rustc_specialization_trait]` traits during specialization may ignore or mishandle the `~const` qualification, so `T: ~const Specialize` is not treated like an allowed specialization condition.",
+        "Predicate comparison/canonicalization in coherence may be using the raw `Binder(~const TraitPredicate(...))` form and failing to strip, normalize, or classify constness correctly before specialization checks.",
+        "The defect may be in the interaction between const trait impl checking and min-specialization: the compiler may incorrectly treat const-qualified where-clauses as changing impl compatibility in an unsupported way, rather than as an additional specialization constraint.",
+        "There may be a missing case in the compiler code that validates which predicates are allowed to specialize, where ordinary trait predicates are handled but `~const` trait predicates are rejected by default."
+      ],
+      "evidence": [
+        "The reproducer has no runtime behavior; `main` is empty, so the bug is isolated to compiler analysis of trait impls/coherence.",
+        "Both impls are blanket `const Foo for T` impls; the only difference is the extra bound `T: ~const Specialize`, so the failure must come from overlap/specialization logic.",
+        "The trait `Specialize` is explicitly marked with `#[rustc_specialization_trait]`, indicating the test expects specialization machinery to consider that bound specially.",
+        "The emitted error text is highly specific: `cannot specialize on Binder(~const TraitPredicate(<T as Specialize>, polarity:Positive), [])`, directly showing the rejected condition is the `~const` trait predicate representation internal to rustc.",
+        "The enabled features (`min_specialization`, `const_trait_impl`, `rustc_attrs`) match the exact subsystems implicated by the error: specialization, const trait semantics, and internal specialization-trait marking.",
+        "The test behavior explicitly stresses whether rustc compares const-qualified bounds correctly during specialization/coherence, aligning with the observed rejection."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1404,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_typeck/src/impl_wf_check/min_specialization.rs",
+        "reason": "Most suspicious because the error is emitted during min-specialization validation, and the reproducer specifically adds a `~const` predicate in the specializing impl. This file checks whether added predicates are permitted for specialization, so a missing case for `~const TraitPredicate` or incorrect predicate classification/normalization would directly cause `cannot specialize on Binder(~const TraitPredicate(...))`."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/specialize/mod.rs",
+        "reason": "Core specialization logic lives here, including reasoning about parent/child impl relationships and overlap ordering. If specialization code does not treat `~const`-qualified trait bounds on a `#[rustc_specialization_trait]` as valid specializing predicates, this module is a likely source."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/specialize/specialization_graph.rs",
+        "reason": "The reproducer builds two overlapping blanket impls that must be inserted into the specialization graph. If graph construction or impl ordering rejects the bounded impl because it cannot compare or classify `~const` predicates correctly, the failure would arise here."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+        "reason": "Overlap/coherence checking is part of determining whether one impl can specialize another. Since the only difference between the impls is the `T: ~const Specialize` bound, any bug in overlap analysis or predicate handling for const-qualified trait predicates could surface here."
+      },
+      {
+        "path": "compiler/rustc_typeck/src/impl_wf_check.rs",
+        "reason": "This is the driver that invokes min-specialization well-formedness checks on impls. While likely not the root semantic bug, it is directly on the execution path for this reproducer and may contain gating or integration logic that mishandles const-specialization cases."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/trait_def.rs",
+        "reason": "The reproducer depends on `#[rustc_specialization_trait]` being recognized properly. Trait metadata, including specialization-related flags, is represented here; if const-qualified uses of such traits are not surfaced consistently to later checks, this file is relevant."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/util.rs",
+        "reason": "The diagnostic shows a binder-wrapped internal predicate form. This utility file handles predicate anonymization and equality/deduplication, so an issue in canonicalizing or comparing `Binder(~const TraitPredicate(...))` could contribute to specialization checks rejecting an otherwise acceptable predicate."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/resolve.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/canonical/canonicalizer.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 129.55,
+    "stage_times_sec": {
+      "checkout": 1.434,
+      "load_bug_context": 0.053,
+      "test_behavior_analysis": 6.28,
+      "test_failure_analysis": 12.192,
+      "load_file_candidates": 0.104,
+      "search_suspicious_files": 109.488
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 15,
+      "input_tokens": 317076,
+      "output_tokens": 5289,
+      "total_tokens": 322365,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.28,
+          "input_tokens": 397,
+          "output_tokens": 319,
+          "total_tokens": 716
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.191,
+          "input_tokens": 1016,
+          "output_tokens": 679,
+          "total_tokens": 1695
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.438,
+          "input_tokens": 26707,
+          "output_tokens": 287,
+          "total_tokens": 26994
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.135,
+          "input_tokens": 26295,
+          "output_tokens": 300,
+          "total_tokens": 26595
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 9.099,
+          "input_tokens": 26488,
+          "output_tokens": 317,
+          "total_tokens": 26805
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.476,
+          "input_tokens": 26481,
+          "output_tokens": 340,
+          "total_tokens": 26821
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.434,
+          "input_tokens": 26443,
+          "output_tokens": 339,
+          "total_tokens": 26782
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.597,
+          "input_tokens": 26491,
+          "output_tokens": 304,
+          "total_tokens": 26795
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.329,
+          "input_tokens": 26560,
+          "output_tokens": 309,
+          "total_tokens": 26869
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.022,
+          "input_tokens": 25862,
+          "output_tokens": 279,
+          "total_tokens": 26141
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.011,
+          "input_tokens": 26037,
+          "output_tokens": 335,
+          "total_tokens": 26372
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.435,
+          "input_tokens": 26502,
+          "output_tokens": 273,
+          "total_tokens": 26775
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 9.093,
+          "input_tokens": 26085,
+          "output_tokens": 342,
+          "total_tokens": 26427
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.679,
+          "input_tokens": 19250,
+          "output_tokens": 332,
+          "total_tokens": 19582
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 8.716,
+          "input_tokens": 6462,
+          "output_tokens": 534,
+          "total_tokens": 6996
+        }
+      ]
+    }
+  }
+}

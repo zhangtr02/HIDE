@@ -1,0 +1,250 @@
+{
+  "bug_id": "121457",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-22",
+    "resolved": "3406ada96f8e16e49e947a91db3eba0db45245fa"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+    "compiler/rustc_hir_analysis/src/check/compare_impl_item/refine.rs",
+    "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+    "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+    "compiler/rustc_middle/src/middle/resolve_bound_vars.rs",
+    "compiler/rustc_ty_utils/src/assoc.rs",
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines a trait with a generic associated type `Item<'a>` using a required `where Self: 'a` outlives bound.",
+        "Uses return-position `impl Trait` in a trait method: `fn iter(&self) -> impl '_;`, exercising opaque type inference in trait signatures.",
+        "Implements the trait for `&'a I` where `I: Iterable`, testing recursive trait implementation through references.",
+        "The impl redeclares the GAT as `type Item<'a>: 'a;`, exercising lifetime constraints on associated type families in impls.",
+        "The impl method returns `impl Iterator<Item = Self::Item<'missing>>`, intentionally referencing an undeclared lifetime `'missing`.",
+        "This checks name resolution and lifetime validation for associated type projections inside `impl Trait` return types.",
+        "It also stresses interaction between higher-ranked lifetimes, GATs, and opaque return types during trait/impl consistency checking.",
+        "The program has no runtime behavior; it is purely a compile-fail reproducer targeting type checking and diagnostics."
+      ],
+      "summary": "The reproducer creates a trait with a GAT and an `impl Trait` method, then implements it for references. The impl intentionally uses an undeclared lifetime `'missing` inside `Self::Item<'missing>` in the opaque iterator return type. This exercises compiler handling of GAT lifetime bounds, reference-based trait impls, opaque return types in traits, and diagnostic/type-checking around invalid lifetime names in associated type projections."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern centers on well-formedness checking of an impl that combines three advanced type-system features: a generic associated type (GAT) with a required `where Self: 'a` bound, return-position `impl Trait` in a trait/impl method signature, and an associated type projection using an invalid lifetime argument (`Self::Item<'missing>`). The compiler does emit normal user-facing lifetime/name-resolution errors (E0261/E0496/E0477 are mentioned), but then additionally ICEs during the `check_well_formed` query for the impl. This strongly suggests the compiler continues WF/type validation on a partially invalid signature and hits an internal assumption violation instead of gracefully bailing out after earlier errors. The commonality across the reproducer behavior and query stack is improper recovery when validating opaque return types that mention projected GATs with erroneous lifetime arguments inside trait impl signatures. Because the panic happens while checking the impl itself, the likely defect is in compiler production code handling trait/impl signature WF, lifetime binding collection, or RPIT/opaque-type lowering for methods containing projection types with unresolved or undeclared late-bound/free regions.",
+      "possible_causes": [
+        "Bug in well-formedness checking for impl items: `rustc` likely attempts to validate the impl method signature after lifetime resolution has already failed, and does not correctly short-circuit on an `ErrorGuaranteed`/error type when encountering `Self::Item<'missing>` inside the return type.",
+        "Defect in opaque type (`impl Trait`) lowering or hidden-type computation for trait/impl methods: the compiler may assume all lifetimes referenced in the opaque return type are in scope, and panic when a projected GAT argument contains an undeclared region.",
+        "Incorrect handling of GAT projections with erroneous lifetime arguments during trait impl consistency checking: projection normalization or region collection may not be robust to invalid lifetime names inside `Self::Item<'...>` when used under `impl Iterator<Item = ...>`.",
+        "Compiler bug in lifetime/binder mapping for impl methods involving RPIT and GATs: the impl redeclares `type Item<'a>` and the method return type references another lifetime, so region scope validation may confuse item-bound lifetimes with method/opaque-type binders and reach an impossible internal state.",
+        "Error recovery hole in `check_well_formed` for associated type bounds in impls: after reporting E0261/E0496/E0477, the WF pass may still try to enforce outlives constraints (`Self: 'a`, `Item<'a>: 'a`) on a malformed associated type family or malformed projection, leading to an ICE instead of only diagnostics."
+      ],
+      "evidence": [
+        "Query stack shows the panic occurs in `check_well_formed` for the impl at `src/main.rs:9:1: 9:46`, not during codegen or runtime, so the defect is in compiler semantic analysis/WF checking.",
+        "The reproducer intentionally uses an undeclared lifetime `'missing` inside `Self::Item<'missing>`; compiler output lists lifetime-related errors (including E0261), confirming invalid input is diagnosed before the ICE.",
+        "The invalid lifetime appears specifically inside an associated type projection nested in an `impl Iterator<...>` opaque return type, matching the feature interaction most likely to trigger incomplete error recovery.",
+        "The trait defines a GAT with `where Self: 'a`, and the impl redeclares `type Item<'a>: 'a;`, so the compiler must process outlives requirements and lifetime binders while also validating the erroneous projection.",
+        "The implementation target is `&'a I where I: Iterable`, introducing recursive trait/reference structure and additional region constraints, which can stress trait/impl WF and binder substitution logic.",
+        "The compiler reports 'could not compile ... due to 7 previous errors' and still ICEs, which is characteristic of a recovery bug where analysis continues on malformed types instead of gracefully stopping."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1742,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The ICE occurs directly in the `check_well_formed` query for the impl, making the WF checker the strongest suspect. This reproducer feeds WF checking a malformed impl signature combining GATs, outlives bounds, and RPIT in a method return type with an undeclared lifetime inside `Self::Item<'missing>`, which is exactly the kind of error-recovery path this file handles."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/compare_impl_item.rs",
+        "reason": "The impl is for a trait method and must be checked against the trait signature. This file performs impl-vs-trait structural compatibility, including generic parameter and lifetime/binder agreement for methods, so a malformed RPIT return type with projected GAT arguments could leave it in an inconsistent state that later WF checking trips over."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/compare_impl_item/refine.rs",
+        "reason": "The reproducer specifically uses return-position `impl Trait` in a trait/impl method pair. This file contains RPITIT-specific impl checking, so interactions between the impl’s opaque return type and the projected `Self::Item<'missing>` are highly relevant, especially if erroneous lifetimes are not screened out before refinement logic runs."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/resolve_bound_vars.rs",
+        "reason": "The bug involves an undeclared lifetime embedded in an associated type projection inside an opaque return type. This file resolves lifetime references into bound/free/error forms and records opaque captured lifetimes, so a missed or mishandled erroneous lifetime in this binder-heavy context could propagate bad data into later WF checking."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/lifetime_collector.rs",
+        "reason": "Lifetime collection for `impl Trait`/opaque contexts is central here because the problematic `'missing` lifetime appears inside the return type of a trait impl method. If lowering incorrectly records or fails to reject lifetime uses within nested GAT projections under RPIT, later stages may ICE while assuming the collected set is valid."
+      },
+      {
+        "path": "compiler/rustc_middle/src/middle/resolve_bound_vars.rs",
+        "reason": "This file stores the resolved form of lifetime uses, including erroneous bindings, for later type checking. Since the reproducer is about an invalid lifetime name in a binder-sensitive RPIT+GAT context, corrupted or insufficiently defensive representation of `ResolvedArg` data could explain why diagnostics are emitted but WF checking still crashes."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/assoc.rs",
+        "reason": "Trait methods using RPITIT cause synthetic associated types to be created and queried. Because the reproducer combines trait RPIT with associated type projections, bugs in the associated-item query plumbing for impl-trait-in-associated-fn machinery could surface when the malformed impl signature is analyzed."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Opaque return types require remapping generics and regions from the enclosing method into the opaque definition. An undeclared lifetime nested in `Self::Item<'missing>` is a strong candidate for breaking assumptions in this remapping logic, especially in trait/impl method contexts with captured lifetimes."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Although the crash happens during analysis, opaque type inference support is heavily exercised by RPIT signatures. If the compiler attempts to form or relate hidden types for the impl method despite earlier lifetime errors, this file’s assumptions about valid captured regions and aliases may be violated."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "WF obligation generation for projected associated types and outlives constraints is directly implicated by the GAT `type Item<'a> where Self: 'a` and impl-side `type Item<'a>: 'a`. If malformed projected arguments like `'missing` are not handled robustly while generating obligations, this trait-WF layer could be contributing to the ICE path."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 154.299,
+    "stage_times_sec": {
+      "checkout": 1.192,
+      "load_bug_context": 0.113,
+      "test_behavior_analysis": 5.002,
+      "test_failure_analysis": 13.994,
+      "load_file_candidates": 0.087,
+      "search_suspicious_files": 133.91
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 422792,
+      "output_tokens": 7067,
+      "total_tokens": 429859,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.001,
+          "input_tokens": 383,
+          "output_tokens": 306,
+          "total_tokens": 689
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.994,
+          "input_tokens": 2228,
+          "output_tokens": 801,
+          "total_tokens": 3029
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.862,
+          "input_tokens": 27976,
+          "output_tokens": 386,
+          "total_tokens": 28362
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.297,
+          "input_tokens": 27980,
+          "output_tokens": 330,
+          "total_tokens": 28310
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.869,
+          "input_tokens": 27499,
+          "output_tokens": 350,
+          "total_tokens": 27849
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.866,
+          "input_tokens": 27736,
+          "output_tokens": 330,
+          "total_tokens": 28066
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.687,
+          "input_tokens": 27720,
+          "output_tokens": 348,
+          "total_tokens": 28068
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.789,
+          "input_tokens": 28121,
+          "output_tokens": 356,
+          "total_tokens": 28477
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.471,
+          "input_tokens": 27846,
+          "output_tokens": 415,
+          "total_tokens": 28261
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.406,
+          "input_tokens": 27870,
+          "output_tokens": 354,
+          "total_tokens": 28224
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.169,
+          "input_tokens": 27957,
+          "output_tokens": 358,
+          "total_tokens": 28315
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.022,
+          "input_tokens": 27771,
+          "output_tokens": 343,
+          "total_tokens": 28114
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.365,
+          "input_tokens": 28087,
+          "output_tokens": 344,
+          "total_tokens": 28431
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.542,
+          "input_tokens": 28006,
+          "output_tokens": 290,
+          "total_tokens": 28296
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 5.424,
+          "input_tokens": 28130,
+          "output_tokens": 247,
+          "total_tokens": 28377
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.863,
+          "input_tokens": 27891,
+          "output_tokens": 339,
+          "total_tokens": 28230
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.533,
+          "input_tokens": 15993,
+          "output_tokens": 333,
+          "total_tokens": 16326
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.714,
+          "input_tokens": 13598,
+          "output_tokens": 837,
+          "total_tokens": 14435
+        }
+      ]
+    }
+  }
+}

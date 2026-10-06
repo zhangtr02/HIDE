@@ -1,0 +1,252 @@
+{
+  "bug_id": "118992",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-12-15",
+    "resolved": "de686cbc65478db53e3d51c52497685e852cc092"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/gvn.rs",
+    "compiler/rustc_mir_transform/src/instsimplify.rs",
+    "compiler/rustc_mir_transform/src/lower_slice_len.rs",
+    "compiler/rustc_codegen_ssa/src/mir/rvalue.rs",
+    "compiler/rustc_codegen_ssa/src/mir/block.rs",
+    "compiler/rustc_mir_transform/src/const_prop.rs",
+    "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+    "compiler/rustc_codegen_llvm/src/base.rs",
+    "compiler/rustc_codegen_ssa/src/mir/operand.rs",
+    "compiler/rustc_mir_transform/src/copy_prop.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Creates a byte slice from a string literal using `\"f\".as_bytes()`, exercising string-to-`&[u8]` conversion and slice indexing support.",
+        "Computes an index from `slf.len() - 2`, where `len()` is 1, exercising unsigned integer arithmetic on `usize`.",
+        "The subtraction underflows for `1 - 2`, testing compiler/runtime handling of arithmetic overflow in debug-style builds.",
+        "Uses the computed `usize` to index a slice, exercising bounds-checked indexing on slices.",
+        "Because the index is invalid, execution should panic rather than produce a value, testing generated panic paths.",
+        "The code has no unsafe blocks, so it relies entirely on Rust’s safe runtime checks for arithmetic and indexing.",
+        "`let _n = ...` forces evaluation of the indexing expression even though the result is otherwise unused.",
+        "As a minimal `main`, it isolates constant-size slice operations and panic behavior without involving generics or external crates."
+      ],
+      "summary": "The reproducer turns a one-byte string into a byte slice, then indexes it with `slf.len() - 2`. Since the length is 1, subtracting 2 from `usize` underflows, and the resulting invalid index triggers Rust’s checked panic behavior. It exercises safe slice indexing, unsigned arithmetic overflow, and panic code generation in a tiny standalone program."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer is a tiny safe Rust program whose only interesting behavior is a guaranteed failing index expression: `slf[slf.len() - 2]` on a one-byte slice. The common pattern across the source, behavior summary, and query stack is that this is not a type-checking problem but a MIR/codegen-time failure while optimizing `main`. The query stack shows the ICE occurs in `optimized_mir` for `main`, before/while mono item collection, and the compiler was run with MIR optimizations explicitly enabled (`-Z mir-enable-passes=+GVN`, `-Z inline-mir`). The expression combines two panic-producing operations in one place: checked unsigned subtraction on `usize` and bounds-checked slice indexing. Because the operand sizes are compile-time obvious (`len` of a string literal byte slice is effectively constant 1), MIR optimizations may try to constant-fold, propagate, or simplify the checks and panic paths. A likely compiler defect is therefore in MIR optimization or interpretation of overflow/bounds-check logic, especially when GVN or related passes reason about `Len`, `Sub`, and slice indexing together and mishandle an always-panicking path, causing an internal inconsistency or panic in the compiler rather than emitting code that panics at runtime.",
+      "possible_causes": [
+        "Bug in MIR optimization (especially GVN/const-prop/simplification) when folding `slice.len() - const` on a known-length slice, incorrectly handling `usize` underflow and producing invalid MIR state.",
+        "Defect in optimization of checked arithmetic feeding slice indexing, where the compiler merges or reorders overflow and bounds-check panic paths incorrectly for always-failing expressions.",
+        "Incorrect handling of `Len` for `\"literal\".as_bytes()` during MIR inlining/optimization, causing the optimizer to treat the length/index facts inconsistently and crash during `optimized_mir`.",
+        "Compiler bug in panic-path generation or terminator simplification for safe indexing expressions that are statically known to panic, leading to an ICE during codegen preparation rather than normal runtime-panic code generation.",
+        "Interaction bug between `-Z mir-enable-passes=+GVN` and `-Z inline-mir` on slice indexing with underflowed `usize` index, exposing a faulty assumption in value-numbering or propagation over checked operations."
+      ],
+      "evidence": [
+        "Query stack pinpoints the failure at `#0 [optimized_mir] optimizing MIR for main`, indicating a compiler optimization/MIR issue rather than parsing, HIR, or borrow checking.",
+        "The backtrace ends in codegen entry points, consistent with an ICE after MIR optimization while preparing/codegening the crate.",
+        "The reproducer is fully safe Rust with no unsafe code or external crates, so the failure is unlikely to stem from user UB and instead points to compiler handling of safe runtime checks.",
+        "The core expression combines `slf.len()` with `- 2` where `slf` is `\"f\".as_bytes()`, making the length effectively 1 and the subtraction guaranteed to underflow on `usize`.",
+        "The invalid index is then used for slice indexing, so the compiler must represent/check two panic conditions in the same expression: arithmetic overflow and out-of-bounds indexing.",
+        "Compiler flags explicitly enable MIR transformations (`-Z mir-opt-level=1`, `-Z mir-enable-passes=+GVN`, `-Z inline-mir`), increasing confidence that the crash is triggered by a MIR optimization pass.",
+        "Because the result is assigned to `_n`, the expression is forced to be evaluated, so the optimizer must preserve panic semantics; misoptimization of this always-panicking path is a plausible ICE trigger.",
+        "The program is minimal and non-generic, which reduces the likely defect surface to core compiler handling of slice length, checked arithmetic, indexing, and panic code generation."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1723,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_transform/src/gvn.rs",
+        "reason": "Most suspicious because the ICE only reproduces with `-Z mir-enable-passes=+GVN`, and the panic occurs in `optimized_mir` for `main`. This pass reasons about SSA values, constants, `Len`, arithmetic, and replacement of equivalent expressions; the reproducer combines a statically-known slice length with `usize` underflow and indexing, which is exactly the kind of always-panicking path GVN could mishandle and leave MIR in an invalid state."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/instsimplify.rs",
+        "reason": "This peephole MIR pass explicitly simplifies length operations, UB-check patterns, and other instruction forms before/after CFG cleanup. The reproducer depends on preserving correct overflow and bounds-check panic semantics for `slf.len() - 2`, so a bad simplification around `Len`, subtraction, or assertion structure could trigger an ICE during later optimized MIR/codegen."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/lower_slice_len.rs",
+        "reason": "The source expression uses `\"f\".as_bytes().len()`, and this pass specifically rewrites slice-length calls into MIR metadata operations. If the lowering from slice len to pointer metadata is incorrect or interacts badly with later GVN/inline-MIR on a known one-byte string slice, it could create inconsistent MIR facts that surface as an ICE."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/rvalue.rs",
+        "reason": "If optimization succeeds but produces edge-case MIR, this file is a strong downstream suspect because it lowers MIR rvalues such as `Len`, arithmetic/binops, and indexing-related components into backend IR. The reproducer’s core expression is exactly an rvalue-heavy combination of slice length and checked subtraction feeding an indexing operation."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/block.rs",
+        "reason": "Slice indexing and integer overflow both ultimately become MIR assertions/terminators that must lower to panic paths correctly. A compiler panic during codegen after MIR optimization could come from this terminator/assert lowering code encountering malformed or unexpectedly simplified assert structure for an always-failing expression."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/const_prop.rs",
+        "reason": "Although the query stack highlights optimized MIR rather than pure const-eval, this pass is directly involved in evaluating simple expressions and handling statically-known assertion failures. The reproducer presents a nearly constant expression (`len` known to be 1), so a bad interaction between const propagation and panic-producing arithmetic/index checks is plausible."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+        "reason": "This is where checked arithmetic and related rvalue forms are originally built into MIR. If the subtraction `slf.len() - 2` is lowered with incorrect overflow-check structure or operand form, later MIR optimization passes like GVN could trip over that malformed starting point."
+      },
+      {
+        "path": "compiler/rustc_codegen_llvm/src/base.rs",
+        "reason": "The visible stack trace ends in the shared codegen/codegen_crate flow, so the LLVM backend top-level module is a weaker but still plausible suspect if the crash is backend-triggered by optimized MIR for `main`. It is less likely than MIR transforms, but still on the path actually panicking."
+      },
+      {
+        "path": "compiler/rustc_codegen_ssa/src/mir/operand.rs",
+        "reason": "Operand lowering is involved in turning constants, immediates, and references for slice/index operations into backend values. If optimized MIR creates an unusual operand form for the underflowed index or slice metadata, this layer could assert or panic while materializing it."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/copy_prop.rs",
+        "reason": "A lower-confidence candidate, but still in the optimized MIR pipeline at the enabled optimization level. Copy propagation over SSA locals participating in slice length, arithmetic, and assertion checks could interact with GVN and contribute to invalid rewritten MIR in this minimal function."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 147.924,
+    "stage_times_sec": {
+      "checkout": 1.11,
+      "load_bug_context": 0.031,
+      "test_behavior_analysis": 5.646,
+      "test_failure_analysis": 13.501,
+      "load_file_candidates": 0.13,
+      "search_suspicious_files": 127.505
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 416832,
+      "output_tokens": 7015,
+      "total_tokens": 423847,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.646,
+          "input_tokens": 352,
+          "output_tokens": 285,
+          "total_tokens": 637
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.501,
+          "input_tokens": 2156,
+          "output_tokens": 787,
+          "total_tokens": 2943
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.738,
+          "input_tokens": 27913,
+          "output_tokens": 316,
+          "total_tokens": 28229
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.254,
+          "input_tokens": 27878,
+          "output_tokens": 399,
+          "total_tokens": 28277
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.482,
+          "input_tokens": 27414,
+          "output_tokens": 376,
+          "total_tokens": 27790
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.872,
+          "input_tokens": 27670,
+          "output_tokens": 349,
+          "total_tokens": 28019
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 11.571,
+          "input_tokens": 27617,
+          "output_tokens": 441,
+          "total_tokens": 28058
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.683,
+          "input_tokens": 28035,
+          "output_tokens": 323,
+          "total_tokens": 28358
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.177,
+          "input_tokens": 27855,
+          "output_tokens": 289,
+          "total_tokens": 28144
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.129,
+          "input_tokens": 27790,
+          "output_tokens": 316,
+          "total_tokens": 28106
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.726,
+          "input_tokens": 27885,
+          "output_tokens": 411,
+          "total_tokens": 28296
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.285,
+          "input_tokens": 27702,
+          "output_tokens": 314,
+          "total_tokens": 28016
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.714,
+          "input_tokens": 27993,
+          "output_tokens": 318,
+          "total_tokens": 28311
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.173,
+          "input_tokens": 27976,
+          "output_tokens": 334,
+          "total_tokens": 28310
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.825,
+          "input_tokens": 28025,
+          "output_tokens": 287,
+          "total_tokens": 28312
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.261,
+          "input_tokens": 27784,
+          "output_tokens": 317,
+          "total_tokens": 28101
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 6.528,
+          "input_tokens": 11977,
+          "output_tokens": 321,
+          "total_tokens": 12298
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.052,
+          "input_tokens": 12810,
+          "output_tokens": 832,
+          "total_tokens": 13642
+        }
+      ]
+    }
+  }
+}

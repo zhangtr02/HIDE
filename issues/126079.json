@@ -1,0 +1,11 @@
+{
+  "title": "Associated types in object-safe method signatures don't always come from supertraits",
+  "labels": [
+    "P-high",
+    "I-unsound",
+    "C-bug",
+    "T-types",
+    "A-dyn-trait"
+  ],
+  "body": "One of the requirements for a trait to be object-safe is that the associated types that show up in signatures of methods come from the supertraits of the object. We don't currently implement this correctly -- we currently ignore the substitutions of the associated type 😿.\r\n\r\nThis is unsound:\r\n\r\n```rust\r\nuse core::marker::PhantomData;\r\n\r\nfn transmute<T, U>(t: T) -> U {\r\n    (&PhantomData::<T> as &dyn Foo<T, U>).transmute(t)\r\n}\r\n\r\nstruct ActuallySuper;\r\nstruct NotActuallySuper;\r\ntrait Super<Q> {\r\n    type Assoc;\r\n}\r\n\r\ntrait Dyn {\r\n    type Out;\r\n}\r\nimpl<T, U> Dyn for dyn Foo<T, U> + '_ {\r\n    type Out = U;\r\n}\r\nimpl<S: Dyn<Out = U> + ?Sized, U> Super<NotActuallySuper> for S {\r\n    type Assoc = U;\r\n}\r\n\r\ntrait Foo<T, U>: Super<ActuallySuper, Assoc = T> where <Self as Mirror>::Assoc: Super<NotActuallySuper> {\r\n    fn transmute(&self, t: T) -> <Self as Super<NotActuallySuper>>::Assoc;\r\n}\r\n\r\ntrait Mirror {\r\n    type Assoc: ?Sized;\r\n}\r\nimpl<T: ?Sized> Mirror for T {\r\n    type Assoc = T;\r\n}\r\n\r\nimpl<T, U> Foo<T, U> for PhantomData<T> {\r\n    fn transmute(&self, t: T) -> T {\r\n        t\r\n    }\r\n}\r\nimpl<T> Super<ActuallySuper> for PhantomData<T> {\r\n    type Assoc = T;\r\n}\r\nimpl<T> Super<NotActuallySuper> for PhantomData<T> {\r\n    type Assoc = T;\r\n}\r\n\r\nfn main() {\r\n    let x = String::from(\"hello, world\");\r\n    let s = transmute::<&str, &'static str>(x.as_str());\r\n    drop(x);\r\n    println!(\"> {s}\");\r\n}\r\n```\r\n\r\nSpecifically, `fn transmute(&self, t: T) -> <Self as Super<NotActuallySuper>>::Assoc;` should only be sound if the return type was `<Self as Super<ActuallySuper>>::Assoc`, *or* if we added `Super<NotActuallySuper>` as a supertrait.\r\n\r\nWe should probably deeply normalize these supertraits and actually consider the associated types' substs match modulo regions."
+}

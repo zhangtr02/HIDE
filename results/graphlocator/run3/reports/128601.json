@@ -1,0 +1,337 @@
+{
+  "bug_id": "128601",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-08-03",
+    "resolved": "fd8d6fbe505ecf913f5e2ca590c69a7da2789879"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/inline.rs",
+    "compiler/rustc_middle/src/mir/mod.rs",
+    "compiler/rustc_mir_transform/src/lib.rs",
+    "compiler/rustc_mir_transform/src/mentioned_items.rs",
+    "compiler/rustc_monomorphize/src/collector.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_mir_transform/src/inline.rs",
+      "compiler/rustc_middle/src/mir/mod.rs",
+      "compiler/rustc_mir_transform/src/lib.rs",
+      "compiler/rustc_mir_transform/src/mentioned_items.rs",
+      "compiler/rustc_monomorphize/src/collector.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_mir_transform/src/inline.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_middle/src/mir/mod.rs",
+        "rank": 2
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/lib.rs",
+        "rank": 3
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/mentioned_items.rs",
+        "rank": 4
+      },
+      {
+        "path": "compiler/rustc_monomorphize/src/collector.rs",
+        "rank": 5
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/128601.json",
+    "graph_cache_hit": true,
+    "graph_cache_build_mode": "bug_cache",
+    "graph_cache_bug_id": "128601",
+    "graph_cache_checkout_commit": "fd8d6fbe505ecf913f5e2ca590c69a7da2789879",
+    "initial_graph_node_count": 57056,
+    "initial_graph_edge_count": 57055,
+    "graph_node_count": 57056,
+    "graph_edge_count": 125844,
+    "lazy_loaded_edge_count": 68789,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FILE\", \"name\": \"inline.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"inline.rs\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"inline_call\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"fn inline_call(\\n        &self,\\n        caller_body: &mut Body<'tcx>,\\n        callsite: &CallSite<'tcx>,\\n        mut callee_body: Body<'tcx>,\\n    ) {\\n        let terminator = caller_body[callsite.block].terminator.take().unwrap();\\n        let TerminatorKind::Call { func, args, destination, unwind, target, .. } = terminator.kind\\n        else {\\n            bug!(\\\"unexpected terminator kind {:?}\\\", terminator.kind);\\n        };\\n\\n        let return_block = if let Some(block) = target {\\n            // Prepare a new block for code that should execute when call returns. We don't use\\n            // target block directly since it might have other predecessors.\\n            let mut data = BasicBlockData::new(Some(Terminator {\\n                source_info: terminator.source_info,\\n                kind: TerminatorKind::Goto { target: block },\\n            }));\\n            data.is_cleanup = caller_body[block].is_cleanup;\\n            Some(caller_body.basic_blocks_mut().push(data))\\n        } else {\\n            None\\n        };\\n\\n        // If the call is something like `a[*i] = f(i)`, where\\n        // `i : &mut usize`, then just duplicating the `a[*i]`\\n        // Place could result in two different locations if `f`\\n        // writes to `i`. To prevent this we need to create a temporary\\n        // borrow of the place and pass the destination as `*temp` instead.\\n        fn dest_needs_borrow(place: Place<'_>) -> bool {\\n            for elem in place.projection.iter() {\\n                match elem {\\n                    ProjectionElem::Deref | ProjectionElem::Index(_) => return true,\\n                    _ => {}\\n                }\\n            }\\n\\n            false\\n        }\\n\\n        let dest = if dest_needs_borrow(destination) {\\n            trace!(\\\"creating temp for return destination\\\");\\n            let dest = Rvalue::Ref(\\n                self.tcx.lifetimes.re_erased,\\n                BorrowKind::Mut { kind: MutBorrowKind::Default },\\n                destination,\\n            );\\n            let dest_ty = dest.ty(caller_body, self.tcx);\\n            let temp =\\n                Place::from(self.new_call_temp(caller_body, &callsite, dest_ty, return_block));\\n            caller_body[callsite.block].statements.push(Statement {\\n                source_info: callsite.source_info,\\n                kind: StatementKind::Assign(Box::new((temp, dest))),\\n            });\\n            self.tcx.mk_place_deref(temp)\\n        } else {\\n            destination\\n        };\\n\\n        // Always create a local to hold the destination, as `RETURN_PLACE` may appear\\n        // where a full `Place` is not allowed.\\n        let (remap_destination, destination_local) = if let Some(d) = dest.as_local() {\\n            (false, d)\\n        } else {\\n            (\\n                true,\\n                self.new_call_temp(\\n                    caller_body,\\n                    &callsite,\\n                    destination.ty(caller_body, self.tcx).ty,\\n                    return_block,\\n                ),\\n            )\\n        };\\n\\n        // Copy the arguments if needed.\\n        let args = self.make_call_args(args, &callsite, caller_body, &callee_body, return_block);\\n\\n        let mut integrator = Integrator {\\n            args: &args,\\n            new_locals: Local::new(caller_body.local_decls.len())..,\\n            new_scopes: SourceScope::new(caller_body.source_scopes.len())..,\\n            new_blocks: BasicBlock::new(caller_body.basic_blocks.len())..,\\n            destination: destination_local,\\n            callsite_scope: caller_body.source_scopes[callsite.source_info.scope].clone(),\\n            callsite,\\n            cleanup_block: unwind,\\n            in_cleanup_block: false,\\n            return_block,\\n            tcx: self.tcx,\\n            always_live_locals: BitSet::new_filled(callee_body.local_decls.len()),\\n        };\\n\\n        // Map all `Local`s, `SourceScope`s and `BasicBlock`s to new ones\\n        // (or existing ones, in a few special cases) in the caller.\\n        integrator.visit_body(&mut callee_body);\\n\\n        // If there are any locals without storage markers, give them storage only for the\\n        // duration of the call.\\n        for local in callee_body.vars_and_temps_iter() {\\n            if integrator.always_live_locals.contains(local) {\\n                let new_local = integrator.map_local(local);\\n                caller_body[callsite.block].statements.push(Statement {\\n                    source_info: callsite.source_info,\\n                    kind: StatementKind::StorageLive(new_local),\\n                });\\n            }\\n        }\\n        if let Some(block) = return_block {\\n            // To avoid repeated O(n) insert, push any new statements to the end and rotate\\n            // the slice once.\\n            let mut n = 0;\\n            if remap_destination {\\n                caller_body[block].statements.push(Statement {\\n                    source_info: callsite.source_info,\\n                    kind: StatementKind::Assign(Box::new((\\n                        dest,\\n                        Rvalue::Use(Operand::Move(destination_local.into())),\\n                    ))),\\n                });\\n                n += 1;\\n            }\\n            for local in callee_body.vars_and_temps_iter().rev() {\\n                if integrator.always_live_locals.contains(local) {\\n                    let new_local = integrator.map_local(local);\\n                    caller_body[block].statements.push(Statement {\\n                        source_info: callsite.source_info,\\n                        kind: StatementKind::StorageDead(new_local),\\n                    });\\n                    n += 1;\\n                }\\n            }\\n            caller_body[block].statements.rotate_right(n);\\n        }\\n\\n        // Insert all of the (mapped) parts of the callee body into the caller.\\n        caller_body.local_decls.extend(callee_body.drain_vars_and_temps());\\n        caller_body.source_scopes.extend(&mut callee_body.source_scopes.drain(..));\\n        if self\\n            .tcx\\n            .sess\\n            .opts\\n            .unstable_opts\\n            .inline_mir_preserve_debug\\n            .unwrap_or(self.tcx.sess.opts.debuginfo != DebugInfo::None)\\n        {\\n            // Note that we need to preserve these in the standard library so that\\n            // people working on rust can build with or without debuginfo while\\n            // still getting consistent results from the mir-opt tests.\\n            caller_body.var_debug_info.append(&mut callee_body.var_debug_info);\\n        }\\n        caller_body.basic_blocks_mut().extend(callee_body.basic_blocks_mut().drain(..));\\n\\n        caller_body[callsite.block].terminator = Some(Terminator {\\n            source_info: callsite.source_info,\\n            kind: TerminatorKind::Goto { target: integrator.map_block(START_BLOCK) },\\n        });\\n\\n        // Copy required constants from the callee_body into the caller_body. Although we are only\\n        // pushing unevaluated consts to `required_consts`, here they may have been evaluated\\n        // because we are calling `instantiate_and_normalize_erasing_regions` -- so we filter again.\\n        caller_body.required_consts.as_mut().unwrap().extend(\\n            callee_body.required_consts().into_iter().filter(|ct| ct.const_.is_required_const()),\\n        );\\n        // Now that we incorporated the callee's `required_consts`, we can remove the callee from\\n        // `mentioned_items` -- but we have to take their `mentioned_items` in return. This does\\n        // some extra work here to save the monomorphization collector work later. It helps a lot,\\n        // since monomorphization can avoid a lot of work when the \\\"mentioned items\\\" are similar to\\n        // the actually used items. By doing this we can entirely avoid visiting the callee!\\n        // We need to reconstruct the `required_item` for the callee so that we can find and\\n        // remove it.\\n        let callee_item = MentionedItem::Fn(func.ty(caller_body, self.tcx));\\n        let caller_mentioned_items = caller_body.mentioned_items.as_mut().unwrap();\\n        if let Some(idx) = caller_mentioned_items.iter().position(|item| item.node == callee_item) {\\n            // We found the callee, so remove it and add its items instead.\\n            caller_mentioned_items.remove(idx);\\n            caller_mentioned_items.extend(callee_body.mentioned_items());\\n        } else {\\n            // If we can't find the callee, there's no point in adding its items. Probably it\\n            // already got removed by being inlined elsewhere in the same function, so we already\\n            // took its items.\\n        }\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"inner_optimized_mir\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/lib.rs\", \"content\": \"fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {\\n    if tcx.is_constructor(did.to_def_id()) {\\n        // There's no reason to run all of the MIR passes on constructors when\\n        // we can just output the MIR we want directly. This also saves const\\n        // qualification and borrow checking the trouble of special casing\\n        // constructors.\\n        return shim::build_adt_ctor(tcx, did.to_def_id());\\n    }\\n\\n    match tcx.hir().body_const_context(did) {\\n        // Run the `mir_for_ctfe` query, which depends on `mir_drops_elaborated_and_const_checked`\\n        // which we are going to steal below. Thus we need to run `mir_for_ctfe` first, so it\\n        // computes and caches its result.\\n        Some(hir::ConstContext::ConstFn) => tcx.ensure_with_value().mir_for_ctfe(did),\\n        None => {}\\n        Some(other) => panic!(\\\"do not use `optimized_mir` for constants: {other:?}\\\"),\\n    }\\n    debug!(\\\"about to call mir_drops_elaborated...\\\");\\n    let body = tcx.mir_drops_elaborated_and_const_checked(did).steal();\\n    let mut body = remap_mir_for_const_eval_select(tcx, body, hir::Constness::NotConst);\\n\\n    if body.tainted_by_errors.is_some() {\\n        return body;\\n    }\\n\\n    // Before doing anything, remember which items are being mentioned so that the set of items\\n    // visited does not depend on the optimization level.\\n    // We do not use `run_passes` for this as that might skip the pass if `injection_phase` is set.\\n    mentioned_items::MentionedItems.run_pass(tcx, &mut body);\\n    // If this has an associated by-move async closure body, that doesn't get run through these\\n    // passes itself, it gets \\\"tagged along\\\" by the pass manager. Since we're not using the pass\\n    // manager we have to do this by hand.\\n    if let Some(coroutine) = body.coroutine.as_mut() {\\n        if let Some(by_move_body) = coroutine.by_move_body.as_mut() {\\n            mentioned_items::MentionedItems.run_pass(tcx, by_move_body);\\n        }\\n    }\\n\\n    // If `mir_drops_elaborated_and_const_checked` found that the current body has unsatisfiable\\n    // predicates, it will shrink the MIR to a single `unreachable` terminator.\\n    // More generally, if MIR is a lone `unreachable`, there is nothing to optimize.\\n    if let TerminatorKind::Unreachable = body.basic_blocks[START_BLOCK].terminator().kind\\n        && body.basic_blocks[START_BLOCK].statements.is_empty()\\n    {\\n        return body;\\n    }\\n\\n    run_optimization_passes(tcx, &mut body);\\n\\n    body\\n}\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"mentioned_items\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_middle/src/mir/mod.rs\", \"content\": \"pub fn mentioned_items(&self) -> &[Spanned<MentionedItem<'tcx>>] {\\n        match &self.mentioned_items {\\n            Some(l) => l,\\n            None => panic!(\\\"mentioned_items for {:?} have not yet been set\\\", self.source.def_id()),\\n        }\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"collect_items_of_instance\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_monomorphize/src/collector.rs\", \"content\": \"fn collect_items_of_instance<'tcx>(\\n    tcx: TyCtxt<'tcx>,\\n    instance: Instance<'tcx>,\\n    used_items: &mut MonoItems<'tcx>,\\n    mentioned_items: &mut MonoItems<'tcx>,\\n    mode: CollectionMode,\\n) {\\n    let body = tcx.instance_mir(instance.def);\\n    // Naively, in \\\"used\\\" collection mode, all functions get added to *both* `used_items` and\\n    // `mentioned_items`. Mentioned items processing will then notice that they have already been\\n    // visited, but at that point each mentioned item has been monomorphized, added to the\\n    // `mentioned_items` worklist, and checked in the global set of visited items. To remove that\\n    // overhead, we have a special optimization that avoids adding items to `mentioned_items` when\\n    // they are already added in `used_items`. We could just scan `used_items`, but that's a linear\\n    // scan and not very efficient. Furthermore we can only do that *after* monomorphizing the\\n    // mentioned item. So instead we collect all pre-monomorphized `MentionedItem` that were already\\n    // added to `used_items` in a hash set, which can efficiently query in the\\n    // `body.mentioned_items` loop below without even having to monomorphize the item.\\n    let mut used_mentioned_items = Default::default();\\n    let mut collector = MirUsedCollector {\\n        tcx,\\n        body,\\n        used_items,\\n        used_mentioned_items: &mut used_mentioned_items,\\n        instance,\\n        visiting_call_terminator: false,\\n        move_check: MoveCheckState::new(),\\n    };\\n\\n    if mode == CollectionMode::UsedItems {\\n        for (bb, data) in traversal::mono_reachable(body, tcx, instance) {\\n            collector.visit_basic_block_data(bb, data)\\n        }\\n    }\\n\\n    // Always visit all `required_consts`, so that we evaluate them and abort compilation if any of\\n    // them errors.\\n    for const_op in body.required_consts() {\\n        if let Some(val) = collector.eval_constant(const_op) {\\n            collect_const_value(tcx, val, mentioned_items);\\n        }\\n    }\\n\\n    // Always gather mentioned items. We try to avoid processing items that we have already added to\\n    // `used_items` above.\\n    for item in body.mentioned_items() {\\n        if !collector.used_mentioned_items.contains(&item.node) {\\n            let item_mono = collector.monomorphize(item.node);\\n            visit_mentioned_item(tcx, &item_mono, item.span, mentioned_items);\\n        }\\n    }\\n}\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"run_pass\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/mentioned_items.rs\", \"content\": \"fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut mir::Body<'tcx>) {\\n        let mut mentioned_items = Vec::new();\\n        MentionedItemsVisitor { tcx, body, mentioned_items: &mut mentioned_items }.visit_body(body);\\n        body.set_mentioned_items(mentioned_items);\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"try_inlining\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_mir_transform/src/inline.rs\", \"content\": \"fn try_inlining(\\n        &self,\\n        caller_body: &mut Body<'tcx>,\\n        callsite: &CallSite<'tcx>,\\n    ) -> Result<std::ops::Range<BasicBlock>, &'static str> {\\n        self.check_mir_is_available(caller_body, callsite.callee)?;\\n\\n        let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());\\n        let cross_crate_inlinable = self.tcx.cross_crate_inlinable(callsite.callee.def_id());\\n        self.check_codegen_attributes(callsite, callee_attrs, cross_crate_inlinable)?;\\n\\n        // Intrinsic fallback bodies are automatically made cross-crate inlineable,\\n        // but at this stage we don't know whether codegen knows the intrinsic,\\n        // so just conservatively don't inline it.\\n        if self.tcx.has_attr(callsite.callee.def_id(), sym::rustc_intrinsic) {\\n            return Err(\\\"Callee is an intrinsic, do not inline fallback bodies\\\");\\n        }\\n\\n        let terminator = caller_body[callsite.block].terminator.as_ref().unwrap();\\n        let TerminatorKind::Call { args, destination, .. } = &terminator.kind else { bug!() };\\n        let destination_ty = destination.ty(&caller_body.local_decls, self.tcx).ty;\\n        for arg in args {\\n            if !arg.node.ty(&caller_body.local_decls, self.tcx).is_sized(self.tcx, self.param_env) {\\n                // We do not allow inlining functions with unsized params. Inlining these functions\\n                // could create unsized locals, which are unsound and being phased out.\\n                return Err(\\\"Call has unsized argument\\\");\\n            }\\n        }\\n\\n        let callee_body = try_instance_mir(self.tcx, callsite.callee.def)?;\\n        self.check_mir_body(callsite, callee_body, callee_attrs, cross_crate_inlinable)?;\\n\\n        if !self.tcx.consider_optimizing(|| {\\n            format!(\\\"Inline {:?} into {:?}\\\", callsite.callee, caller_body.source)\\n        }) {\\n            return Err(\\\"optimization fuel exhausted\\\");\\n        }\\n\\n        let Ok(callee_body) = callsite.callee.try_instantiate_mir_and_normalize_erasing_regions(\\n            self.tcx,\\n            self.param_env,\\n            ty::EarlyBinder::bind(callee_body.clone()),\\n        ) else {\\n            return Err(\\\"failed to normalize callee body\\\");\\n        };\\n\\n        // Normally, this shouldn't be required, but trait normalization failure can create a\\n        // validation ICE.\\n        if !validate_types(\\n            self.tcx,\\n            MirPhase::Runtime(RuntimePhase::Optimized),\\n            self.param_env,\\n            &callee_body,\\n            &caller_body,\\n        )\\n        .is_empty()\\n        {\\n            return Err(\\\"failed to validate callee body\\\");\\n        }\\n\\n        // Check call signature compatibility.\\n        // Normally, this shouldn't be required, but trait normalization failure can create a\\n        // validation ICE.\\n        let output_type = callee_body.return_ty();\\n        if !util::relate_types(self.tcx, self.param_env, ty::Covariant, output_type, destination_ty)\\n        {\\n            trace!(?output_type, ?destination_ty);\\n            return Err(\\\"failed to normalize return type\\\");\\n        }\\n        if callsite.fn_sig.abi() == Abi::RustCall {\\n            // FIXME: Don't inline user-written `extern \\\"rust-call\\\"` functions,\\n            // since this is generally perf-negative on rustc, and we hope that\\n            // LLVM will inline these functions instead.\\n            if callee_body.spread_arg.is_some() {\\n                return Err(\\\"do not inline user-written rust-call functions\\\");\\n            }\\n\\n            let (self_arg, arg_tuple) = match &args[..] {\\n                [arg_tuple] => (None, arg_tuple),\\n                [self_arg, arg_tuple] => (Some(self_arg), arg_tuple),\\n                _ => bug!(\\\"Expected `rust-call` to have 1 or 2 args\\\"),\\n            };\\n\\n            let self_arg_ty =\\n                self_arg.map(|self_arg| self_arg.node.ty(&caller_body.local_decls, self.tcx));\\n\\n            let arg_tuple_ty = arg_tuple.node.ty(&caller_body.local_decls, self.tcx);\\n            let ty::Tuple(arg_tuple_tys) = *arg_tuple_ty.kind() else {\\n                bug!(\\\"Closure arguments are not passed as a tuple\\\");\\n            };\\n\\n            for (arg_ty, input) in\\n                self_arg_ty.into_iter().chain(arg_tuple_tys).zip(callee_body.args_iter())\\n            {\\n                let input_type = callee_body.local_decls[input].ty;\\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\\n                {\\n                    trace!(?arg_ty, ?input_type);\\n                    return Err(\\\"failed to normalize tuple argument type\\\");\\n                }\\n            }\\n        } else {\\n            for (arg, input) in args.iter().zip(callee_body.args_iter()) {\\n                let input_type = callee_body.local_decls[input].ty;\\n                let arg_ty = arg.node.ty(&caller_body.local_decls, self.tcx);\\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\\n                {\\n                    trace!(?arg_ty, ?input_type);\\n                    return Err(\\\"failed to normalize argument type\\\");\\n                }\\n            }\\n        }\\n\\n        let old_blocks = caller_body.basic_blocks.next_index();\\n        self.inline_call(caller_body, callsite, callee_body);\\n        let new_blocks = old_blocks..caller_body.basic_blocks.next_index();\\n\\n        Ok(new_blocks)\\n    }\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_mir_transform/src/inline.rs",
+      "compiler/rustc_middle/src/mir/mod.rs",
+      "compiler/rustc_mir_transform/src/lib.rs",
+      "compiler/rustc_mir_transform/src/mentioned_items.rs",
+      "compiler/rustc_monomorphize/src/collector.rs"
+    ],
+    "found_modules": [],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Inlining uses callee_body.mentioned_items before they are initialized",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "inline_call",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "fn inline_call(\n        &self,\n        caller_body: &mut Body<'tcx>,\n        callsite: &CallSite<'tcx>,\n        mut callee_body: Body<'tcx>,\n    ) {\n        let terminator = caller_body[callsite.block].terminator.take().unwrap();\n        let TerminatorKind::Call { func, args, destination, unwind, target, .. } = terminator.kind\n        else {\n            bug!(\"unexpected terminator kind {:?}\", terminator.kind);\n        };\n\n        let return_block = if let Some(block) = target {\n            // Prepare a new block for code that should execute when call returns. We don't use\n            // target block directly since it might have other predecessors.\n            let mut data = BasicBlockData::new(Some(Terminator {\n                source_info: terminator.source_info,\n                kind: TerminatorKind::Goto { target: block },\n            }));\n            data.is_cleanup = caller_body[block].is_cleanup;\n            Some(caller_body.basic_blocks_mut().push(data))\n        } else {\n            None\n        };\n\n        // If the call is something like `a[*i] = f(i)`, where\n        // `i : &mut usize`, then just duplicating the `a[*i]`\n        // Place could result in two different locations if `f`\n        // writes to `i`. To prevent this we need to create a temporary\n        // borrow of the place and pass the destination as `*temp` instead.\n        fn dest_needs_borrow(place: Place<'_>) -> bool {\n            for elem in place.projection.iter() {\n                match elem {\n                    ProjectionElem::Deref | ProjectionElem::Index(_) => return true,\n                    _ => {}\n                }\n            }\n\n            false\n        }\n\n        let dest = if dest_needs_borrow(destination) {\n            trace!(\"creating temp for return destination\");\n            let dest = Rvalue::Ref(\n                self.tcx.lifetimes.re_erased,\n                BorrowKind::Mut { kind: MutBorrowKind::Default },\n                destination,\n            );\n            let dest_ty = dest.ty(caller_body, self.tcx);\n            let temp =\n                Place::from(self.new_call_temp(caller_body, &callsite, dest_ty, return_block));\n            caller_body[callsite.block].statements.push(Statement {\n                source_info: callsite.source_info,\n                kind: StatementKind::Assign(Box::new((temp, dest))),\n            });\n            self.tcx.mk_place_deref(temp)\n        } else {\n            destination\n        };\n\n        // Always create a local to hold the destination, as `RETURN_PLACE` may appear\n        // where a full `Place` is not allowed.\n        let (remap_destination, destination_local) = if let Some(d) = dest.as_local() {\n            (false, d)\n        } else {\n            (\n                true,\n                self.new_call_temp(\n                    caller_body,\n                    &callsite,\n                    destination.ty(caller_body, self.tcx).ty,\n                    return_block,\n                ),\n            )\n        };\n\n        // Copy the arguments if needed.\n        let args = self.make_call_args(args, &callsite, caller_body, &callee_body, return_block);\n\n        let mut integrator = Integrator {\n            args: &args,\n            new_locals: Local::new(caller_body.local_decls.len())..,\n            new_scopes: SourceScope::new(caller_body.source_scopes.len())..,\n            new_blocks: BasicBlock::new(caller_body.basic_blocks.len())..,\n            destination: destination_local,\n            callsite_scope: caller_body.source_scopes[callsite.source_info.scope].clone(),\n            callsite,\n            cleanup_block: unwind,\n            in_cleanup_block: false,\n            return_block,\n            tcx: self.tcx,\n            always_live_locals: BitSet::new_filled(callee_body.local_decls.len()),\n        };\n\n        // Map all `Local`s, `SourceScope`s and `BasicBlock`s to new ones\n        // (or existing ones, in a few special cases) in the caller.\n        integrator.visit_body(&mut callee_body);\n\n        // If there are any locals without storage markers, give them storage only for the\n        // duration of the call.\n        for local in callee_body.vars_and_temps_iter() {\n            if integrator.always_live_locals.contains(local) {\n                let new_local = integrator.map_local(local);\n                caller_body[callsite.block].statements.push(Statement {\n                    source_info: callsite.source_info,\n                    kind: StatementKind::StorageLive(new_local),\n                });\n            }\n        }\n        if let Some(block) = return_block {\n            // To avoid repeated O(n) insert, push any new statements to the end and rotate\n            // the slice once.\n            let mut n = 0;\n            if remap_destination {\n                caller_body[block].statements.push(Statement {\n                    source_info: callsite.source_info,\n                    kind: StatementKind::Assign(Box::new((\n                        dest,\n                        Rvalue::Use(Operand::Move(destination_local.into())),\n                    ))),\n                });\n                n += 1;\n            }\n            for local in callee_body.vars_and_temps_iter().rev() {\n                if integrator.always_live_locals.contains(local) {\n                    let new_local = integrator.map_local(local);\n                    caller_body[block].statements.push(Statement {\n                        source_info: callsite.source_info,\n                        kind: StatementKind::StorageDead(new_local),\n                    });\n                    n += 1;\n                }\n            }\n            caller_body[block].statements.rotate_right(n);\n        }\n\n        // Insert all of the (mapped) parts of the callee body into the caller.\n        caller_body.local_decls.extend(callee_body.drain_vars_and_temps());\n        caller_body.source_scopes.extend(&mut callee_body.source_scopes.drain(..));\n        if self\n            .tcx\n            .sess\n            .opts\n            .unstable_opts\n            .inline_mir_preserve_debug\n            .unwrap_or(self.tcx.sess.opts.debuginfo != DebugInfo::None)\n        {\n            // Note that we need to preserve these in the standard library so that\n            // people working on rust can build with or without debuginfo while\n            // still getting consistent results from the mir-opt tests.\n            caller_body.var_debug_info.append(&mut callee_body.var_debug_info);\n        }\n        caller_body.basic_blocks_mut().extend(callee_body.basic_blocks_mut().drain(..));\n\n        caller_body[callsite.block].terminator = Some(Terminator {\n            source_info: callsite.source_info,\n            kind: TerminatorKind::Goto { target: integrator.map_block(START_BLOCK) },\n        });\n\n        // Copy required constants from the callee_body into the caller_body. Although we are only\n        // pushing unevaluated consts to `required_consts`, here they may have been evaluated\n        // because we are calling `instantiate_and_normalize_erasing_regions` -- so we filter again.\n        caller_body.required_consts.as_mut().unwrap().extend(\n            callee_body.required_consts().into_iter().filter(|ct| ct.const_.is_required_const()),\n        );\n        // Now that we incorporated the callee's `required_consts`, we can remove the callee from\n        // `mentioned_items` -- but we have to take their `mentioned_items` in return. This does\n        // some extra work here to save the monomorphization collector work later. It helps a lot,\n        // since monomorphization can avoid a lot of work when the \"mentioned items\" are similar to\n        // the actually used items. By doing this we can entirely avoid visiting the callee!\n        // We need to reconstruct the `required_item` for the callee so that we can find and\n        // remove it.\n        let callee_item = MentionedItem::Fn(func.ty(caller_body, self.tcx));\n        let caller_mentioned_items = caller_body.mentioned_items.as_mut().unwrap();\n        if let Some(idx) = caller_mentioned_items.iter().position(|item| item.node == callee_item) {\n            // We found the callee, so remove it and add its items instead.\n            caller_mentioned_items.remove(idx);\n            caller_mentioned_items.extend(callee_body.mentioned_items());\n        } else {\n            // If we can't find the callee, there's no point in adding its items. Probably it\n            // already got removed by being inlined elsewhere in the same function, so we already\n            // took its items.\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "mentioned_items accessor panics when the field is unset, turning missing initialization into an ICE",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "mentioned_items",
+              "file": "compiler/rustc_middle/src/mir/mod.rs",
+              "content": "pub fn mentioned_items(&self) -> &[Spanned<MentionedItem<'tcx>>] {\n        match &self.mentioned_items {\n            Some(l) => l,\n            None => panic!(\"mentioned_items for {:?} have not yet been set\", self.source.def_id()),\n        }\n    }"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Inlining path in try_inlining can reach inline_call for the erroneous callee under -Zinline-mir=yes",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "try_inlining",
+              "file": "compiler/rustc_mir_transform/src/inline.rs",
+              "content": "fn try_inlining(\n        &self,\n        caller_body: &mut Body<'tcx>,\n        callsite: &CallSite<'tcx>,\n    ) -> Result<std::ops::Range<BasicBlock>, &'static str> {\n        self.check_mir_is_available(caller_body, callsite.callee)?;\n\n        let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());\n        let cross_crate_inlinable = self.tcx.cross_crate_inlinable(callsite.callee.def_id());\n        self.check_codegen_attributes(callsite, callee_attrs, cross_crate_inlinable)?;\n\n        // Intrinsic fallback bodies are automatically made cross-crate inlineable,\n        // but at this stage we don't know whether codegen knows the intrinsic,\n        // so just conservatively don't inline it.\n        if self.tcx.has_attr(callsite.callee.def_id(), sym::rustc_intrinsic) {\n            return Err(\"Callee is an intrinsic, do not inline fallback bodies\");\n        }\n\n        let terminator = caller_body[callsite.block].terminator.as_ref().unwrap();\n        let TerminatorKind::Call { args, destination, .. } = &terminator.kind else { bug!() };\n        let destination_ty = destination.ty(&caller_body.local_decls, self.tcx).ty;\n        for arg in args {\n            if !arg.node.ty(&caller_body.local_decls, self.tcx).is_sized(self.tcx, self.param_env) {\n                // We do not allow inlining functions with unsized params. Inlining these functions\n                // could create unsized locals, which are unsound and being phased out.\n                return Err(\"Call has unsized argument\");\n            }\n        }\n\n        let callee_body = try_instance_mir(self.tcx, callsite.callee.def)?;\n        self.check_mir_body(callsite, callee_body, callee_attrs, cross_crate_inlinable)?;\n\n        if !self.tcx.consider_optimizing(|| {\n            format!(\"Inline {:?} into {:?}\", callsite.callee, caller_body.source)\n        }) {\n            return Err(\"optimization fuel exhausted\");\n        }\n\n        let Ok(callee_body) = callsite.callee.try_instantiate_mir_and_normalize_erasing_regions(\n            self.tcx,\n            self.param_env,\n            ty::EarlyBinder::bind(callee_body.clone()),\n        ) else {\n            return Err(\"failed to normalize callee body\");\n        };\n\n        // Normally, this shouldn't be required, but trait normalization failure can create a\n        // validation ICE.\n        if !validate_types(\n            self.tcx,\n            MirPhase::Runtime(RuntimePhase::Optimized),\n            self.param_env,\n            &callee_body,\n            &caller_body,\n        )\n        .is_empty()\n        {\n            return Err(\"failed to validate callee body\");\n        }\n\n        // Check call signature compatibility.\n        // Normally, this shouldn't be required, but trait normalization failure can create a\n        // validation ICE.\n        let output_type = callee_body.return_ty();\n        if !util::relate_types(self.tcx, self.param_env, ty::Covariant, output_type, destination_ty)\n        {\n            trace!(?output_type, ?destination_ty);\n            return Err(\"failed to normalize return type\");\n        }\n        if callsite.fn_sig.abi() == Abi::RustCall {\n            // FIXME: Don't inline user-written `extern \"rust-call\"` functions,\n            // since this is generally perf-negative on rustc, and we hope that\n            // LLVM will inline these functions instead.\n            if callee_body.spread_arg.is_some() {\n                return Err(\"do not inline user-written rust-call functions\");\n            }\n\n            let (self_arg, arg_tuple) = match &args[..] {\n                [arg_tuple] => (None, arg_tuple),\n                [self_arg, arg_tuple] => (Some(self_arg), arg_tuple),\n                _ => bug!(\"Expected `rust-call` to have 1 or 2 args\"),\n            };\n\n            let self_arg_ty =\n                self_arg.map(|self_arg| self_arg.node.ty(&caller_body.local_decls, self.tcx));\n\n            let arg_tuple_ty = arg_tuple.node.ty(&caller_body.local_decls, self.tcx);\n            let ty::Tuple(arg_tuple_tys) = *arg_tuple_ty.kind() else {\n                bug!(\"Closure arguments are not passed as a tuple\");\n            };\n\n            for (arg_ty, input) in\n                self_arg_ty.into_iter().chain(arg_tuple_tys).zip(callee_body.args_iter())\n            {\n                let input_type = callee_body.local_decls[input].ty;\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\n                {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize tuple argument type\");\n                }\n            }\n        } else {\n            for (arg, input) in args.iter().zip(callee_body.args_iter()) {\n                let input_type = callee_body.local_decls[input].ty;\n                let arg_ty = arg.node.ty(&caller_body.local_decls, self.tcx);\n                if !util::relate_types(self.tcx, self.param_env, ty::Covariant, input_type, arg_ty)\n                {\n                    trace!(?arg_ty, ?input_type);\n                    return Err(\"failed to normalize argument type\");\n                }\n            }\n        }\n\n        let old_blocks = caller_body.basic_blocks.next_index();\n        self.inline_call(caller_body, callsite, callee_body);\n        let new_blocks = old_blocks..caller_body.basic_blocks.next_index();\n\n        Ok(new_blocks)\n    }"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "optimized_mir initializes mentioned_items only for the body currently being optimized, not necessarily every callee body fetched for inlining/instantiation",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "inner_optimized_mir",
+              "file": "compiler/rustc_mir_transform/src/lib.rs",
+              "content": "fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {\n    if tcx.is_constructor(did.to_def_id()) {\n        // There's no reason to run all of the MIR passes on constructors when\n        // we can just output the MIR we want directly. This also saves const\n        // qualification and borrow checking the trouble of special casing\n        // constructors.\n        return shim::build_adt_ctor(tcx, did.to_def_id());\n    }\n\n    match tcx.hir().body_const_context(did) {\n        // Run the `mir_for_ctfe` query, which depends on `mir_drops_elaborated_and_const_checked`\n        // which we are going to steal below. Thus we need to run `mir_for_ctfe` first, so it\n        // computes and caches its result.\n        Some(hir::ConstContext::ConstFn) => tcx.ensure_with_value().mir_for_ctfe(did),\n        None => {}\n        Some(other) => panic!(\"do not use `optimized_mir` for constants: {other:?}\"),\n    }\n    debug!(\"about to call mir_drops_elaborated...\");\n    let body = tcx.mir_drops_elaborated_and_const_checked(did).steal();\n    let mut body = remap_mir_for_const_eval_select(tcx, body, hir::Constness::NotConst);\n\n    if body.tainted_by_errors.is_some() {\n        return body;\n    }\n\n    // Before doing anything, remember which items are being mentioned so that the set of items\n    // visited does not depend on the optimization level.\n    // We do not use `run_passes` for this as that might skip the pass if `injection_phase` is set.\n    mentioned_items::MentionedItems.run_pass(tcx, &mut body);\n    // If this has an associated by-move async closure body, that doesn't get run through these\n    // passes itself, it gets \"tagged along\" by the pass manager. Since we're not using the pass\n    // manager we have to do this by hand.\n    if let Some(coroutine) = body.coroutine.as_mut() {\n        if let Some(by_move_body) = coroutine.by_move_body.as_mut() {\n            mentioned_items::MentionedItems.run_pass(tcx, by_move_body);\n        }\n    }\n\n    // If `mir_drops_elaborated_and_const_checked` found that the current body has unsatisfiable\n    // predicates, it will shrink the MIR to a single `unreachable` terminator.\n    // More generally, if MIR is a lone `unreachable`, there is nothing to optimize.\n    if let TerminatorKind::Unreachable = body.basic_blocks[START_BLOCK].terminator().kind\n        && body.basic_blocks[START_BLOCK].statements.is_empty()\n    {\n        return body;\n    }\n\n    run_optimization_passes(tcx, &mut body);\n\n    body\n}"
+            }
+          ]
+        },
+        {
+          "id": "E",
+          "name": "MentionedItems pass is the mechanism that sets body.set_mentioned_items, so if skipped/not run on a callee body the field remains None",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "run_pass",
+              "file": "compiler/rustc_mir_transform/src/mentioned_items.rs",
+              "content": "fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut mir::Body<'tcx>) {\n        let mut mentioned_items = Vec::new();\n        MentionedItemsVisitor { tcx, body, mentioned_items: &mut mentioned_items }.visit_body(body);\n        body.set_mentioned_items(mentioned_items);\n    }"
+            }
+          ]
+        },
+        {
+          "id": "F",
+          "name": "Polymorphization/unused_generic_params queries depend on optimized_mir, exposing the unset mentioned_items state during analysis after prior errors",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "collect_items_of_instance",
+              "file": "compiler/rustc_monomorphize/src/collector.rs",
+              "content": "fn collect_items_of_instance<'tcx>(\n    tcx: TyCtxt<'tcx>,\n    instance: Instance<'tcx>,\n    used_items: &mut MonoItems<'tcx>,\n    mentioned_items: &mut MonoItems<'tcx>,\n    mode: CollectionMode,\n) {\n    let body = tcx.instance_mir(instance.def);\n    // Naively, in \"used\" collection mode, all functions get added to *both* `used_items` and\n    // `mentioned_items`. Mentioned items processing will then notice that they have already been\n    // visited, but at that point each mentioned item has been monomorphized, added to the\n    // `mentioned_items` worklist, and checked in the global set of visited items. To remove that\n    // overhead, we have a special optimization that avoids adding items to `mentioned_items` when\n    // they are already added in `used_items`. We could just scan `used_items`, but that's a linear\n    // scan and not very efficient. Furthermore we can only do that *after* monomorphizing the\n    // mentioned item. So instead we collect all pre-monomorphized `MentionedItem` that were already\n    // added to `used_items` in a hash set, which can efficiently query in the\n    // `body.mentioned_items` loop below without even having to monomorphize the item.\n    let mut used_mentioned_items = Default::default();\n    let mut collector = MirUsedCollector {\n        tcx,\n        body,\n        used_items,\n        used_mentioned_items: &mut used_mentioned_items,\n        instance,\n        visiting_call_terminator: false,\n        move_check: MoveCheckState::new(),\n    };\n\n    if mode == CollectionMode::UsedItems {\n        for (bb, data) in traversal::mono_reachable(body, tcx, instance) {\n            collector.visit_basic_block_data(bb, data)\n        }\n    }\n\n    // Always visit all `required_consts`, so that we evaluate them and abort compilation if any of\n    // them errors.\n    for const_op in body.required_consts() {\n        if let Some(val) = collector.eval_constant(const_op) {\n            collect_const_value(tcx, val, mentioned_items);\n        }\n    }\n\n    // Always gather mentioned items. We try to avoid processing items that we have already added to\n    // `used_items` above.\n    for item in body.mentioned_items() {\n        if !collector.used_mentioned_items.contains(&item.node) {\n            let item_mono = collector.monomorphize(item.node);\n            visit_mentioned_item(tcx, &item_mono, item.span, mentioned_items);\n        }\n    }\n}"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.97
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.93
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.88
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.86
+        },
+        {
+          "source": "E",
+          "target": "I",
+          "weight": 0.8
+        },
+        {
+          "source": "F",
+          "target": "I",
+          "weight": 0.72
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 1253.823,
+    "stage_times_sec": {
+      "load_bug_context": 0.014,
+      "checkout": 4.405,
+      "load_or_build_graph": 34.888,
+      "symptom_vertices_locating": 1173.122,
+      "dynamic_cig_discovering": 39.271,
+      "convert_results": 0.017
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 203421,
+      "output_tokens": 2139,
+      "total_tokens": 205560,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 2.881,
+          "input_tokens": 6305,
+          "output_tokens": 93,
+          "total_tokens": 6398
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.492,
+          "input_tokens": 5662,
+          "output_tokens": 18,
+          "total_tokens": 5680
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 2.771,
+          "input_tokens": 6471,
+          "output_tokens": 26,
+          "total_tokens": 6497
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 2.131,
+          "input_tokens": 7603,
+          "output_tokens": 25,
+          "total_tokens": 7628
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.626,
+          "input_tokens": 15521,
+          "output_tokens": 39,
+          "total_tokens": 15560
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 2.51,
+          "input_tokens": 10322,
+          "output_tokens": 26,
+          "total_tokens": 10348
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.265,
+          "input_tokens": 5651,
+          "output_tokens": 17,
+          "total_tokens": 5668
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 2.595,
+          "input_tokens": 10362,
+          "output_tokens": 25,
+          "total_tokens": 10387
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 1.888,
+          "input_tokens": 5634,
+          "output_tokens": 17,
+          "total_tokens": 5651
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 6.858,
+          "input_tokens": 9547,
+          "output_tokens": 311,
+          "total_tokens": 9858
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 5.42,
+          "input_tokens": 19352,
+          "output_tokens": 257,
+          "total_tokens": 19609
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 4.816,
+          "input_tokens": 13548,
+          "output_tokens": 258,
+          "total_tokens": 13806
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 5.83,
+          "input_tokens": 19023,
+          "output_tokens": 256,
+          "total_tokens": 19279
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 6.311,
+          "input_tokens": 30875,
+          "output_tokens": 257,
+          "total_tokens": 31132
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 5.089,
+          "input_tokens": 18867,
+          "output_tokens": 257,
+          "total_tokens": 19124
+        },
+        {
+          "stage": "causal_update_6",
+          "latency_sec": 4.914,
+          "input_tokens": 18678,
+          "output_tokens": 257,
+          "total_tokens": 18935
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,256 @@
+{
+  "bug_id": "133222",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-11-16",
+    "resolved": "917a50a03931a9861c19a46f3e2a02a28f1da936"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_typeck/src/expr.rs",
+    "compiler/rustc_hir_typeck/src/coercion.rs",
+    "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+    "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+    "compiler/rustc_infer/src/infer/at.rs",
+    "compiler/rustc_trait_selection/src/traits/normalize.rs",
+    "compiler/rustc_trait_selection/src/traits/structural_normalize.rs",
+    "compiler/rustc_middle/src/ty/error.rs",
+    "compiler/rustc_middle/src/ty/print/pretty.rs",
+    "compiler/rustc_feature/src/unstable.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `#![feature(pin_ergonomics)]`, exercising feature gating and unstable language feature handling during compilation.",
+        "Imports `std::pin::Pin`, targeting the standard library pinning API and type-checking around pinned smart pointers.",
+        "Defines `foo` with a typed placeholder binding `let _: Pin<Box<()>>`, forcing the compiler to verify the expression exactly matches that pinned type.",
+        "Uses `Box::pin(())` to allocate and pin a unit value on the heap, producing a pinned boxed value.",
+        "Exercises coercion/inference from the constructor result into the explicitly annotated `Pin<Box<()>>` binding.",
+        "Checks interaction between unstable pin ergonomics and ordinary pin construction, even though no pattern matching or method receiver ergonomics are used.",
+        "Compiles an otherwise minimal binary crate, isolating frontend behavior to parsing, feature validation, name resolution, and type checking.",
+        "Leaves `foo` unused and `main` empty, confirming the reproducer is compile-time only and not dependent on runtime behavior."
+      ],
+      "summary": "This reproducer is a minimal compile-only test for pinning-related compiler behavior on nightly. It enables the unstable `pin_ergonomics` feature, constructs a pinned boxed unit with `Box::pin(())`, and assigns it to an explicitly typed `Pin<Box<()>>` placeholder binding. The crate avoids runtime effects, so any failure should come from feature gating, type inference, or pin API/type-checking interactions."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is a pure type-checking bug triggered by enabling the unstable `pin_ergonomics` feature in otherwise trivial code using the stable pinning API. The expression `Box::pin(())` should naturally produce `Pin<Box<()>>`, and the explicit local type annotation is identical to that result. The compiler instead emits E0308 with the contradictory message `expected struct Pin<_>, found struct Pin<_>`, which strongly indicates the mismatch is not in user code but in compiler-internal type comparison/normalization/printing. A key similarity across the reproducer, behavior summary, and output is that no pin ergonomics syntax is actually used; merely enabling the feature changes type checking for ordinary `Pin<Box<T>>` construction. That points to a regression where feature-dependent adjustments or trait/type normalization for `Pin` are affecting ordinary expression typing. The most plausible defect is in the compiler path that compares inferred expression type from `Box::pin` against the annotated local type, likely involving hidden type differences that diagnostics collapse into the same printed form. Since both sides print as `Pin<_>`, likely causes include distinct internal substitutions/regions, incorrect normalization under the feature, or a bad adjustment/coercion path for pin-related constructors introduced by `pin_ergonomics` handling.",
+      "possible_causes": [
+        "A defect in type checking/coercion for `let` bindings with explicit `Pin<Box<T>>` annotations, where the inferred type of `Box::pin(...)` is internally different from the annotated type even though both normalize to the same printed `Pin<Box<()>>`.",
+        "A regression in `pin_ergonomics` feature handling that incorrectly alters ordinary pinning type inference or adjustments, even when no pin-ergonomics syntax is present.",
+        "A bug in type normalization or obligation resolution for `std::pin::Pin`/`Box::pin`, causing the compiler to compare unnormalized or feature-modified forms of the same type and reject them as mismatched.",
+        "A compiler defect in diagnostic/type relation code where two equivalent `Pin` types are treated as unequal due to hidden generic arguments, inference variables, region identity, or aliasing, then rendered misleadingly as identical `Pin<_>` in E0308 output.",
+        "A problem in the method/associated function resolution or returned type instantiation for `Box::pin`, producing an incorrect `Pin` wrapper type under this nightly when `pin_ergonomics` is enabled."
+      ],
+      "evidence": [
+        "`let _: Pin<Box<()>> = Box::pin(());` is a direct exact-type assignment that should succeed without coercion complexity beyond normal inference.",
+        "The emitted error says `expected struct Pin<_>, found struct Pin<_>`, a hallmark of an internal type distinction being lost in diagnostics rather than an actual source-level mismatch.",
+        "The crate is otherwise minimal and compile-time only, isolating the failure to frontend stages such as feature handling, type inference, coercion, or type comparison.",
+        "The unstable feature `pin_ergonomics` is enabled, and the failure appears despite no pattern matching or receiver ergonomics usage, suggesting the feature globally perturbs pin-related typing.",
+        "`Box::pin(())` normally returns `Pin<Box<()>>`; rejecting assignment to explicitly annotated `Pin<Box<()>>` indicates a compiler regression rather than a reproducer mistake."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1858,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_typeck/src/expr.rs",
+        "reason": "The failure is a front-end HIR type-checking mismatch on a simple `let _: Pin<Box<()>> = Box::pin(());` assignment. Since `Box::pin(())` should directly type as `Pin<Box<()>>`, the bug most likely lies in expression checking for local bindings, expected-type propagation, or expression-vs-annotation comparison performed here."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/coercion.rs",
+        "reason": "The reproducer specifically stresses matching an inferred expression type against an explicit `Pin<Box<()>>` annotation. Even though no visible coercion should be needed, this file is a prime suspect because pin-related adjustments or coercion logic may be incorrectly triggered or altered when `pin_ergonomics` is enabled, leading to internally distinct but identically printed `Pin<_>` types."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/fn_ctxt/_impl.rs",
+        "reason": "`FnCtxt` drives local type inference, adjustment recording, method/associated function handling, and final relation checks inside function bodies. `Box::pin` is an associated function call, so an incorrect return-type instantiation, normalization, or adjustment recording in `FnCtxt` could produce the contradictory `expected Pin<_>, found Pin<_>` error."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/relate/type_relating.rs",
+        "reason": "The diagnostic strongly suggests the compiler thinks two internally different but outwardly identical `Pin` types are unequal. That points toward the core type-relation engine used to equate or subtype-check inferred and expected types, especially around generic arguments, hidden inference vars, or alias handling."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/at.rs",
+        "reason": "HIR type checking commonly uses the `InferCtxt::at(...).eq/sub(...)` API to compare expected and found types. If the regression is in the wrapper that sets up relation mode, cause, param-env, or opaque/alias handling for these comparisons, it could explain why an exact `Pin<Box<()>>` assignment is rejected."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/normalize.rs",
+        "reason": "A plausible explanation is that the type from `Box::pin` and the annotated local type are being compared before full normalization, or normalized differently when `pin_ergonomics` is active. This file is central to old-solver deep normalization used during type checking and could cause equivalent `Pin` forms to remain spuriously distinct."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/structural_normalize.rs",
+        "reason": "The bug signature matches a failure where two types that should be structurally identical are not normalized into the same rigid form before comparison. This file explicitly performs structural normalization via alias-relate obligations, making it relevant if a hidden alias/projection inside the `Pin` construction path is mishandled."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/error.rs",
+        "reason": "The emitted message `expected struct Pin<_>, found struct Pin<_>` is unusually self-contradictory, indicating diagnostic rendering may be collapsing a meaningful internal distinction. While likely not the root cause, this file is suspicious for producing the misleading mismatch presentation and may mask the real differing internals."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/print/pretty.rs",
+        "reason": "If the underlying bug involves distinct internal `Pin` instantiations that diagnostics print identically, the pretty-printer is directly involved in why the error appears as `Pin<_>` vs `Pin<_>`. This makes it a secondary suspect tied to the observed compiler output, even if not the semantic source of rejection."
+      },
+      {
+        "path": "compiler/rustc_feature/src/unstable.rs",
+        "reason": "The reproducer only fails when the unstable `pin_ergonomics` feature is enabled, despite not using explicit ergonomics syntax. That makes feature-state tracking for unstable language features worth suspecting: an incorrect feature flag interaction could globally perturb pin-related type checking or adjustment behavior."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 155.22,
+    "stage_times_sec": {
+      "checkout": 3.379,
+      "load_bug_context": 0.043,
+      "test_behavior_analysis": 6.593,
+      "test_failure_analysis": 13.554,
+      "load_file_candidates": 0.147,
+      "search_suspicious_files": 131.504
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 429740,
+      "output_tokens": 7482,
+      "total_tokens": 437222,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.592,
+          "input_tokens": 340,
+          "output_tokens": 306,
+          "total_tokens": 646
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.553,
+          "input_tokens": 1107,
+          "output_tokens": 688,
+          "total_tokens": 1795
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 6.911,
+          "input_tokens": 26822,
+          "output_tokens": 334,
+          "total_tokens": 27156
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.559,
+          "input_tokens": 26780,
+          "output_tokens": 343,
+          "total_tokens": 27123
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.502,
+          "input_tokens": 26124,
+          "output_tokens": 395,
+          "total_tokens": 26519
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 6.56,
+          "input_tokens": 26576,
+          "output_tokens": 300,
+          "total_tokens": 26876
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.409,
+          "input_tokens": 26607,
+          "output_tokens": 293,
+          "total_tokens": 26900
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 9.339,
+          "input_tokens": 26726,
+          "output_tokens": 436,
+          "total_tokens": 27162
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.999,
+          "input_tokens": 26740,
+          "output_tokens": 334,
+          "total_tokens": 27074
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.513,
+          "input_tokens": 26594,
+          "output_tokens": 434,
+          "total_tokens": 27028
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.379,
+          "input_tokens": 26732,
+          "output_tokens": 377,
+          "total_tokens": 27109
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 6.508,
+          "input_tokens": 26710,
+          "output_tokens": 365,
+          "total_tokens": 27075
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.798,
+          "input_tokens": 26439,
+          "output_tokens": 335,
+          "total_tokens": 26774
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.354,
+          "input_tokens": 26716,
+          "output_tokens": 322,
+          "total_tokens": 27038
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.553,
+          "input_tokens": 26896,
+          "output_tokens": 347,
+          "total_tokens": 27243
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.259,
+          "input_tokens": 26968,
+          "output_tokens": 313,
+          "total_tokens": 27281
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.961,
+          "input_tokens": 26657,
+          "output_tokens": 375,
+          "total_tokens": 27032
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 7.154,
+          "input_tokens": 13929,
+          "output_tokens": 327,
+          "total_tokens": 14256
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.713,
+          "input_tokens": 14277,
+          "output_tokens": 858,
+          "total_tokens": 15135
+        }
+      ]
+    }
+  }
+}

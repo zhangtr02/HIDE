@@ -1,0 +1,257 @@
+{
+  "bug_id": "133064",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-11-15",
+    "resolved": "90ab8eaedd3efd7919bffa7638db66e67df3f0b8"
+  },
+  "final_top10": [
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_expand/src/expand.rs",
+    "compiler/rustc_parse/src/parser/path.rs",
+    "compiler/rustc_parse/src/parser/expr.rs",
+    "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+    "compiler/rustc_expand/src/base.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines an inherent `impl<T>` block for a generic type `Foo` with a const-generic-looking second argument expression.",
+        "Places a `thread_local!` macro invocation inside the generic argument list, in the position where a type or const argument would be parsed.",
+        "Exercises parsing of item-generating macros in expression/const-generic contexts, where `thread_local!` expands to thread-local static item declarations.",
+        "Uses a block expression `{ ... }` as the second generic argument, stressing block parsing and recovery inside angle-bracketed generic arguments.",
+        "Inside the macro body, declares `pub static FOO: Foo = Foo {};`, invoking item syntax, visibility, and static initialization parsing.",
+        "References `Foo` before any definition exists, so name resolution and type checking should report unresolved type errors after parsing.",
+        "The empty inherent impl body and empty `main` ensure the reproducer isolates frontend behavior around parsing, macro expansion, and diagnostics.",
+        "Targets nightly Rust, likely exercising unstable or recently changed parser behavior for macros, blocks, and generic arguments."
+      ],
+      "summary": "The reproducer intentionally embeds a `thread_local!` item macro inside a generic argument of an inherent `impl` for `Foo`. This stresses rustc’s parser, macro expansion, and error recovery when item declarations appear in a const-generic-like block position. Since `Foo` is never defined, later name resolution/type checking should also emit unresolved-type diagnostics, but the core exercised behavior is malformed generic-argument parsing around macro-generated items."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE in the frontend pipeline after rustc has already accepted enough malformed syntax to continue into HIR/THIR lowering. The reproducer places a `thread_local!` item-producing macro inside an angle-bracketed generic argument, wrapped in a block that looks like a const generic expression. That creates a syntactically invalid mixed context: generic arguments expect type/const/lifetime forms, while `thread_local!` expands to item declarations (`static`). The compiler should emit normal parse/expansion/type-resolution diagnostics and stop cleanly, especially since `Foo` is unresolved, but instead it proceeds to build THIR/MIR for a generated closure inside the macro expansion and panics during analysis. The common pattern is malformed generic-argument recovery combined with macro expansion that introduces items/closures in a const-expression-like position. This strongly suggests a defect in compiler error recovery and validation for generic const arguments or block expressions containing item macros, allowing invalid AST/HIR to be lowered as if it were a valid body. A likely bug is that `thread_local!` expansion in this invalid context is not rejected early enough, or HIR/THIR lowering/checking assumes invariants about closure bodies and expression contexts that are violated by recovered malformed nodes from macro expansion.",
+      "possible_causes": [
+        "Parser/generic-argument validation bug: rustc may incorrectly accept or recover from a block expression containing an item macro inside angle-bracketed generic arguments, producing invalid AST/HIR instead of stopping after diagnostics.",
+        "Macro expansion context bug: `thread_local!`, which expands to item declarations and helper closures, may be expanded in an expression/const-generic context where item-producing macros should be rejected or fenced off, leaving illegal lowered structures.",
+        "HIR/THIR lowering defect for recovered syntax: after parse or expansion errors, lowering may still create bodies for macro-generated closures from `thread_local!` in a context that violates expected invariants, leading to panic during THIR construction or subsequent MIR-related queries.",
+        "Insufficient validation of const-generic block expressions: a block used as a const argument may not be checked for forbidden item declarations/macros before later analyses, allowing invalid nested items/closures to reach match-checking and borrow checking.",
+        "Error-recovery bug around unresolved paths/types inside malformed impl headers: the unresolved `Foo` diagnostics are emitted, but rustc still analyzes `<impl>::FOO::{constant#0}::{closure#1}`, suggesting the recovery path preserves synthetic associated items/bodies that should have been discarded after earlier fatal frontend errors."
+      ],
+      "evidence": [
+        "The reproducer embeds `thread_local!` directly inside the second generic argument of `Foo<..., { ... }>` in an inherent `impl`, combining generic-argument parsing with a block and item macro expansion.",
+        "`thread_local!` expands to thread-local static machinery, and the query stack references `<impl ...>::FOO::{constant#0}::{constant#0}::{closure#1}`, showing rustc created internal constant/closure bodies from that macro expansion.",
+        "The query stack reaches `thir_body`, `check_match`, `mir_built`, `mir_promoted`, and `mir_borrowck` for the macro-generated closure, meaning invalid recovered code survived well past parsing and expansion.",
+        "Compiler output also reports ordinary user-facing errors E0412 and E0422, consistent with unresolved `Foo` and malformed item/type usage, so the ICE occurs in addition to expected diagnostics rather than instead of them.",
+        "The test behavior specifically stresses item-generating macros in expression/const-generic positions and malformed generic-argument recovery, matching the observed crash during frontend lowering/analysis.",
+        "The empty impl body and trivial `main` isolate the failure to parsing, macro expansion, name resolution, and lowering around the impl header rather than later semantic logic."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1858,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "Most suspicious because the invalid construct is a block const-generic argument containing an item-producing macro invocation. AST validation is the stage that should reject malformed post-expansion AST shapes before HIR/THIR lowering. The ICE suggests invalid expanded syntax survived too far, which points directly at missing or incomplete validation here."
+      },
+      {
+        "path": "compiler/rustc_expand/src/expand.rs",
+        "reason": "The reproducer depends on expanding `thread_local!` in a syntactically wrong expression/const-generic position. Expansion may be permitting an item-fragment macro result in a context that should be rejected or fenced off, allowing generated statics/closures to enter later phases."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/path.rs",
+        "reason": "The malformed syntax sits inside `Foo< T, { ... } >` in an impl header, so generic-argument/path parsing and recovery are heavily involved. A parser recovery bug here could incorrectly classify or preserve the block as a const generic argument and continue with a broken AST."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/expr.rs",
+        "reason": "The second generic argument is a block expression containing a macro invocation and item syntax. Expression parsing/recovery around block expressions in const-generic-like positions is a strong candidate for producing an AST that later violates lowering invariants."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+        "reason": "The query stack starts at `thir_body` for a macro-generated closure inside the malformed impl header. If earlier stages already emitted errors, THIR body construction may be insufficiently guarding against recovered invalid bodies and should likely refuse lowering more aggressively."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "If the malformed macro expansion produced an expression/closure body with impossible structure, expression THIR lowering is a plausible crash point. This file handles recursive lowering of HIR expressions into THIR and often relies on invariants that recovery paths can violate."
+      },
+      {
+        "path": "compiler/rustc_expand/src/base.rs",
+        "reason": "Macro expansion context typing lives in the expansion support layer. If `thread_local!` is being accepted in an expression/const-generic context when only item contexts are valid, the fragment-kind or context plumbing in the expansion base layer may be the root cause."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "The problematic construct includes anonymous const machinery in a generic argument, and this file contains `anon_const_type_of` logic for const generic arguments. If malformed anon consts created by recovery are analyzed as real const bodies, type collection could be enabling the later THIR/MIR ICE."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "A bad recovered AST from parsing/expansion may be lowered into HIR expressions or bodies that should not exist, especially around blocks, closures, and anon consts. Since the panic happens after HIR exists, lowering is a plausible place where invalid structure is preserved instead of rejected."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+        "reason": "This module lowers const arguments in type position and enforces type-system-side restrictions for HIR generic syntax. Because the reproducer abuses a const-generic-like block with item declarations, insufficient validation during HIR type lowering could allow illegal const arguments to survive into THIR construction."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 179.124,
+    "stage_times_sec": {
+      "checkout": 3.066,
+      "load_bug_context": 0.057,
+      "test_behavior_analysis": 8.055,
+      "test_failure_analysis": 15.283,
+      "load_file_candidates": 0.758,
+      "search_suspicious_files": 151.905
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 19,
+      "input_tokens": 451475,
+      "output_tokens": 7381,
+      "total_tokens": 458856,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 8.055,
+          "input_tokens": 342,
+          "output_tokens": 311,
+          "total_tokens": 653
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.283,
+          "input_tokens": 2180,
+          "output_tokens": 780,
+          "total_tokens": 2960
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.249,
+          "input_tokens": 27988,
+          "output_tokens": 338,
+          "total_tokens": 28326
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 9.08,
+          "input_tokens": 27946,
+          "output_tokens": 377,
+          "total_tokens": 28323
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.957,
+          "input_tokens": 27290,
+          "output_tokens": 364,
+          "total_tokens": 27654
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.466,
+          "input_tokens": 27742,
+          "output_tokens": 353,
+          "total_tokens": 28095
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 11.498,
+          "input_tokens": 27773,
+          "output_tokens": 381,
+          "total_tokens": 28154
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.258,
+          "input_tokens": 27892,
+          "output_tokens": 341,
+          "total_tokens": 28233
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.547,
+          "input_tokens": 27906,
+          "output_tokens": 319,
+          "total_tokens": 28225
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.363,
+          "input_tokens": 27760,
+          "output_tokens": 331,
+          "total_tokens": 28091
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.153,
+          "input_tokens": 27898,
+          "output_tokens": 384,
+          "total_tokens": 28282
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.825,
+          "input_tokens": 27876,
+          "output_tokens": 352,
+          "total_tokens": 28228
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.897,
+          "input_tokens": 27605,
+          "output_tokens": 346,
+          "total_tokens": 27951
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.978,
+          "input_tokens": 27882,
+          "output_tokens": 317,
+          "total_tokens": 28199
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.189,
+          "input_tokens": 28062,
+          "output_tokens": 282,
+          "total_tokens": 28344
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.432,
+          "input_tokens": 28134,
+          "output_tokens": 325,
+          "total_tokens": 28459
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 10.058,
+          "input_tokens": 27823,
+          "output_tokens": 419,
+          "total_tokens": 28242
+        },
+        {
+          "stage": "search_suspicious_files_chunk_16",
+          "latency_sec": 7.975,
+          "input_tokens": 15095,
+          "output_tokens": 337,
+          "total_tokens": 15432
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.946,
+          "input_tokens": 16281,
+          "output_tokens": 724,
+          "total_tokens": 17005
+        }
+      ]
+    }
+  }
+}

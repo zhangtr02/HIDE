@@ -1,0 +1,21 @@
+{
+  "instance_id": "112969",
+  "test_cases": [
+    {
+      "path": "gcc/testsuite/gcc.dg/plugin/plugin.exp",
+      "content": "\t  infoleak-pr112969.c \\\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/plugin/infoleak-pr112969.c",
+      "content": "/* Reduced from -Wanalyzer-exposure-through-uninit-copy false positives\n   seen in Linux kernel in drivers/net/ethernet/intel/ice/ice_ptp.c  */\n\n/* { dg-do compile } */\n/* { dg-options \"-fanalyzer\" } */\n/* { dg-require-effective-target analyzer } */\n\nextern unsigned long\ncopy_from_user(void* to, const void* from, unsigned long n);\n\nextern unsigned long\ncopy_to_user(void* to, const void* from, unsigned long n);\n\nstruct ifreq\n{\n  union\n  {\n    void* ifru_data;\n  } ifr_ifru;\n};\n\nstruct hwtstamp_config\n{\n  int flags;\n  int tx_type;\n  int rx_filter;\n};\n\nstruct ice_ptp\n{\n  long placeholder;\n  struct hwtstamp_config tstamp_config;\n};\n\nstruct ice_pf\n{\n  struct ice_ptp ptp;\n};\nint\nice_ptp_set_ts_config(struct ice_pf* pf, struct ifreq* ifr)\n{\n  struct hwtstamp_config config;\n  int err;\n  if (copy_from_user(&config, ifr->ifr_ifru.ifru_data, sizeof(config)))\n    return -14;\n  pf->ptp.tstamp_config.tx_type = 0;\n  pf->ptp.tstamp_config.rx_filter = 0;\n  config = pf->ptp.tstamp_config;\n  if (copy_to_user(ifr->ifr_ifru.ifru_data, &config, sizeof(config))) /* { dg-bogus \"-Wanalyzer-exposure-through-uninit-copy\" \"PR analyzer/112969\" } */\n    return -14;\n  return 0;\n}\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/analyzer/compound-assignment-5.c",
+      "content": "struct coord glob_arr2[16];\n  glob_arr2[7] = arr[3];\n  __analyzer_eval (glob_arr2[7].x == 5); /* { dg-warning \"TRUE\" } */\n  __analyzer_eval (glob_arr2[7].y == 6); /* { dg-warning \"TRUE\" } */\nstruct coord glob_arr3[16];\n  glob_arr3[7] = arr[3]; // or should the uninit warning be here?\n  __analyzer_eval (glob_arr3[7].y == 6); /* { dg-warning \"TRUE\" } */\n  __analyzer_eval (glob_arr3[7].x); /* { dg-warning \"uninitialized\" \"uninit\" } */\nstruct coord glob_arr6[16];\n\n  arr[7] = glob_arr6[3];\n"
+    },
+    {
+      "path": "gcc/testsuite/gcc.dg/analyzer/compound-assignment-pr112969.c",
+      "content": "/* Reduced from -Wanalyzer-exposure-through-uninit-copy false positives\n   seen in Linux kernel in drivers/net/ethernet/intel/ice/ice_ptp.c  */\n\n#include \"analyzer-decls.h\"\n\n/* { dg-do compile } */\n\nstruct hwtstamp_config\n{\n  int flags;\n  int tx_type;\n  int rx_filter;\n};\n\nstruct ice_ptp\n{\n  long placeholder;\n  struct hwtstamp_config tstamp_config;\n};\n\nstruct ice_pf\n{\n  struct ice_ptp ptp;\n};\n\nvoid\nice_ptp_set_ts_config(struct ice_pf* pf)\n{\n  struct hwtstamp_config config;\n  pf->ptp.tstamp_config.tx_type = 1;\n  pf->ptp.tstamp_config.rx_filter = 2;\n  config = pf->ptp.tstamp_config;\n  __analyzer_eval (config.flags == pf->ptp.tstamp_config.flags); /* { dg-warning \"TRUE\" } */\n  /* { dg-bogus \"use of uninitialized value 'config.flags'\" \"PR analyzer/112969\" { target *-*-* } .-1 } */\n}\n"
+    }
+  ]
+}

@@ -1,0 +1,250 @@
+{
+  "bug_id": "123077",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-03-25",
+    "resolved": "0824b300eb0dae5d9ed59719d3f2732016683d66"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+    "compiler/rustc_mir_build/src/thir/pattern/check_match.rs",
+    "compiler/rustc_hir_typeck/src/closure.rs",
+    "compiler/rustc_parse/src/parser/expr.rs",
+    "compiler/rustc_parse/src/parser/diagnostics.rs",
+    "compiler/rustc_mir_build/src/build/mod.rs",
+    "compiler/rustc_middle/src/thir.rs",
+    "compiler/rustc_const_eval/src/transform/validate.rs",
+    "compiler/rustc_const_eval/src/transform/check_consts/check.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Imports x86_64 SIMD intrinsics `__m128` and `_mm_blend_ps`, exercising architecture-specific `std::arch` APIs on nightly Rust.",
+        "Defines a function returning `__m128`, so the compiler must type-check SIMD vector types and intrinsic call signatures.",
+        "Creates a closure `f` taking two parameters and wrapping an `unsafe` intrinsic call, testing closure type inference around unsafe contexts.",
+        "Calls `_mm_blend_ps(x, y, { |x, y| unsafe })`, supplying a closure where the intrinsic expects an immediate const mask integer.",
+        "Uses a block expression as the third argument, stressing parser and type-checking diagnostics for malformed intrinsic arguments.",
+        "The inner closure body is just `unsafe`, which is syntactically incomplete, exercising parser recovery for invalid unsafe expressions.",
+        "Invokes `f(x, y)` even though `x` and `y` are never defined in scope, testing name resolution and error recovery after earlier parse/type errors.",
+        "`main` is empty; all exercised behavior comes from compiling the invalid function, focusing on frontend parsing and intrinsic validation rather than runtime execution."
+      ],
+      "summary": "The reproducer is a compile-fail crate targeting nightly x86_64 intrinsics. It defines a function that wraps `_mm_blend_ps` inside closures but deliberately passes malformed syntax and wrong argument kinds, then calls the closure with undefined variables. This stresses parser recovery, closure/type inference, name resolution, and validation of SIMD intrinsic signatures and immediate-mask requirements."
+    },
+    "test_failure_analysis": {
+      "analysis": "The common pattern is malformed frontend input inside nested closures around an x86 SIMD intrinsic call, followed by compiler error recovery continuing into THIR/MIR construction. The reproducer combines several invalid constructs at once: an intrinsic expecting a const immediate mask receives a closure/block expression, the inner closure body contains an incomplete `unsafe` expression, and the outer call uses unresolved names `x` and `y`. Despite these user-code errors, rustc proceeds far enough to build THIR for the nested closure `sse41_blend_noinline::{closure#0}::{closure#0}`, and then ICEs during `thir_body`/`check_match`/`mir_built`. This suggests a compiler bug in error-recovery handling for invalid closure bodies or malformed intrinsic arguments, where an erroneous HIR/type state is not represented defensively before THIR lowering or later analyses. The architecture-specific intrinsic is likely incidental; the more important trigger is a closure expression produced during parser/type recovery being treated as if it had a valid body/type. A likely defect is that THIR lowering or match-checking assumes certain recovered expressions are well-formed and hits an internal `bug!`/`unreachable!` when encountering an `ExprKind::Err`, invalid unsafe block form, or unresolved/ill-typed closure signature captured inside the intrinsic argument list.",
+      "possible_causes": [
+        "Missing defensive handling in THIR lowering for nested closures created from parser/type-checker recovery, especially when the closure body is an invalid/incomplete `unsafe` expression.",
+        "A bug in recovery for malformed intrinsic arguments: `_mm_blend_ps` requires an immediate integer mask, but a closure/block expression is accepted far enough that later THIR/MIR passes see an inconsistent typed expression.",
+        "An internal assumption in match-checking or MIR building that closure bodies do not contain unrecovered error nodes (`ExprKind::Err`, invalid unsafe form, or unresolved names), leading to an ICE instead of emitting only diagnostics.",
+        "Improper propagation of `ErrorGuaranteed`/error types for the inner closure `sse41_blend_noinline::{closure#0}::{closure#0}`, allowing downstream queries like `thir_body` and `mir_built` to run on invalid HIR.",
+        "Potential bug in closure signature/type inference during recovery: the compiler may construct a closure expecting parameters/types around the intrinsic call, but the malformed body and wrong third argument leave the closure in an inconsistent state that later passes do not tolerate."
+      ],
+      "evidence": [
+        "Query stack shows the panic occurs while building THIR for the inner closure: `#0 [thir_body] building THIR for sse41_blend_noinline::{closure#0}::{closure#0}`.",
+        "The ICE happens after ordinary user-code errors are already present (`E0425` undefined `x`/`y` and malformed syntax/type usage), indicating a failure of compiler recovery rather than a valid-program bug.",
+        "The reproducer nests closures inside an intrinsic call and uses `{ |x, y| unsafe }` as the third argument to `_mm_blend_ps`, a position that should be an immediate const integer mask, creating a highly erroneous recovered AST/HIR.",
+        "The inner closure body is syntactically incomplete (`unsafe` with no proper block), which is exactly the kind of malformed construct that parser recovery must represent safely for later phases.",
+        "`f(x, y)` uses unresolved names after the malformed intrinsic call, so name-resolution/type errors coexist with the closure recovery path; the compiler should stop gracefully, not panic.",
+        "The stack/query sequence proceeds through `check_match`, `mir_built`, `mir_const`, and `mir_borrowck` for the invalid inner closure, suggesting an erroneous node was not filtered out before later compiler phases."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1765,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+        "reason": "The panic occurs in the `thir_body` query for the inner recovered closure. This file owns the top-level THIR construction entry point and explicitly decides whether to lower bodies that already have type-checking errors, making it the most likely place where an erroneous nested closure body was allowed through instead of being rejected or replaced safely."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "The reproducer stresses malformed nested closure expressions (`{ |x, y| unsafe }`) and wrong intrinsic arguments, then ICEs while lowering that closure into THIR. Expression lowering is the most likely place for an unhandled recovered `hir::Expr`/error node, incomplete unsafe form, or inconsistent closure body to hit an internal assumption."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/thir/pattern/check_match.rs",
+        "reason": "The query stack shows `check_match` immediately after `thir_body`, so this pass is directly traversing the malformed THIR for the inner closure. If THIR contains a recovered error expression or invalid body shape, this visitor may be assuming well-formed nodes and triggering the ICE during traversal."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/closure.rs",
+        "reason": "The bug involves nested closures under severe error recovery, including unresolved names and a closure passed where an intrinsic expects an immediate const argument. Closure signature/body type inference may be producing an inconsistent typed closure that later THIR lowering cannot tolerate, so closure type checking is highly suspicious."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/expr.rs",
+        "reason": "The source contains an incomplete `unsafe` expression inside a closure body and a block expression used as an intrinsic argument. Since this is exactly the kind of malformed syntax that depends on parser recovery producing a safe AST, an error-recovery bug here could create a malformed closure/body shape that later ICEs in THIR."
+      },
+      {
+        "path": "compiler/rustc_parse/src/parser/diagnostics.rs",
+        "reason": "This file fabricates recovery AST nodes and diagnostics when expression parsing fails. Because the reproducer depends on continued compilation after severe syntax errors, a bad recovery placeholder for the inner closure body or `unsafe` expression could leak into later phases and cause the THIR ICE."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/mod.rs",
+        "reason": "This is the MIR-build entry that sequences match checking and THIR retrieval. Given that downstream queries continue running for a body with obvious hard errors, this file is a plausible place where early-abort conditions for tainted bodies are insufficient, allowing invalid inner closure THIR to proceed."
+      },
+      {
+        "path": "compiler/rustc_middle/src/thir.rs",
+        "reason": "If the issue is not in lowering itself, it may be in THIR’s representation lacking a robust form for recovered error expressions or malformed closure bodies. Since all failing phases consume THIR for the nested closure, the core THIR data model is a plausible contributor."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/validate.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/check_consts/check.rs",
+        "reason": "Fallback selection due to invalid or incomplete model output."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 156.803,
+    "stage_times_sec": {
+      "checkout": 1.106,
+      "load_bug_context": 0.09,
+      "test_behavior_analysis": 5.847,
+      "test_failure_analysis": 13.532,
+      "load_file_candidates": 0.092,
+      "search_suspicious_files": 136.136
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 423998,
+      "output_tokens": 6838,
+      "total_tokens": 430836,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.847,
+          "input_tokens": 382,
+          "output_tokens": 310,
+          "total_tokens": 692
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.532,
+          "input_tokens": 2175,
+          "output_tokens": 768,
+          "total_tokens": 2943
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.994,
+          "input_tokens": 27954,
+          "output_tokens": 286,
+          "total_tokens": 28240
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.192,
+          "input_tokens": 27822,
+          "output_tokens": 297,
+          "total_tokens": 28119
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.412,
+          "input_tokens": 27441,
+          "output_tokens": 306,
+          "total_tokens": 27747
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 10.0,
+          "input_tokens": 27628,
+          "output_tokens": 344,
+          "total_tokens": 27972
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.608,
+          "input_tokens": 27639,
+          "output_tokens": 360,
+          "total_tokens": 27999
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.217,
+          "input_tokens": 28024,
+          "output_tokens": 379,
+          "total_tokens": 28403
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 9.176,
+          "input_tokens": 27788,
+          "output_tokens": 383,
+          "total_tokens": 28171
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.231,
+          "input_tokens": 27773,
+          "output_tokens": 373,
+          "total_tokens": 28146
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 8.231,
+          "input_tokens": 27867,
+          "output_tokens": 363,
+          "total_tokens": 28230
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.503,
+          "input_tokens": 27707,
+          "output_tokens": 366,
+          "total_tokens": 28073
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 6.721,
+          "input_tokens": 27994,
+          "output_tokens": 288,
+          "total_tokens": 28282
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.91,
+          "input_tokens": 27830,
+          "output_tokens": 304,
+          "total_tokens": 28134
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 9.13,
+          "input_tokens": 28083,
+          "output_tokens": 348,
+          "total_tokens": 28431
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 8.864,
+          "input_tokens": 27822,
+          "output_tokens": 358,
+          "total_tokens": 28180
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.881,
+          "input_tokens": 20701,
+          "output_tokens": 374,
+          "total_tokens": 21075
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.035,
+          "input_tokens": 11368,
+          "output_tokens": 631,
+          "total_tokens": 11999
+        }
+      ]
+    }
+  }
+}

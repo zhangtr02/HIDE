@@ -1,0 +1,308 @@
+{
+  "bug_id": "114907",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-06-08",
+    "resolved": "5435ed6916a59e8d5acba2149316a841c3905cbd"
+  },
+  "final_top10": [
+    "compiler/rustc_borrowck/src/diagnostics/region_errors.rs",
+    "compiler/rustc_borrowck/src/lib.rs",
+    "compiler/rustc_infer/src/infer/error_reporting/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "file_level": {
+    "found_files": [
+      "compiler/rustc_borrowck/src/diagnostics/region_errors.rs",
+      "compiler/rustc_borrowck/src/lib.rs",
+      "compiler/rustc_infer/src/infer/error_reporting/mod.rs"
+    ],
+    "top_files": [
+      {
+        "path": "compiler/rustc_borrowck/src/diagnostics/region_errors.rs",
+        "rank": 1
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/lib.rs",
+        "rank": 2
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/error_reporting/mod.rs",
+        "rank": 3
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "found_functions": [],
+    "found_methods": [],
+    "top_methods": []
+  },
+  "graphlocator": {
+    "model": "gpt-5.4",
+    "graph_cache_path": "/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/graph_cache/114907.json",
+    "graph_cache_hit": true,
+    "graph_cache_build_mode": "bug_cache",
+    "graph_cache_bug_id": "114907",
+    "graph_cache_checkout_commit": "5435ed6916a59e8d5acba2149316a841c3905cbd",
+    "initial_graph_node_count": 45751,
+    "initial_graph_edge_count": 45750,
+    "graph_node_count": 45751,
+    "graph_edge_count": 65773,
+    "lazy_loaded_edge_count": 20023,
+    "search_topk": 5,
+    "max_search_turn": 5,
+    "max_causal_turn": 20,
+    "max_causal_code_elements": 80,
+    "max_causal_node_content_chars": 4000,
+    "max_existing_node_content_chars": 1200,
+    "max_causal_prompt_chars": 350000,
+    "seed_locations": [
+      "{\"type\": \"FUNCTION\", \"name\": \"report_region_errors\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/diagnostics/region_errors.rs\", \"content\": \"pub(crate) fn report_region_errors(&mut self, nll_errors: RegionErrors<'tcx>) {\\n        // Iterate through all the errors, producing a diagnostic for each one. The diagnostics are\\n        // buffered in the `MirBorrowckCtxt`.\\n\\n        let mut outlives_suggestion = OutlivesSuggestionBuilder::default();\\n\\n        for nll_error in nll_errors.into_iter() {\\n            match nll_error {\\n                RegionErrorKind::TypeTestError { type_test } => {\\n                    // Try to convert the lower-bound region into something named we can print for the user.\\n                    let lower_bound_region = self.to_error_region(type_test.lower_bound);\\n\\n                    let type_test_span = type_test.locations.span(&self.body);\\n\\n                    if let Some(lower_bound_region) = lower_bound_region {\\n                        let generic_ty = type_test.generic_kind.to_ty(self.infcx.tcx);\\n                        let origin = RelateParamBound(type_test_span, generic_ty, None);\\n                        self.buffer_error(self.infcx.construct_generic_bound_failure(\\n                            type_test_span,\\n                            Some(origin),\\n                            type_test.generic_kind,\\n                            lower_bound_region,\\n                            self.body.source.def_id().as_local(),\\n                        ));\\n                    } else {\\n                        // FIXME. We should handle this case better. It\\n                        // indicates that we have e.g., some region variable\\n                        // whose value is like `'a+'b` where `'a` and `'b` are\\n                        // distinct unrelated universal regions that are not\\n                        // known to outlive one another. It'd be nice to have\\n                        // some examples where this arises to decide how best\\n                        // to report it; we could probably handle it by\\n                        // iterating over the universal regions and reporting\\n                        // an error that multiple bounds are required.\\n                        self.buffer_error(self.infcx.tcx.sess.struct_span_err(\\n                            type_test_span,\\n                            &format!(\\\"`{}` does not live long enough\\\", type_test.generic_kind),\\n                        ));\\n                    }\\n                }\\n\\n                RegionErrorKind::UnexpectedHiddenRegion { span, hidden_ty, member_region } => {\\n                    let named_ty = self.regioncx.name_regions(self.infcx.tcx, hidden_ty);\\n                    let named_region = self.regioncx.name_regions(self.infcx.tcx, member_region);\\n                    self.buffer_error(unexpected_hidden_region_diagnostic(\\n                        self.infcx.tcx,\\n                        span,\\n                        named_ty,\\n                        named_region,\\n                    ));\\n                }\\n\\n                RegionErrorKind::BoundUniversalRegionError {\\n                    longer_fr,\\n                    placeholder,\\n                    error_element,\\n                } => {\\n                    let error_vid = self.regioncx.region_from_element(longer_fr, &error_element);\\n\\n                    // Find the code to blame for the fact that `longer_fr` outlives `error_fr`.\\n                    let (_, cause) = self.regioncx.find_outlives_blame_span(\\n                        &self.body,\\n                        longer_fr,\\n                        NllRegionVariableOrigin::Placeholder(placeholder),\\n                        error_vid,\\n                    );\\n\\n                    let universe = placeholder.universe;\\n                    let universe_info = self.regioncx.universe_info(universe);\\n\\n                    universe_info.report_error(self, placeholder, error_element, cause);\\n                }\\n\\n                RegionErrorKind::RegionError { fr_origin, longer_fr, shorter_fr, is_reported } => {\\n                    if is_reported {\\n                        self.report_region_error(\\n                            longer_fr,\\n                            fr_origin,\\n                            shorter_fr,\\n                            &mut outlives_suggestion,\\n                        );\\n                    } else {\\n                        // We only report the first error, so as not to overwhelm the user. See\\n                        // `RegRegionErrorKind` docs.\\n                        //\\n                        // FIXME: currently we do nothing with these, but perhaps we can do better?\\n                        // FIXME: try collecting these constraints on the outlives suggestion\\n                        // builder. Does it make the suggestions any better?\\n                        debug!(\\n                            \\\"Unreported region error: can't prove that {:?}: {:?}\\\",\\n                            longer_fr, shorter_fr\\n                        );\\n                    }\\n                }\\n            }\\n        }\\n\\n        // Emit one outlives suggestions for each MIR def we borrowck\\n        outlives_suggestion.add_suggestion(self);\\n    }\"}",
+      "{\"type\": \"FUNCTION\", \"name\": \"report_region_errors\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_infer/src/infer/error_reporting/mod.rs\", \"content\": \"pub fn report_region_errors(&self, errors: &[RegionResolutionError<'tcx>]) {\\n        debug!(\\\"report_region_errors(): {} errors to start\\\", errors.len());\\n\\n        // try to pre-process the errors, which will group some of them\\n        // together into a `ProcessedErrors` group:\\n        let errors = self.process_errors(errors);\\n\\n        debug!(\\\"report_region_errors: {} errors after preprocessing\\\", errors.len());\\n\\n        for error in errors {\\n            debug!(\\\"report_region_errors: error = {:?}\\\", error);\\n\\n            if !self.try_report_nice_region_error(&error) {\\n                match error.clone() {\\n                    // These errors could indicate all manner of different\\n                    // problems with many different solutions. Rather\\n                    // than generate a \\\"one size fits all\\\" error, what we\\n                    // attempt to do is go through a number of specific\\n                    // scenarios and try to find the best way to present\\n                    // the error. If all of these fails, we fall back to a rather\\n                    // general bit of code that displays the error information\\n                    RegionResolutionError::ConcreteFailure(origin, sub, sup) => {\\n                        if sub.is_placeholder() || sup.is_placeholder() {\\n                            self.report_placeholder_failure(origin, sub, sup).emit();\\n                        } else {\\n                            self.report_concrete_failure(origin, sub, sup).emit();\\n                        }\\n                    }\\n\\n                    RegionResolutionError::GenericBoundFailure(origin, param_ty, sub) => {\\n                        self.report_generic_bound_failure(\\n                            origin.span(),\\n                            Some(origin),\\n                            param_ty,\\n                            sub,\\n                        );\\n                    }\\n\\n                    RegionResolutionError::SubSupConflict(\\n                        _,\\n                        var_origin,\\n                        sub_origin,\\n                        sub_r,\\n                        sup_origin,\\n                        sup_r,\\n                        _,\\n                    ) => {\\n                        if sub_r.is_placeholder() {\\n                            self.report_placeholder_failure(sub_origin, sub_r, sup_r).emit();\\n                        } else if sup_r.is_placeholder() {\\n                            self.report_placeholder_failure(sup_origin, sub_r, sup_r).emit();\\n                        } else {\\n                            self.report_sub_sup_conflict(\\n                                var_origin, sub_origin, sub_r, sup_origin, sup_r,\\n                            );\\n                        }\\n                    }\\n\\n                    RegionResolutionError::UpperBoundUniverseConflict(\\n                        _,\\n                        _,\\n                        var_universe,\\n                        sup_origin,\\n                        sup_r,\\n                    ) => {\\n                        assert!(sup_r.is_placeholder());\\n\\n                        // Make a dummy value for the \\\"sub region\\\" --\\n                        // this is the initial value of the\\n                        // placeholder. In practice, we expect more\\n                        // tailored errors that don't really use this\\n                        // value.\\n                        let sub_r = self.tcx.mk_region(ty::ReEmpty(var_universe));\\n\\n                        self.report_placeholder_failure(sup_origin, sub_r, sup_r).emit();\\n                    }\\n                }\\n            }\\n        }\\n    }\"}",
+      "{\"type\": \"FILE\", \"name\": \"region_errors.rs\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/diagnostics/region_errors.rs\", \"content\": \"region_errors.rs\"}",
+      "{\"type\": \"STRUCTURE\", \"name\": \"MirBorrowckCtxt\", \"location\": \"/data/zhangtianrong/projects/rustc-cbi/baselines/graphlocator_rustc/rust/compiler/rustc_borrowck/src/lib.rs\", \"content\": \"struct MirBorrowckCtxt<'cx, 'tcx> {\\n    infcx: &'cx InferCtxt<'cx, 'tcx>,\\n    param_env: ParamEnv<'tcx>,\\n    body: &'cx Body<'tcx>,\\n    move_data: &'cx MoveData<'tcx>,\\n\\n    /// Map from MIR `Location` to `LocationIndex`; created\\n    /// when MIR borrowck begins.\\n    location_table: &'cx LocationTable,\\n\\n    movable_generator: bool,\\n    /// This keeps track of whether local variables are free-ed when the function\\n    /// exits even without a `StorageDead`, which appears to be the case for\\n    /// constants.\\n    ///\\n    /// I'm not sure this is the right approach - @eddyb could you try and\\n    /// figure this out?\\n    locals_are_invalidated_at_exit: bool,\\n    /// This field keeps track of when borrow errors are reported in the access_place function\\n    /// so that there is no duplicate reporting. This field cannot also be used for the conflicting\\n    /// borrow errors that is handled by the `reservation_error_reported` field as the inclusion\\n    /// of the `Span` type (while required to mute some errors) stops the muting of the reservation\\n    /// errors.\\n    access_place_error_reported: FxHashSet<(Place<'tcx>, Span)>,\\n    /// This field keeps track of when borrow conflict errors are reported\\n    /// for reservations, so that we don't report seemingly duplicate\\n    /// errors for corresponding activations.\\n    //\\n    // FIXME: ideally this would be a set of `BorrowIndex`, not `Place`s,\\n    // but it is currently inconvenient to track down the `BorrowIndex`\\n    // at the time we detect and report a reservation error.\\n    reservation_error_reported: FxHashSet<Place<'tcx>>,\\n    /// This fields keeps track of the `Span`s that we have\\n    /// used to report extra information for `FnSelfUse`, to avoid\\n    /// unnecessarily verbose errors.\\n    fn_self_span_reported: FxHashSet<Span>,\\n    /// This field keeps track of errors reported in the checking of uninitialized variables,\\n    /// so that we don't report seemingly duplicate errors.\\n    uninitialized_error_reported: FxHashSet<PlaceRef<'tcx>>,\\n    /// This field keeps track of all the local variables that are declared mut and are mutated.\\n    /// Used for the warning issued by an unused mutable local variable.\\n    used_mut: FxHashSet<Local>,\\n    /// If the function we're checking is a closure, then we'll need to report back the list of\\n    /// mutable upvars that have been used. This field keeps track of them.\\n    used_mut_upvars: SmallVec<[Field; 8]>,\\n    /// Region inference context. This contains the results from region inference and lets us e.g.\\n    /// find out which CFG points are contained in each borrow region.\\n    regioncx: Rc<RegionInferenceContext<'tcx>>,\\n\\n    /// The set of borrows extracted from the MIR\\n    borrow_set: Rc<BorrowSet<'tcx>>,\\n\\n    /// Dominators for MIR\\n    dominators: Dominators<BasicBlock>,\\n\\n    /// Information about upvars not necessarily preserved in types or MIR\\n    upvars: Vec<Upvar<'tcx>>,\\n\\n    /// Names of local (user) variables (extracted from `var_debug_info`).\\n    local_names: IndexVec<Local, Option<Symbol>>,\\n\\n    /// Record the region names generated for each region in the given\\n    /// MIR def so that we can reuse them later in help/error messages.\\n    region_names: RefCell<FxHashMap<RegionVid, RegionName>>,\\n\\n    /// The counter for generating new region names.\\n    next_region_name: RefCell<usize>,\\n\\n    /// Results of Polonius analysis.\\n    polonius_output: Option<Rc<PoloniusOutput>>,\\n\\n    errors: error::BorrowckErrors<'tcx>,\\n}\"}"
+    ],
+    "found_files": [
+      "compiler/rustc_borrowck/src/diagnostics/region_errors.rs",
+      "compiler/rustc_borrowck/src/lib.rs",
+      "compiler/rustc_infer/src/infer/error_reporting/mod.rs"
+    ],
+    "found_modules": [
+      "compiler/rustc_borrowck/src/lib.rs::MirBorrowckCtxt"
+    ],
+    "found_functions": [],
+    "cig": {
+      "nodes": [
+        {
+          "id": "A",
+          "name": "Missing key handling in borrowck region error reporting",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "report_region_errors",
+              "file": "compiler/rustc_borrowck/src/diagnostics/region_errors.rs",
+              "content": "pub(crate) fn report_region_errors(&mut self, nll_errors: RegionErrors<'tcx>) {\n        // Iterate through all the errors, producing a diagnostic for each one. The diagnostics are\n        // buffered in the `MirBorrowckCtxt`.\n\n        let mut outlives_suggestion = OutlivesSuggestionBuilder::default();\n\n        for nll_error in nll_errors.into_iter() {\n            match nll_error {\n                RegionErrorKind::TypeTestError { type_test } => {\n                    // Try to convert the lower-bound region into something named we can print for the user.\n                    let lower_bound_region = self.to_error_region(type_test.lower_bound);\n\n                    let type_test_span = type_test.locations.span(&self.body);\n\n                    if let Some(lower_bound_region) = lower_bound_region {\n                        let generic_ty = type_test.generic_kind.to_ty(self.infcx.tcx);\n                        let origin = RelateParamBound(type_test_span, generic_ty, None);\n                        self.buffer_error(self.infcx.construct_generic_bound_failure(\n                            type_test_span,\n                            Some(origin),\n                            type_test.generic_kind,\n                            lower_bound_region,\n                            self.body.source.def_id().as_local(),\n                        ));\n                    } else {\n                        // FIXME. We should handle this case better. It\n                        // indicates that we have e.g., some region variable\n                        // whose value is like `'a+'b` where `'a` and `'b` are\n                        // distinct unrelated universal regions that are not\n                        // known to outlive one another. It'd be nice to have\n                        // some examples where this arises to decide how best\n                        // to report it; we could probably handle it by\n                        // iterating over the universal regions and reporting\n                        // an error that multiple bounds are required.\n                        self.buffer_error(self.infcx.tcx.sess.struct_span_err(\n                            type_test_span,\n                            &format!(\"`{}` does not live long enough\", type_test.generic_kind),\n                        ));\n                    }\n                }\n\n                RegionErrorKind::UnexpectedHiddenRegion { span, hidden_ty, member_region } => {\n                    let named_ty = self.regioncx.name_regions(self.infcx.tcx, hidden_ty);\n                    let named_region = self.regioncx.name_regions(self.infcx.tcx, member_region);\n                    self.buffer_error(unexpected_hidden_region_diagnostic(\n                        self.infcx.tcx,\n                        span,\n                        named_ty,\n                        named_region,\n                    ));\n                }\n\n                RegionErrorKind::BoundUniversalRegionError {\n                    longer_fr,\n                    placeholder,\n                    error_element,\n                } => {\n                    let error_vid = self.regioncx.region_from_element(longer_fr, &error_element);\n\n                    // Find the code to blame for the fact that `longer_fr` outlives `error_fr`.\n                    let (_, cause) = self.regioncx.find_outlives_blame_span(\n                        &self.body,\n                        longer_fr,\n                        NllRegionVariableOrigin::Placeholder(placeholder),\n                        error_vid,\n                    );\n\n                    let universe = placeholder.universe;\n                    let universe_info = self.regioncx.universe_info(universe);\n\n                    universe_info.report_error(self, placeholder, error_element, cause);\n                }\n\n                RegionErrorKind::RegionError { fr_origin, longer_fr, shorter_fr, is_reported } => {\n                    if is_reported {\n                        self.report_region_error(\n                            longer_fr,\n                            fr_origin,\n                            shorter_fr,\n                            &mut outlives_suggestion,\n                        );\n                    } else {\n                        // We only report the first error, so as not to overwhelm the user. See\n                        // `RegRegionErrorKind` docs.\n                        //\n                        // FIXME: currently we do nothing with these, but perhaps we can do better?\n                        // FIXME: try collecting these constraints on the outlives suggestion\n                        // builder. Does it make the suggestions any better?\n                        debug!(\n                            \"Unreported region error: can't prove that {:?}: {:?}\",\n                            longer_fr, shorter_fr\n                        );\n                    }\n                }\n            }\n        }\n\n        // Emit one outlives suggestions for each MIR def we borrowck\n        outlives_suggestion.add_suggestion(self);\n    }"
+            }
+          ]
+        },
+        {
+          "id": "I",
+          "name": "Issue",
+          "code_elements": []
+        },
+        {
+          "id": "B",
+          "name": "Inconsistent region inference state for bound universal region errors",
+          "code_elements": [
+            {
+              "type": "STRUCTURE",
+              "name": "MirBorrowckCtxt",
+              "file": "compiler/rustc_borrowck/src/lib.rs",
+              "content": "struct MirBorrowckCtxt<'cx, 'tcx> {\n    infcx: &'cx InferCtxt<'cx, 'tcx>,\n    param_env: ParamEnv<'tcx>,\n    body: &'cx Body<'tcx>,\n    move_data: &'cx MoveData<'tcx>,\n\n    /// Map from MIR `Location` to `LocationIndex`; created\n    /// when MIR borrowck begins.\n    location_table: &'cx LocationTable,\n\n    movable_generator: bool,\n    /// This keeps track of whether local variables are free-ed when the function\n    /// exits even without a `StorageDead`, which appears to be the case for\n    /// constants.\n    ///\n    /// I'm not sure this is the right approach - @eddyb could you try and\n    /// figure this out?\n    locals_are_invalidated_at_exit: bool,\n    /// This field keeps track of when borrow errors are reported in the access_place function\n    /// so that there is no duplicate reporting. This field cannot also be used for the conflicting\n    /// borrow errors that is handled by the `reservation_error_reported` field as the inclusion\n    /// of the `Span` type (while required to mute some errors) stops the muting of the reservation\n    /// errors.\n    access_place_error_reported: FxHashSet<(Place<'tcx>, Span)>,\n    /// This field keeps track of when borrow conflict errors are reported\n    /// for reservations, so that we don't report seemingly duplicate\n    /// errors for corresponding activations.\n    //\n    // FIXME: ideally this would be a set of `BorrowIndex`, not `Place`s,\n    // but it is currently inconvenient to track down the `BorrowIndex`\n    // at the time we detect and report a reservation error.\n    reservation_error_reported: FxHashSet<Place<'tcx>>,\n    /// This fields keeps track of the `Span`s that we have\n    /// used to report extra information for `FnSelfUse`, to avoid\n    /// unnecessarily verbose errors.\n    fn_self_span_reported: FxHashSet<Span>,\n    /// This field keeps track of errors reported in the checking of uninitialized variables,\n    /// so that we don't report seemingly duplicate errors.\n    uninitialized_error_reported: FxHashSet<PlaceRef<'tcx>>,\n    /// This field keeps track of all the local variables that are declared mut and are mutated.\n    /// Used for the warning issued by an unused mutable local variable.\n    used_mut: FxHashSet<Local>,\n    /// If the function we're checking is a closure, then we'll need to report back the list of\n    /// mutable upvars that have been used. This field keeps track of them.\n    used_mut_upvars: SmallVec<[Field; 8]>,\n    /// Region inference context. This contains the results from region inference and lets us e.g.\n    /// find out which CFG points are contained in each borrow region.\n    regioncx: Rc<RegionInferenceContext<'tcx>>,\n\n    /// The set of borrows extracted from the MIR\n    borrow_set: Rc<BorrowSet<'tcx>>,\n\n    /// Dominators for MIR\n    dominators: Dominators<BasicBlock>,\n\n    /// Information about upvars not necessarily preserved in types or MIR\n    upvars: Vec<Upvar<'tcx>>,\n\n    /// Names of local (user) variables (extracted from `var_debug_info`).\n    local_names: IndexVec<Local, Option<Symbol>>,\n\n    /// Record the region names generated for each region in the given\n    /// MIR def so that we can reuse them later in help/error messages.\n    region_names: RefCell<FxHashMap<RegionVid, RegionName>>,\n\n    /// The counter for generating new region names.\n    next_region_name: RefCell<usize>,\n\n    /// Results of Polonius analysis.\n    polonius_output: Option<Rc<PoloniusOutput>>,\n\n    errors: error::BorrowckErrors<'tcx>,\n}"
+            }
+          ]
+        },
+        {
+          "id": "C",
+          "name": "Placeholder/universe mismatch during error construction and reporting",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "report_region_errors",
+              "file": "compiler/rustc_borrowck/src/diagnostics/region_errors.rs",
+              "content": "pub(crate) fn report_region_errors(&mut self, nll_errors: RegionErrors<'tcx>) {\n        // Iterate through all the errors, producing a diagnostic for each one. The diagnostics are\n        // buffered in the `MirBorrowckCtxt`.\n\n        let mut outlives_suggestion = OutlivesSuggestionBuilder::default();\n\n        for nll_error in nll_errors.into_iter() {\n            match nll_error {\n                RegionErrorKind::TypeTestError { type_test } => {\n                    // Try to convert the lower-bound region into something named we can print for the user.\n                    let lower_bound_region = self.to_error_region(type_test.lower_bound);\n\n                    let type_test_span = type_test.locations.span(&self.body);\n\n                    if let Some(lower_bound_region) = lower_bound_region {\n                        let generic_ty = type_test.generic_kind.to_ty(self.infcx.tcx);\n                        let origin = RelateParamBound(type_test_span, generic_ty, None);\n                        self.buffer_error(self.infcx.construct_generic_bound_failure(\n                            type_test_span,\n                            Some(origin),\n                            type_test.generic_kind,\n                            lower_bound_region,\n                            self.body.source.def_id().as_local(),\n                        ));\n                    } else {\n                        // FIXME. We should handle this case better. It\n                        // indicates that we have e.g., some region variable\n                        // whose value is like `'a+'b` where `'a` and `'b` are\n                        // distinct unrelated universal regions that are not\n                        // known to outlive one another. It'd be nice to have\n                        // some examples where this arises to decide how best\n                        // to report it; we could probably handle it by\n                        // iterating over the universal regions and reporting\n                        // an error that multiple bounds are required.\n                        self.buffer_error(self.infcx.tcx.sess.struct_span_err(\n                            type_test_span,\n                            &format!(\"`{}` does not live long enough\", type_test.generic_kind),\n                        ));\n                    }\n                }\n\n                RegionErrorKind::UnexpectedHiddenRegion { span, hidden_ty, member_region } => {\n                    let named_ty = self.regioncx.name_regions(self.infcx.tcx, hidden_ty);\n                    let named_region = self.regioncx.name_regions(self.infcx.tcx, member_region);\n                    self.buffer_error(unexpected_hidden_region_diagnostic(\n                        self.infcx.tcx,\n                        span,\n                        named_ty,\n                        named_region,\n                    ));\n                }\n\n                RegionErrorKind::BoundUniversalRegionError {\n                    longer_fr,\n                    placeholder,\n                    error_element,\n                } => {\n                    let error_vid = self.regioncx.region_from_element(longer_fr, &error_element);\n\n                    // Find the code to blame for the fact that `longer_fr` outlives `error_fr`.\n                    let (_, cause) = self.regioncx.find_outlives_blame_span(\n                        &self.body,\n                        longer_fr,\n                        NllRegionVariableOrigin::Placeholder(placeholder),\n                        error_vid,\n                    );\n\n                    let universe = placeholder.universe;\n                    let universe_info = self.regioncx.universe_info(universe);\n\n                    universe_info.report_error(self, placeholder, error_element, cause);\n                }\n\n                RegionErrorKind::RegionError { fr_origin, longer_fr, shorter_fr, is_reported } => {\n                    if is_reported {\n                        self.report_region_error(\n                            longer_fr,\n                            fr_origin,\n                            shorter_fr,\n                            &mut outlives_suggestion,\n                        );\n                    } else {\n                        // We only report the first error, so as not to overwhelm the user. See\n                        // `RegRegionErrorKind` docs.\n                        //\n                        // FIXME: currently we do nothing with these, but perhaps we can do better?\n                        // FIXME: try collecting these constraints on the outlives suggestion\n                        // builder. Does it make the suggestions any better?\n                        debug!(\n                            \"Unreported region error: can't prove that {:?}: {:?}\",\n                            longer_fr, shorter_fr\n                        );\n                    }\n                }\n            }\n        }\n\n        // Emit one outlives suggestions for each MIR def we borrowck\n        outlives_suggestion.add_suggestion(self);\n    }"
+            }
+          ]
+        },
+        {
+          "id": "D",
+          "name": "Delayed span bug path leaving borrowck with tainted infcx but no emitted error",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "report_region_errors",
+              "file": "compiler/rustc_borrowck/src/diagnostics/region_errors.rs",
+              "content": "pub(crate) fn report_region_errors(&mut self, nll_errors: RegionErrors<'tcx>) {\n        // Iterate through all the errors, producing a diagnostic for each one. The diagnostics are\n        // buffered in the `MirBorrowckCtxt`.\n\n        let mut outlives_suggestion = OutlivesSuggestionBuilder::default();\n\n        for nll_error in nll_errors.into_iter() {\n            match nll_error {\n                RegionErrorKind::TypeTestError { type_test } => {\n                    // Try to convert the lower-bound region into something named we can print for the user.\n                    let lower_bound_region = self.to_error_region(type_test.lower_bound);\n\n                    let type_test_span = type_test.locations.span(&self.body);\n\n                    if let Some(lower_bound_region) = lower_bound_region {\n                        let generic_ty = type_test.generic_kind.to_ty(self.infcx.tcx);\n                        let origin = RelateParamBound(type_test_span, generic_ty, None);\n                        self.buffer_error(self.infcx.construct_generic_bound_failure(\n                            type_test_span,\n                            Some(origin),\n                            type_test.generic_kind,\n                            lower_bound_region,\n                            self.body.source.def_id().as_local(),\n                        ));\n                    } else {\n                        // FIXME. We should handle this case better. It\n                        // indicates that we have e.g., some region variable\n                        // whose value is like `'a+'b` where `'a` and `'b` are\n                        // distinct unrelated universal regions that are not\n                        // known to outlive one another. It'd be nice to have\n                        // some examples where this arises to decide how best\n                        // to report it; we could probably handle it by\n                        // iterating over the universal regions and reporting\n                        // an error that multiple bounds are required.\n                        self.buffer_error(self.infcx.tcx.sess.struct_span_err(\n                            type_test_span,\n                            &format!(\"`{}` does not live long enough\", type_test.generic_kind),\n                        ));\n                    }\n                }\n\n                RegionErrorKind::UnexpectedHiddenRegion { span, hidden_ty, member_region } => {\n                    let named_ty = self.regioncx.name_regions(self.infcx.tcx, hidden_ty);\n                    let named_region = self.regioncx.name_regions(self.infcx.tcx, member_region);\n                    self.buffer_error(unexpected_hidden_region_diagnostic(\n                        self.infcx.tcx,\n                        span,\n                        named_ty,\n                        named_region,\n                    ));\n                }\n\n                RegionErrorKind::BoundUniversalRegionError {\n                    longer_fr,\n                    placeholder,\n                    error_element,\n                } => {\n                    let error_vid = self.regioncx.region_from_element(longer_fr, &error_element);\n\n                    // Find the code to blame for the fact that `longer_fr` outlives `error_fr`.\n                    let (_, cause) = self.regioncx.find_outlives_blame_span(\n                        &self.body,\n                        longer_fr,\n                        NllRegionVariableOrigin::Placeholder(placeholder),\n                        error_vid,\n                    );\n\n                    let universe = placeholder.universe;\n                    let universe_info = self.regioncx.universe_info(universe);\n\n                    universe_info.report_error(self, placeholder, error_element, cause);\n                }\n\n                RegionErrorKind::RegionError { fr_origin, longer_fr, shorter_fr, is_reported } => {\n                    if is_reported {\n                        self.report_region_error(\n                            longer_fr,\n                            fr_origin,\n                            shorter_fr,\n                            &mut outlives_suggestion,\n                        );\n                    } else {\n                        // We only report the first error, so as not to overwhelm the user. See\n                        // `RegRegionErrorKind` docs.\n                        //\n                        // FIXME: currently we do nothing with these, but perhaps we can do better?\n                        // FIXME: try collecting these constraints on the outlives suggestion\n                        // builder. Does it make the suggestions any better?\n                        debug!(\n                            \"Unreported region error: can't prove that {:?}: {:?}\",\n                            longer_fr, shorter_fr\n                        );\n                    }\n                }\n            }\n        }\n\n        // Emit one outlives suggestions for each MIR def we borrowck\n        outlives_suggestion.add_suggestion(self);\n    }"
+            }
+          ]
+        },
+        {
+          "id": "E",
+          "name": "Complex nested closure and callback pattern triggering uncommon borrowck lifetime constraints",
+          "code_elements": [
+            {
+              "type": "STRUCTURE",
+              "name": "MirBorrowckCtxt",
+              "file": "compiler/rustc_borrowck/src/lib.rs",
+              "content": "struct MirBorrowckCtxt<'cx, 'tcx> {\n    infcx: &'cx InferCtxt<'cx, 'tcx>,\n    param_env: ParamEnv<'tcx>,\n    body: &'cx Body<'tcx>,\n    move_data: &'cx MoveData<'tcx>,\n\n    /// Map from MIR `Location` to `LocationIndex`; created\n    /// when MIR borrowck begins.\n    location_table: &'cx LocationTable,\n\n    movable_generator: bool,\n    /// This keeps track of whether local variables are free-ed when the function\n    /// exits even without a `StorageDead`, which appears to be the case for\n    /// constants.\n    ///\n    /// I'm not sure this is the right approach - @eddyb could you try and\n    /// figure this out?\n    locals_are_invalidated_at_exit: bool,\n    /// This field keeps track of when borrow errors are reported in the access_place function\n    /// so that there is no duplicate reporting. This field cannot also be used for the conflicting\n    /// borrow errors that is handled by the `reservation_error_reported` field as the inclusion\n    /// of the `Span` type (while required to mute some errors) stops the muting of the reservation\n    /// errors.\n    access_place_error_reported: FxHashSet<(Place<'tcx>, Span)>,\n    /// This field keeps track of when borrow conflict errors are reported\n    /// for reservations, so that we don't report seemingly duplicate\n    /// errors for corresponding activations.\n    //\n    // FIXME: ideally this would be a set of `BorrowIndex`, not `Place`s,\n    // but it is currently inconvenient to track down the `BorrowIndex`\n    // at the time we detect and report a reservation error.\n    reservation_error_reported: FxHashSet<Place<'tcx>>,\n    /// This fields keeps track of the `Span`s that we have\n    /// used to report extra information for `FnSelfUse`, to avoid\n    /// unnecessarily verbose errors.\n    fn_self_span_reported: FxHashSet<Span>,\n    /// This field keeps track of errors reported in the checking of uninitialized variables,\n    /// so that we don't report seemingly duplicate errors.\n    uninitialized_error_reported: FxHashSet<PlaceRef<'tcx>>,\n    /// This field keeps track of all the local variables that are declared mut and are mutated.\n    /// Used for the warning issued by an unused mutable local variable.\n    used_mut: FxHashSet<Local>,\n    /// If the function we're checking is a closure, then we'll need to report back the list of\n    /// mutable upvars that have been used. This field keeps track of them.\n    used_mut_upvars: SmallVec<[Field; 8]>,\n    /// Region inference context. This contains the results from region inference and lets us e.g.\n    /// find out which CFG points are contained in each borrow region.\n    regioncx: Rc<RegionInferenceContext<'tcx>>,\n\n    /// The set of borrows extracted from the MIR\n    borrow_set: Rc<BorrowSet<'tcx>>,\n\n    /// Dominators for MIR\n    dominators: Dominators<BasicBlock>,\n\n    /// Information about upvars not necessarily preserved in types or MIR\n    upvars: Vec<Upvar<'tcx>>,\n\n    /// Names of local (user) variables (extracted from `var_debug_info`).\n    local_names: IndexVec<Local, Option<Symbol>>,\n\n    /// Record the region names generated for each region in the given\n    /// MIR def so that we can reuse them later in help/error messages.\n    region_names: RefCell<FxHashMap<RegionVid, RegionName>>,\n\n    /// The counter for generating new region names.\n    next_region_name: RefCell<usize>,\n\n    /// Results of Polonius analysis.\n    polonius_output: Option<Rc<PoloniusOutput>>,\n\n    errors: error::BorrowckErrors<'tcx>,\n}"
+            }
+          ]
+        },
+        {
+          "id": "F",
+          "name": "Secondary diagnostic emission/formatting failure masking the original borrowck error",
+          "code_elements": [
+            {
+              "type": "FUNCTION",
+              "name": "report_region_errors",
+              "file": "compiler/rustc_infer/src/infer/error_reporting/mod.rs",
+              "content": "pub fn report_region_errors(&self, errors: &[RegionResolutionError<'tcx>]) {\n        debug!(\"report_region_errors(): {} errors to start\", errors.len());\n\n        // try to pre-process the errors, which will group some of them\n        // together into a `ProcessedErrors` group:\n        let errors = self.process_errors(errors);\n\n        debug!(\"report_region_errors: {} errors after preprocessing\", errors.len());\n\n        for error in errors {\n            debug!(\"report_region_errors: error = {:?}\", error);\n\n            if !self.try_report_nice_region_error(&error) {\n                match error.clone() {\n                    // These errors could indicate all manner of different\n                    // problems with many different solutions. Rather\n                    // than generate a \"one size fits all\" error, what we\n                    // attempt to do is go through a number of specific\n                    // scenarios and try to find the best way to present\n                    // the error. If all of these fails, we fall back to a rather\n                    // general bit of code that displays the error information\n                    RegionResolutionError::ConcreteFailure(origin, sub, sup) => {\n                        if sub.is_placeholder() || sup.is_placeholder() {\n                            self.report_placeholder_failure(origin, sub, sup).emit();\n                        } else {\n                            self.report_concrete_failure(origin, sub, sup).emit();\n                        }\n                    }\n\n                    RegionResolutionError::GenericBoundFailure(origin, param_ty, sub) => {\n                        self.report_generic_bound_failure(\n                            origin.span(),\n                            Some(origin),\n                            param_ty,\n                            sub,\n                        );\n                    }\n\n                    RegionResolutionError::SubSupConflict(\n                        _,\n                        var_origin,\n                        sub_origin,\n                        sub_r,\n                        sup_origin,\n                        sup_r,\n                        _,\n                    ) => {\n                        if sub_r.is_placeholder() {\n                            self.report_placeholder_failure(sub_origin, sub_r, sup_r).emit();\n                        } else if sup_r.is_placeholder() {\n                            self.report_placeholder_failure(sup_origin, sub_r, sup_r).emit();\n                        } else {\n                            self.report_sub_sup_conflict(\n                                var_origin, sub_origin, sub_r, sup_origin, sup_r,\n                            );\n                        }\n                    }\n\n                    RegionResolutionError::UpperBoundUniverseConflict(\n                        _,\n                        _,\n                        var_universe,\n                        sup_origin,\n                        sup_r,\n                    ) => {\n                        assert!(sup_r.is_placeholder());\n\n                        // Make a dummy value for the \"sub region\" --\n                        // this is the initial value of the\n                        // placeholder. In practice, we expect more\n                        // tailored errors that don't really use this\n                        // value.\n                        let sub_r = self.tcx.mk_region(ty::ReEmpty(var_universe));\n\n                        self.report_placeholder_failure(sup_origin, sub_r, sup_r).emit();\n                    }\n                }\n            }\n        }\n    }"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "A",
+          "target": "I",
+          "weight": 0.97
+        },
+        {
+          "source": "B",
+          "target": "I",
+          "weight": 0.95
+        },
+        {
+          "source": "C",
+          "target": "I",
+          "weight": 0.98
+        },
+        {
+          "source": "D",
+          "target": "I",
+          "weight": 0.98
+        },
+        {
+          "source": "E",
+          "target": "I",
+          "weight": 0.82
+        },
+        {
+          "source": "F",
+          "target": "I",
+          "weight": 0.93
+        }
+      ]
+    }
+  },
+  "efficiency": {
+    "total_wall_time_sec": 529.751,
+    "stage_times_sec": {
+      "load_bug_context": 0.019,
+      "checkout": 4.752,
+      "load_or_build_graph": 30.723,
+      "symptom_vertices_locating": 454.634,
+      "dynamic_cig_discovering": 37.993,
+      "convert_results": 0.006
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 14,
+      "input_tokens": 216438,
+      "output_tokens": 1682,
+      "total_tokens": 218120,
+      "requests": [
+        {
+          "stage": "search_seed_turn_1",
+          "latency_sec": 3.777,
+          "input_tokens": 11150,
+          "output_tokens": 132,
+          "total_tokens": 11282
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 2.629,
+          "input_tokens": 10496,
+          "output_tokens": 18,
+          "total_tokens": 10514
+        },
+        {
+          "stage": "search_seed_turn_2",
+          "latency_sec": 3.285,
+          "input_tokens": 11296,
+          "output_tokens": 26,
+          "total_tokens": 11322
+        },
+        {
+          "stage": "search_relevance",
+          "latency_sec": 3.192,
+          "input_tokens": 10500,
+          "output_tokens": 17,
+          "total_tokens": 10517
+        },
+        {
+          "stage": "search_seed_turn_3",
+          "latency_sec": 4.303,
+          "input_tokens": 11401,
+          "output_tokens": 26,
+          "total_tokens": 11427
+        },
+        {
+          "stage": "search_seed_turn_4",
+          "latency_sec": 4.586,
+          "input_tokens": 13007,
+          "output_tokens": 29,
+          "total_tokens": 13036
+        },
+        {
+          "stage": "search_seed_turn_5",
+          "latency_sec": 3.298,
+          "input_tokens": 14006,
+          "output_tokens": 53,
+          "total_tokens": 14059
+        },
+        {
+          "stage": "causal_initial",
+          "latency_sec": 5.375,
+          "input_tokens": 13079,
+          "output_tokens": 208,
+          "total_tokens": 13287
+        },
+        {
+          "stage": "causal_update_1",
+          "latency_sec": 5.84,
+          "input_tokens": 23615,
+          "output_tokens": 196,
+          "total_tokens": 23811
+        },
+        {
+          "stage": "causal_update_2",
+          "latency_sec": 5.166,
+          "input_tokens": 15801,
+          "output_tokens": 194,
+          "total_tokens": 15995
+        },
+        {
+          "stage": "causal_update_3",
+          "latency_sec": 5.442,
+          "input_tokens": 23615,
+          "output_tokens": 196,
+          "total_tokens": 23811
+        },
+        {
+          "stage": "causal_update_4",
+          "latency_sec": 6.604,
+          "input_tokens": 23622,
+          "output_tokens": 195,
+          "total_tokens": 23817
+        },
+        {
+          "stage": "causal_update_5",
+          "latency_sec": 4.555,
+          "input_tokens": 15803,
+          "output_tokens": 194,
+          "total_tokens": 15997
+        },
+        {
+          "stage": "causal_update_6",
+          "latency_sec": 4.993,
+          "input_tokens": 19047,
+          "output_tokens": 198,
+          "total_tokens": 19245
+        }
+      ]
+    }
+  }
+}

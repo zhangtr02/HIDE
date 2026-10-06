@@ -1,0 +1,2977 @@
+{
+  "bug_id": "129811",
+  "checkout": {
+    "requested": "nightly-2024-08-29",
+    "resolved": "100fde5246bf56f22fb5cc85374dd841296fce0e"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_transform/src/lib.rs",
+    "compiler/rustc_ty_utils/src/layout.rs",
+    "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+    "compiler/rustc_mir_transform/src/coroutine.rs",
+    "compiler/rustc_mir_transform/src/pass_manager.rs",
+    "compiler/rustc_ty_utils/src/abi.rs",
+    "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+    "compiler/rustc_mir_build/src/build/mod.rs",
+    "compiler/rustc_ty_utils/src/instance.rs",
+    "compiler/rustc_hir_analysis/src/collect.rs"
+  ],
+  "final_method_top10": [
+    "compiler/rustc_mir_transform/src/lib.rs::inner_optimized_mir@634-676",
+    "compiler/rustc_ty_utils/src/layout.rs::coroutine_layout@811-1012",
+    "compiler/rustc_mir_transform/src/coroutine.rs::impl<'tcx> MirPass<'tcx> for StateTransform::run_pass@1626-1799",
+    "compiler/rustc_mir_transform/src/lib.rs::mir_drops_elaborated_and_const_checked@393-468",
+    "compiler/rustc_mir_transform/src/coroutine.rs::mir_coroutine_witnesses@1558-1589",
+    "compiler/rustc_ty_utils/src/layout.rs::layout_of@35-80",
+    "compiler/rustc_ty_utils/src/abi.rs::fn_sig_for_fn_abi@31-289",
+    "compiler/rustc_hir_analysis/src/collect.rs::coroutine_for_closure@1831-1852",
+    "compiler/rustc_mir_transform/src/lib.rs::run_optimization_passes@556-627",
+    "compiler/rustc_ty_utils/src/layout.rs::layout_of_uncached@105-685"
+  ],
+  "evidence": {
+    "bug_id": "129811",
+    "execution": {
+      "toolchain": "nightly-2024-08-29",
+      "return_code": 101,
+      "kind": "diagnostic_error",
+      "command": "rustup run nightly-2024-08-29 cargo build",
+      "rustflags": []
+    },
+    "log": {
+      "error_codes": [
+        "E0391"
+      ],
+      "diagnostic_messages": [
+        "cycle detected when optimizing MIR for `orchestrate_simple_crud::{closure#0}::{closure#0}::{closure#0}::{closure#1}`"
+      ],
+      "ice_message": "",
+      "panic_messages": [],
+      "panic_modes": [],
+      "query_stack": [],
+      "compiler_paths_mentioned": [],
+      "source_spans": [
+        {
+          "path": "src/main.rs",
+          "line": 10,
+          "column": 39
+        }
+      ],
+      "rustc_symbols": [],
+      "raw_tail": "=== START 2026-02-02 19:02:15 ===\nBug ID: 129811\nToolchain: nightly-2024-08-29\nSource: /data/zhangtianrong/projects/rustc-cbl/rustcbugs/129811\nRun dir: /data/zhangtianrong/projects/rustc-cbl/run/129811\nCMD: rustup run nightly-2024-08-29 cargo build\n------------------------------------------------------------\n   Compiling bug_129811 v0.1.0 (/data/zhangtianrong/projects/rustc-cbl/run/129811)\nerror[E0391]: cycle detected when optimizing MIR for `orchestrate_simple_crud::{closure#0}::{closure#0}::{closure#0}::{closure#1}`\n  --> src/main.rs:10:39\n   |\n10 |     orchestrate_memd_routing(async || async {}.await).await;\n   |                                       ^^^^^^^^^^^^^^\n   |\n   = note: ...which immediately requires optimizing MIR for `orchestrate_simple_crud::{closure#0}::{closure#0}::{closure#0}::{closure#1}` again\n   = note: cycle used when computing layout of `{async closure body@src/main.rs:10:39: 10:53}`\n   = note: see https://rustc-dev-guide.rust-lang.org/overview.html#queries and https://rustc-dev-guide.rust-lang.org/query.html for more information\n\nFor more information about this error, try `rustc --explain E0391`.\nerror: could not compile `bug_129811` (bin \"bug_129811\") due to 1 previous error\n------------------------------------------------------------\nReturn code: 101\n"
+    },
+    "query_trace": {
+      "availability": "unknown_only",
+      "queries": [],
+      "query_key_samples": [],
+      "query_key_terms": {
+        "def_paths": [],
+        "item_names": [],
+        "type_terms": []
+      },
+      "metadata": {
+        "status": "ok",
+        "event_count": 4408,
+        "named_event_count": 0,
+        "unknown_event_count": 4408,
+        "summary_available": true
+      }
+    }
+  },
+  "stage1": {
+    "candidate_universe_size": 72,
+    "selected_crates": [
+      {
+        "id": "rustc_mir_transform",
+        "reason": "The error is explicitly \"cycle detected when optimizing MIR\" and the issue is labeled A-mir-opt. The reproducer reaches MIR optimization on an async-closure-heavy body (`async || async {}.await`), and this crate owns MIR-to-MIR processing, optimization pipelines, and pass/query entry points for optimized MIR. That makes it the most direct surface-trigger crate for an optimization-time query cycle."
+      },
+      {
+        "id": "rustc_ty_utils",
+        "reason": "The diagnostic note says the cycle is \"used when computing layout of `{async closure body ...}`\". `rustc_ty_utils` owns core utility queries including type layout computation and callable ABI/instance utilities. Since the observed cycle involves layout computation for an async-closure body during MIR optimization, this crate is a strong candidate for the query interaction causing the cycle."
+      },
+      {
+        "id": "rustc_mir_build",
+        "reason": "The reproducer is centered on async closures and `.await`, which are lowered into compiler IR before optimization. `rustc_mir_build` constructs THIR/MIR from typed HIR and is an upstream source for the MIR later optimized. If the problematic self-reference is introduced during lowering of nested async closures/await structure, it would originate here before surfacing in MIR optimization."
+      },
+      {
+        "id": "rustc_hir_analysis",
+        "reason": "Async closures are a recently evolving feature area (issue label A-async-closures), and `rustc_hir_analysis` performs semantic analysis and collection of closure/coroutine metadata and type information consumed by MIR building and layout queries. If incorrect type/signature/coroutine metadata for the nested async closures leads to a cyclic layout/optimized-MIR dependency, this crate is a plausible upstream source."
+      }
+    ]
+  },
+  "stage2": {
+    "candidate_universe_size": 97,
+    "selection_mode": "global_module_selection_within_selected_crates",
+    "selected_modules": [
+      {
+        "id": "rustc_ty_utils::layout",
+        "reason": "Top match to the only explicit query note: the cycle is 'used when computing layout of {async closure body...}'. This module owns type layout computation/validation machinery, making it the most direct intermediate-layer module on the observed cycle path for the async-closure body type."
+      },
+      {
+        "id": "rustc_mir_transform::pass_manager",
+        "reason": "The error is explicitly 'cycle detected when optimizing MIR', so the MIR optimization entry/query orchestration is a prime surface-trigger area. Even without a query trace, the optimization pipeline manager is where optimized MIR is requested and passes are run, which is exactly where a self-dependency would surface."
+      },
+      {
+        "id": "rustc_mir_transform::coroutine",
+        "reason": "The reproducer uses async closures and `.await`, and this module specifically handles coroutine/coroutine-closure MIR transformations, including synthetic bodies for async/fn-once-style invocation. That is highly aligned with the failing item being a nested async-closure body whose layout and optimized MIR interact cyclically."
+      },
+      {
+        "id": "rustc_mir_build::thir",
+        "reason": "Async closures are lowered through THIR before MIR construction. Since the failing entity is a deeply nested closure/async body, incorrect THIR representation or capture structure for `async || async {}.await` could be the upstream source of the cyclic dependency later observed during MIR optimization/layout."
+      },
+      {
+        "id": "rustc_mir_build::build",
+        "reason": "This module builds MIR from THIR, so if the problematic self-referential structure is introduced during lowering of nested async-closure/await constructs, it would originate here before any MIR optimization query runs. It is a strong upstream source candidate."
+      },
+      {
+        "id": "rustc_ty_utils::abi",
+        "reason": "Layout and callable ABI/shape computation often interact for closure/coroutine bodies and call shims. Because the reproducer passes an async closure as `impl Fn() -> Fut`, ABI-related computation for the closure/callable form could participate in or trigger the same dependency cycle around layout and optimized MIR."
+      },
+      {
+        "id": "rustc_ty_utils::instance",
+        "reason": "The cycle concerns optimizing MIR for a specific nested closure instance. This module handles instance/callable resolution utilities, which are often involved when turning closures/coroutines/shims into concrete MIR/query targets. It is a plausible bridge between the async closure call and the optimized-MIR/layout cycle."
+      },
+      {
+        "id": "rustc_hir_analysis::collect",
+        "reason": "This crate is a plausible upstream source for closure/coroutine metadata. The collect phase computes generics, item metadata, and related query-fed information for compiler-generated items like closures and anonymous bodies; bad metadata for nested async closures could later poison MIR building or layout."
+      },
+      {
+        "id": "rustc_hir_analysis::check",
+        "reason": "Semantic checking for items after typing can influence closure/coroutine body metadata and obligations consumed downstream. Given the feature area is async closures and the regression is in nightly, this is a plausible upstream semantic source even though the failure surfaces later during MIR optimization."
+      },
+      {
+        "id": "rustc_hir_analysis::hir_ty_lowering",
+        "reason": "The reproducer hinges on lowering the async closure and its `Fn() -> Fut` typing into internal types. Since the note specifically mentions layout of an async-closure body type, incorrect type lowering for the nested async closure/future relationship could create the downstream cyclic dependency."
+      },
+      {
+        "id": "rustc_mir_transform::inline",
+        "reason": "This module explicitly contains MIR-level cycle logic for call relationships used by the inliner. While the diagnostic is about an optimize-MIR self-cycle rather than necessarily an inlining bug, nested closure calls and async bodies make call-graph/cycle handling here a credible surface-trigger module within MIR optimization."
+      },
+      {
+        "id": "rustc_hir_analysis::bounds",
+        "reason": "The async closure is constrained via `impl Fn() -> Fut` with `Fut: Future`, so bound computation/propagation is part of the upstream typing context for the generated closure and future types. If nightly changes in async-closure handling introduced a bad obligation/cycle precursor, bounds is a reasonable upstream module to keep in scope."
+      }
+    ]
+  },
+  "stage3": {
+    "candidate_universe_size": 154,
+    "candidate_root_files": [
+      "compiler/rustc_mir_transform/src/abort_unwinding_calls.rs",
+      "compiler/rustc_mir_transform/src/add_call_guards.rs",
+      "compiler/rustc_mir_transform/src/add_moves_for_packed_drops.rs",
+      "compiler/rustc_mir_transform/src/add_retag.rs",
+      "compiler/rustc_mir_transform/src/add_subtyping_projections.rs",
+      "compiler/rustc_mir_transform/src/check_alignment.rs",
+      "compiler/rustc_mir_transform/src/check_const_item_mutation.rs",
+      "compiler/rustc_mir_transform/src/check_packed_ref.rs",
+      "compiler/rustc_mir_transform/src/cleanup_post_borrowck.rs",
+      "compiler/rustc_mir_transform/src/copy_prop.rs",
+      "compiler/rustc_mir_transform/src/coroutine.rs",
+      "compiler/rustc_mir_transform/src/cost_checker.rs",
+      "compiler/rustc_mir_transform/src/cross_crate_inline.rs",
+      "compiler/rustc_mir_transform/src/ctfe_limit.rs",
+      "compiler/rustc_mir_transform/src/dataflow_const_prop.rs",
+      "compiler/rustc_mir_transform/src/dead_store_elimination.rs",
+      "compiler/rustc_mir_transform/src/deduce_param_attrs.rs",
+      "compiler/rustc_mir_transform/src/deduplicate_blocks.rs",
+      "compiler/rustc_mir_transform/src/deref_separator.rs",
+      "compiler/rustc_mir_transform/src/dest_prop.rs",
+      "compiler/rustc_mir_transform/src/dump_mir.rs",
+      "compiler/rustc_mir_transform/src/early_otherwise_branch.rs",
+      "compiler/rustc_mir_transform/src/elaborate_box_derefs.rs",
+      "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+      "compiler/rustc_mir_transform/src/errors.rs",
+      "compiler/rustc_mir_transform/src/ffi_unwind_calls.rs",
+      "compiler/rustc_mir_transform/src/function_item_references.rs",
+      "compiler/rustc_mir_transform/src/gvn.rs",
+      "compiler/rustc_mir_transform/src/inline.rs",
+      "compiler/rustc_mir_transform/src/instsimplify.rs",
+      "compiler/rustc_mir_transform/src/jump_threading.rs",
+      "compiler/rustc_mir_transform/src/known_panics_lint.rs",
+      "compiler/rustc_mir_transform/src/large_enums.rs",
+      "compiler/rustc_mir_transform/src/lib.rs",
+      "compiler/rustc_mir_transform/src/lint.rs",
+      "compiler/rustc_mir_transform/src/lower_intrinsics.rs",
+      "compiler/rustc_mir_transform/src/lower_slice_len.rs",
+      "compiler/rustc_mir_transform/src/match_branches.rs",
+      "compiler/rustc_mir_transform/src/mentioned_items.rs",
+      "compiler/rustc_mir_transform/src/multiple_return_terminators.rs",
+      "compiler/rustc_mir_transform/src/nrvo.rs",
+      "compiler/rustc_mir_transform/src/pass_manager.rs",
+      "compiler/rustc_mir_transform/src/prettify.rs",
+      "compiler/rustc_mir_transform/src/promote_consts.rs",
+      "compiler/rustc_mir_transform/src/ref_prop.rs",
+      "compiler/rustc_mir_transform/src/remove_noop_landing_pads.rs",
+      "compiler/rustc_mir_transform/src/remove_place_mention.rs",
+      "compiler/rustc_mir_transform/src/remove_storage_markers.rs",
+      "compiler/rustc_mir_transform/src/remove_uninit_drops.rs",
+      "compiler/rustc_mir_transform/src/remove_unneeded_drops.rs",
+      "compiler/rustc_mir_transform/src/remove_zsts.rs",
+      "compiler/rustc_mir_transform/src/required_consts.rs",
+      "compiler/rustc_mir_transform/src/reveal_all.rs",
+      "compiler/rustc_mir_transform/src/shim.rs",
+      "compiler/rustc_mir_transform/src/simplify.rs",
+      "compiler/rustc_mir_transform/src/simplify_branches.rs",
+      "compiler/rustc_mir_transform/src/simplify_comparison_integral.rs",
+      "compiler/rustc_mir_transform/src/single_use_consts.rs",
+      "compiler/rustc_mir_transform/src/sroa.rs",
+      "compiler/rustc_mir_transform/src/ssa.rs",
+      "compiler/rustc_mir_transform/src/unreachable_enum_branching.rs",
+      "compiler/rustc_mir_transform/src/unreachable_prop.rs",
+      "compiler/rustc_mir_transform/src/validate.rs",
+      "compiler/rustc_ty_utils/src/abi.rs",
+      "compiler/rustc_ty_utils/src/assoc.rs",
+      "compiler/rustc_ty_utils/src/common_traits.rs",
+      "compiler/rustc_ty_utils/src/consts.rs",
+      "compiler/rustc_ty_utils/src/errors.rs",
+      "compiler/rustc_ty_utils/src/implied_bounds.rs",
+      "compiler/rustc_ty_utils/src/instance.rs",
+      "compiler/rustc_ty_utils/src/layout.rs",
+      "compiler/rustc_ty_utils/src/layout_sanity_check.rs",
+      "compiler/rustc_ty_utils/src/lib.rs",
+      "compiler/rustc_ty_utils/src/needs_drop.rs",
+      "compiler/rustc_ty_utils/src/opaque_types.rs",
+      "compiler/rustc_ty_utils/src/representability.rs",
+      "compiler/rustc_ty_utils/src/sig_types.rs",
+      "compiler/rustc_ty_utils/src/structural_match.rs",
+      "compiler/rustc_ty_utils/src/ty.rs",
+      "compiler/rustc_mir_build/src/check_unsafety.rs",
+      "compiler/rustc_mir_build/src/errors.rs",
+      "compiler/rustc_mir_build/src/lib.rs",
+      "compiler/rustc_mir_build/src/lints.rs",
+      "compiler/rustc_hir_analysis/src/autoderef.rs",
+      "compiler/rustc_hir_analysis/src/bounds.rs",
+      "compiler/rustc_hir_analysis/src/check_unused.rs",
+      "compiler/rustc_hir_analysis/src/collect.rs",
+      "compiler/rustc_hir_analysis/src/constrained_generic_params.rs",
+      "compiler/rustc_hir_analysis/src/delegation.rs",
+      "compiler/rustc_hir_analysis/src/errors.rs",
+      "compiler/rustc_hir_analysis/src/hir_wf_check.rs",
+      "compiler/rustc_hir_analysis/src/impl_wf_check.rs",
+      "compiler/rustc_hir_analysis/src/lib.rs"
+    ],
+    "doc_screening_mode": "per_group_doc_screening",
+    "doc_screened_groups": [
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::layout",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::pass_manager",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/pass_manager.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::coroutine",
+        "candidate_count": 2,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_build::thir",
+        "candidate_count": 10,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+            "reason": "The reproducer is entirely expression-driven (`async || async {}.await`) and the failure centers on a deeply nested async-closure body. Within `rustc_mir_build::thir`, this file is the most directly responsible for lowering HIR expressions into THIR, including closure capture lowering and the expression forms later consumed by MIR construction. That makes it the strongest upstream source for introducing a self-referential structure in nested async-closure/await lowering that later surfaces as an optimized-MIR/layout cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/thir/cx/mod.rs",
+            "reason": "This file is the THIR body-construction entry point (`thir_body`) that coordinates typed HIR-to-THIR lowering for an entire body. The diagnostic names a specific async closure body, and this file owns initialization of body typing/scope context and construction of the root THIR for such bodies. If the bug is not in a single expression-lowering case but in how async closure bodies are set up or connected as a whole, this is the most likely driver file in the module."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/thir/cx/block.rs",
+            "reason": "The flagged async closure body spans a block-like body containing an awaited inner async expression. This file lowers HIR blocks and statements into THIR with region scopes and statement forms, so it is a plausible upstream contributor if the problematic cycle depends on block/body scoping or statement/body structure inside the nested async closure rather than just a single expression node."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/thir/util.rs",
+            "reason": "Although less direct than the THIR context/lowering files, this utility handles recovery of user-annotated types from typeck results, i.e. a shared THIR-side bridge from typing into lowered THIR. Because the observed cycle is ultimately used during layout of an async-closure body type, a type-recovery/normalization mistake here is more plausible than the remaining candidates, which are largely about constants, patterns, or debugging output and are not implicated by the reproducer."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_build::build",
+        "candidate_count": 24,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/into.rs",
+            "reason": "The reproducer is almost entirely expression-shaped: an async closure passed as `impl Fn() -> Fut`, whose body is `async {}.await`. This file is the destination-based expression lowering engine that coordinates lowering of control-flow and yield-related expressions into MIR places/CFG. For a nested async-closure-plus-`.await` construct, this is the most likely file in `build` to introduce a self-referential MIR shape or evaluation structure that later surfaces as an optimize-MIR/layout cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/mod.rs",
+            "reason": "This is the top-level MIR-construction entry for the module and wires together the whole THIR-to-MIR lowering pipeline. Given the bug is a cycle on a specific nested async closure body and this module owns `mir_build` orchestration and builder state, it is a strong candidate for root-cause logic at the boundary where async closure bodies are turned into MIR and handed downstream to optimization/layout queries."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/expr/as_rvalue.rs",
+            "reason": "The failing construct contains value-producing async expression forms, including closure creation and `.await`-driven evaluation, which are lowered into MIR rvalues and related temporaries. This file specifically handles value-producing THIR expressions and aggregate/capture-style lowering, making it a plausible place where the async closure body or its nested future expression is represented in a way that later creates the observed optimized-MIR/layout self-cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/scope.rs",
+            "reason": "Async closures and `.await` interact heavily with scope cleanup, drops, and coroutine-related control flow. This file owns lexical scopes, scheduled drops, cleanup routing, and explicitly constructs coroutine-drop trees attached to the final MIR CFG. If the nightly regression comes from how nested async closure bodies and awaited temporaries are scoped or dropped, `scope.rs` is a credible upstream source for MIR that later triggers the optimization-time cycle."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::abi",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/abi.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_ty_utils::instance",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/instance.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_hir_analysis::collect",
+        "candidate_count": 8,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_hir_analysis/src/collect.rs",
+            "reason": "This is the strongest file in `rustc_hir_analysis::collect` because its documented responsibility is the top-level driver for collecting item type/predicate metadata, explicitly including coroutine metadata and related item-level type information lowered into `ty` for later phases. The bug is triggered by nested async closures and the diagnostic says the cycle is used when computing layout of an `{async closure body ...}` during MIR optimization, so incorrect collected metadata for compiler-generated async-closure/coroutine items is a plausible upstream cause."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+            "reason": "`type_of.rs` directly computes `type_of` results for collected HIR owners. Since the observed cycle mentions layout of an async-closure body type, a bad `type_of` for a nested async closure, anonymous body, or const/context-derived item would be a direct way to poison later layout and MIR queries. Among the collect subfiles, this is the most directly tied to the type information named in the diagnostic."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/collect/generics_of.rs",
+            "reason": "The reproducer depends on `impl Fn() -> Fut` plus `Fut: Future` around an async closure, so generic parentage and synthesized parameters for closures are highly relevant. This file specifically builds `ty::Generics` and mentions closures among the special forms it handles. If nightly changes caused nested async closures to inherit or synthesize generics incorrectly, that could create a downstream self-dependency visible only later in layout/optimized-MIR queries."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+            "reason": "This file collects generic predicates and inherited bounds, which is relevant because the reproducer’s async closure is constrained through `Fn() -> Fut` and `Fut: Future`. If the generated async-closure body or its child items inherit predicates incorrectly, later type/layout computation could become cyclic. It is somewhat less direct than `collect.rs`, `type_of.rs`, and `generics_of.rs`, but still a credible upstream metadata source within this module."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_hir_analysis::check",
+        "candidate_count": 11,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_hir_analysis/src/check/mod.rs",
+            "reason": "Top file in this module group because its documented role is to coordinate the `check` phase’s public queries and specifically wire providers for coroutine checks and shared checking infrastructure. The reproducer is centered on async closures/coroutine-like bodies, and the failure note mentions layout of an `{async closure body ...}`. Within `rustc_hir_analysis::check`, the coordinator file is the most plausible place for query/provider setup or coroutine-related checking interactions that could feed a later optimized-MIR/layout cycle."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/check/check.rs",
+            "reason": "Strong candidate because its responsibility explicitly includes semantic validation for checked HIR items involving ABI, representation, layout, coroutine, and opaque-type related rules. The only concrete internal clue in the diagnostic is that the cycle is used when computing layout of an async-closure body, so a file that directly enforces layout/coroutine-related semantic checks is the best match among the concrete checking implementation files."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+            "reason": "Well-formedness checking is a plausible upstream source for bad obligations involving the reproducer’s `impl Fn() -> Fut` and `Fut: Future` relationship around nested async closures. Its doc emphasizes generating/solving WF obligations, normalizing item types and predicates, and reporting fulfillment/region errors, which aligns with the kind of type/obligation metadata that could later participate in a layout or optimized-MIR query cycle for async closure bodies."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/check/region.rs",
+            "reason": "Less direct than the files above, but still relevant because async/await lowering creates body-local scopes and suspension-sensitive lifetime structure, and this file builds the per-body `ScopeTree` for later region analysis. Since the failure is on a deeply nested async-closure body and `check` was selected as a plausible upstream semantic source, region/body-scope construction is a credible file to keep for method-level screening even though the observed cycle surfaces later in MIR optimization."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_hir_analysis::hir_ty_lowering",
+        "candidate_count": 7,
+        "selection_count": 4,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_hir_analysis/src/hir_ty_lowering/mod.rs",
+            "reason": "Top file in this module because it owns the central `HirTyLowerer` machinery for converting HIR types, trait refs, lifetimes, consts, and function signatures into `ty` forms. The reproducer is entirely about typing an async closure passed as `impl Fn() -> Fut` and the diagnostic notes a cycle when computing layout of an `{async closure body ...}` type. That makes the shared lowering entry points for closure/fn-signature/type forms the most plausible upstream source within `hir_ty_lowering` for creating an incorrect internal type relationship later consumed by layout and MIR optimization."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/hir_ty_lowering/generics.rs",
+            "reason": "The reproducer explicitly involves generic argument and parameter matching across `impl Fn() -> Fut` with `Fut: Future`. This file is responsible for lowering and checking generic argument lists, including kinds/counts and late-bound lifetime handling. If the nightly regression came from mis-lowering the generic callable/future relationship for async closures, this file is a strong candidate because it sits on the path that turns the HIR-level generic function/closure typing into the internal representation used downstream."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/hir_ty_lowering/bounds.rs",
+            "reason": "This file lowers generic bounds and where-clause predicates into internal predicates. The reproducer depends on the bound structure `Fut: Future` and on inferring the async closure's produced future/body type correctly. A bad predicate or implied bound introduced here could poison later type/layout computation for the async closure body, making this a plausible upstream source, though slightly less direct than the core lowering interface and generic-argument lowering."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/hir_ty_lowering/errors.rs",
+            "reason": "Although primarily diagnostic-focused, this file is the next most relevant remaining candidate because async-closure support and `Fn`-trait syntax are explicitly mentioned in its responsibility. The reproducer uses exactly that callable syntax shape, so if the regression is tied to a type-lowering special case around `Fn`-trait forms for async closures, the associated lowering-time validation/diagnostic paths could be involved. It is still less likely than the true lowering files because the observed failure is a MIR/layout query cycle rather than a direct type-lowering error."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_mir_transform::inline",
+        "candidate_count": 2,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/inline.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/inline/cycle.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "module",
+        "id": "rustc_hir_analysis::bounds",
+        "candidate_count": 1,
+        "selection_count": 1,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_hir_analysis/src/bounds.rs",
+            "reason": "All files in this Stage3 group fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "root",
+        "id": "rustc_mir_transform",
+        "candidate_count": 63,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "reason": "The reproducer is entirely centered on async closures and `.await`, and the diagnostic’s cycle target is an `{async closure body ...}` whose MIR optimization recurs into layout computation. Among the root files in this crate, `coroutine.rs` is the one whose documented responsibility most directly matches compiler-generated async/coroutine body transformation: it lowers coroutine MIR into the coroutine state machine, computes coroutine layout, and handles suspension semantics. That makes it the strongest upstream/intermediate file candidate for a self-referential interaction between optimized MIR of a nested async closure body and layout of that same generated async body."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/lib.rs",
+            "reason": "The error is explicitly \"cycle detected when optimizing MIR\", so the most direct surface-trigger within `rustc_mir_transform` after the coroutine-specific logic is the crate root orchestration that defines optimized-MIR query entry points and assembles the optimization pipeline. The file doc says `lib.rs` wires provider queries and drives creation of optimized MIR and pass sequencing for normal bodies and shims. Even without a query trace, this is the file most likely to contain the optimized-MIR query/provider path where the recursive dependency is exposed for the async-closure body."
+          }
+        ]
+      },
+      {
+        "type": "root",
+        "id": "rustc_ty_utils",
+        "candidate_count": 16,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs",
+            "reason": "This is the strongest file match because the only concrete query note in the diagnostic is that the MIR optimization cycle is 'used when computing layout of `{async closure body ...}`'. The reproducer is a nested async-closure/await case, and this file is documented as computing and validating Rust type layout information. That makes it the most direct intermediate-layer file on the observed failure path: optimized MIR for an async-closure body is being requested in the course of layout computation, and layout.rs owns exactly that query family."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/abi.rs",
+            "reason": "This is the best secondary file because the reproducer passes an async closure through `impl Fn() -> Fut`, so callable-shape computation is highly relevant. The file doc says it computes `FnAbi` for functions, closures, coroutine-closures, and shims, deriving normalized call signatures and classifying argument/return passing modes from type layout. Since ABI computation can depend on layout and is specifically closure/coroutine-aware, it is a plausible bridge between the async closure's callable form and the layout-triggered MIR optimization cycle."
+          }
+        ]
+      },
+      {
+        "type": "root",
+        "id": "rustc_mir_build",
+        "candidate_count": 4,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_mir_build/src/lib.rs",
+            "reason": "Among the root files, this is the only one whose documented responsibility directly touches crate-level query provider registration and hooks for THIR construction and MIR building. The observed failure is a query cycle ('cycle detected when optimizing MIR' and 'cycle used when computing layout' of an async-closure body), and for rustc_mir_build the most plausible root-file involvement is at the boundary where this crate exposes/providers MIR-building and THIR-related queries consumed downstream by MIR optimization and layout. Given the reproducer is centered on nested async closures and `.await`, this file is the strongest surface/integration point in this root-file group."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/errors.rs",
+            "reason": "If the bug is not in provider wiring, this is the next most relevant root file because it owns the crate’s structured diagnostics used by MIR-building and THIR-based checks. The current failure surfaces as a compiler diagnostic rather than a panic, so this file could plausibly participate in how this crate reports problems around generated async-closure bodies. It is still less likely than lib.rs because the issue is a semantic query cycle during MIR optimization/layout, not primarily an unsafety check or MIR lint."
+          }
+        ]
+      },
+      {
+        "type": "root",
+        "id": "rustc_hir_analysis",
+        "candidate_count": 10,
+        "selection_count": 2,
+        "selected_files": [
+          {
+            "id": "compiler/rustc_hir_analysis/src/collect.rs",
+            "reason": "The issue centers on nested async closures and the note says the cycle is used when computing layout of an async-closure body. Among this root-file group, `collect.rs` is the strongest upstream-source match because its documented responsibility is to drive HIR item collection and lower signatures, generics, bounds, opaque types, and specifically coroutine metadata into `rustc_middle::ty` for later phases. Since async closures are represented through compiler-generated closure/coroutine items whose metadata is then consumed by MIR building and layout computation, incorrect collection/lowering here is the most plausible `rustc_hir_analysis` file to seed the downstream optimized-MIR/layout cycle."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/lib.rs",
+            "reason": "If the bug in this crate is not inside the detailed item collector itself, the next best root-file candidate is the crate root that wires together HIR-analysis queries and the crate-wide type-checking/lowering pipeline. The reproducer is minimal and no query trace is available, so a query-registration/orchestration mistake is still plausible. `lib.rs` has the documented role of orchestrating collection, body checking, well-formedness, delegation, and related lowering helpers, making it the best remaining surface within this root group for a bad query hookup involving async-closure metadata later used by MIR optimization and layout."
+          }
+        ]
+      }
+    ],
+    "doc_screened_merged_count": 33,
+    "doc_screened_files": [
+      {
+        "id": "compiler/rustc_mir_transform/src/lib.rs",
+        "reason": "Best surface-trigger file match. The diagnostic is explicitly 'cycle detected when optimizing MIR', and this crate root is documented as wiring the query providers and driving creation of optimized MIR plus optimization pass sequencing. A self-cycle in the optimize-MIR query for a nested async-closure body is most directly expected at this query-entry/orchestration layer."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs",
+        "reason": "Best intermediate-layer match to the only concrete note in the error: the cycle is 'used when computing layout' of an async-closure body. This file owns type layout computation and validation, so if optimized-MIR computation for the async closure re-enters through layout of its generated future/body type, this is the most direct representation-layer file involved."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "reason": "Very strong async-closure-specific candidate. The reproducer is `async || async {}.await`, and this file specifically builds synthetic by-move MIR bodies for coroutine-closures invoked via `FnOnce`/`AsyncFnOnce`, creating companion synthetic coroutine bodies that are optimized alongside the original body. A new nightly regression causing a same-body optimization cycle for nested async closures fits this responsibility closely."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "reason": "Strong transformation-layer candidate because the failing item is an async-closure body and this file implements the main coroutine state-machine transformation, including explicit coroutine layout and suspension-point handling. Since `.await` inside an async closure is central to the reproducer, a bad coroutine-body transform or coroutine layout dependency here could induce the optimize-MIR/layout cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/pass_manager.rs",
+        "reason": "Strong surface-trigger infrastructure candidate. Even if not the root semantic bug, this file executes ordered MIR pass sequences over a body and sits where optimization work is run. Because the error surfaces while optimizing MIR for one specific nested closure body, pass scheduling/validation/orchestration here is a plausible place where re-entrant optimized-MIR requests become visible."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/abi.rs",
+        "reason": "Plausible bridge file between callable async-closure bodies and layout. The reproducer passes an async closure to `impl Fn() -> Fut`, and this file computes `FnAbi` for closures and coroutine-closures using type layout. If ABI computation for the closure/coroutine callable form requests layout that in turn depends on optimized MIR of the same generated body, this file could participate in the cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "reason": "Most relevant MIR-build upstream file for the reproducer shape. It lowers HIR expressions into THIR, including closure capture lowering and expression forms needed by MIR construction. Since the bug is triggered by a nested `async || async {}.await` expression, an incorrect THIR representation of async closures/await could seed the later cyclic MIR/layout dependency."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/mod.rs",
+        "reason": "Strong upstream construction candidate because it is the main MIR builder entry point that turns THIR into MIR. If the nested async-closure body is built with a self-referential structure or incorrect coroutine-related lowering before optimization, this file is a central place where that malformed MIR would originate."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/instance.rs",
+        "reason": "Plausible instance-resolution bridge for the specific nested closure instance named in the diagnostic. This file resolves callable instances, including closures and coroutine-closures, and such resolution can mediate which synthetic/shim body optimized MIR is requested for. That makes it a credible participant in a query cycle around a generated async-closure body."
+      },
+      {
+        "id": "compiler/rustc_hir_analysis/src/collect.rs",
+        "reason": "Best upstream HIR-analysis candidate. Its docs explicitly mention lowering coroutine metadata and related item-level type information into `ty` for later phases. Because the issue is in async closures on nightly and surfaces on a generated nested closure body, incorrect collected metadata for closures/coroutines could poison later MIR building or layout and ultimately manifest as the optimize-MIR cycle."
+      }
+    ],
+    "file_eval_top_k": 10,
+    "method_input_files": [
+      "compiler/rustc_mir_transform/src/lib.rs",
+      "compiler/rustc_ty_utils/src/layout.rs",
+      "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+      "compiler/rustc_mir_transform/src/coroutine.rs",
+      "compiler/rustc_mir_transform/src/pass_manager.rs",
+      "compiler/rustc_ty_utils/src/abi.rs",
+      "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+      "compiler/rustc_mir_build/src/build/mod.rs",
+      "compiler/rustc_ty_utils/src/instance.rs",
+      "compiler/rustc_hir_analysis/src/collect.rs"
+    ]
+  },
+  "stage4": {
+    "candidate_universe_size": 224,
+    "method_input_files": [
+      "compiler/rustc_mir_transform/src/lib.rs",
+      "compiler/rustc_ty_utils/src/layout.rs",
+      "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+      "compiler/rustc_mir_transform/src/coroutine.rs",
+      "compiler/rustc_mir_transform/src/pass_manager.rs",
+      "compiler/rustc_ty_utils/src/abi.rs",
+      "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+      "compiler/rustc_mir_build/src/build/mod.rs",
+      "compiler/rustc_ty_utils/src/instance.rs",
+      "compiler/rustc_hir_analysis/src/collect.rs"
+    ],
+    "method_groups": [
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_transform/src/lib.rs",
+        "group_index": 1,
+        "candidate_count": 19,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_transform/src/lib.rs::inner_optimized_mir@634-676",
+            "file": "compiler/rustc_mir_transform/src/lib.rs",
+            "item_type": "function",
+            "item_name": "inner_optimized_mir",
+            "qualified_name": "inner_optimized_mir",
+            "signature": "fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {",
+            "parent_signature": "",
+            "start_line": 634,
+            "end_line": 676,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 2027,
+              "selected_line_ranges": [
+                "634-676"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Top surface-trigger candidate. The diagnostic is explicitly \"cycle detected when optimizing MIR\", and this is the direct provider implementation for the `optimized_mir` query. It steals the post-analysis body, performs `mentioned_items`, checks trivial-unreachable cases, and then invokes `run_optimization_passes`. Any self-dependency or re-entrant query involving the nested async-closure body would most directly manifest here."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/lib.rs::optimized_mir@630-632",
+            "file": "compiler/rustc_mir_transform/src/lib.rs",
+            "item_type": "function",
+            "item_name": "optimized_mir",
+            "qualified_name": "optimized_mir",
+            "signature": "fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {",
+            "parent_signature": "",
+            "start_line": 630,
+            "end_line": 632,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 118,
+              "selected_line_ranges": [
+                "630-632"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Thin but highly relevant query entrypoint for the exact failing query named by the diagnostic. Even though it only allocates the result of `inner_optimized_mir`, it is the registered `optimized_mir` provider and therefore the immediate surface method associated with the observed cycle on a specific async-closure body."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/lib.rs::run_optimization_passes@556-627",
+            "file": "compiler/rustc_mir_transform/src/lib.rs",
+            "item_type": "function",
+            "item_name": "run_optimization_passes",
+            "qualified_name": "run_optimization_passes",
+            "signature": "fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {",
+            "parent_signature": "",
+            "start_line": 556,
+            "end_line": 627,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3835,
+              "selected_line_ranges": [
+                "556-627"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Strong orchestration candidate within the optimize-MIR phase. The issue is labeled A-mir-opt, and the reproducer fails only when optimizing MIR for a nested async closure (`async || async {}.await`). This method runs the full optimization pipeline, including `inline::Inline` and many MIR transforms that could request layouts or other queries for the same generated closure/coroutine body and trigger a cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/lib.rs::mir_drops_elaborated_and_const_checked@393-468",
+            "file": "compiler/rustc_mir_transform/src/lib.rs",
+            "item_type": "function",
+            "item_name": "mir_drops_elaborated_and_const_checked",
+            "qualified_name": "mir_drops_elaborated_and_const_checked",
+            "signature": "fn mir_drops_elaborated_and_const_checked(tcx: TyCtxt<'_>, def: LocalDefId) -> &Steal<Body<'_>> {",
+            "parent_signature": "",
+            "start_line": 393,
+            "end_line": 468,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3269,
+              "selected_line_ranges": [
+                "393-468"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Important upstream dependency of `optimized_mir`. `inner_optimized_mir` steals this query result before optimization, and this method already forces related queries such as `mir_coroutine_witnesses`, `mir_borrowck`, and optionally `mir_inliner_callees`. Because the bug involves async closures/coroutine-like bodies and a later layout dependency, this method is a plausible upstream source of the state or query interaction that feeds the optimize-MIR cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/lib.rs::run_runtime_lowering_passes@515-537",
+            "file": "compiler/rustc_mir_transform/src/lib.rs",
+            "item_type": "function",
+            "item_name": "run_runtime_lowering_passes",
+            "qualified_name": "run_runtime_lowering_passes",
+            "signature": "fn run_runtime_lowering_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {",
+            "parent_signature": "",
+            "start_line": 515,
+            "end_line": 537,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1368,
+              "selected_line_ranges": [
+                "515-537"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Relevant upstream transformation stage for the async-closure reproducer. Before optimization, this method runs `coroutine::StateTransform` alongside other lowering passes. Since the failure concerns a nested async-closure body with `.await`, the runtime lowering that converts coroutine-like MIR into the form later optimized is a strong place where problematic structure could be introduced before the cycle appears in `optimized_mir`."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_ty_utils/src/layout.rs",
+        "group_index": 2,
+        "candidate_count": 10,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs::coroutine_layout@811-1012",
+            "file": "compiler/rustc_ty_utils/src/layout.rs",
+            "item_type": "function",
+            "item_name": "coroutine_layout",
+            "qualified_name": "coroutine_layout",
+            "signature": "fn coroutine_layout<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, def_id: hir::def_id::DefId, args: GenericArgsRef<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 811,
+            "end_line": 1012,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 8748,
+              "selected_line_ranges": [
+                "811-1012"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Best match in this file to the note that the cycle is used when computing layout of an async-closure body. Async closures lower to coroutine/future-like bodies, and this method specifically computes coroutine layout via `tcx.coroutine_layout(def_id, ...)`, then recursively computes layouts for saved locals and prefix/upvar fields with `cx.layout_of(...)`/`cx.spanned_layout_of(...)`. Because the bug is a nightly regression on nested `async || async {}.await` and the failing item is an async closure body during MIR optimization, this coroutine-specific layout construction is the most plausible place where layout computation re-enters a query path involving the same body."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs::layout_of_uncached@105-685",
+            "file": "compiler/rustc_ty_utils/src/layout.rs",
+            "item_type": "function",
+            "item_name": "layout_of_uncached",
+            "qualified_name": "layout_of_uncached",
+            "signature": "fn layout_of_uncached<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 105,
+            "end_line": 685,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 24029,
+              "selected_line_ranges": [
+                "105-685"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the core uncached layout engine for all types in the file and is the direct intermediate layer beneath the `layout_of` query. Even without a query trace, the diagnostic explicitly points to layout computation, and this function contains the major type-kind dispatch that can route async-closure-body types into specialized handling such as coroutine layout. If the cycle is not in the wrapper but in how a particular type kind is expanded or recursively queried, this is the central method."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs::layout_of@35-80",
+            "file": "compiler/rustc_ty_utils/src/layout.rs",
+            "item_type": "function",
+            "item_name": "layout_of",
+            "qualified_name": "layout_of",
+            "signature": "fn layout_of<'tcx>( tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>, ) -> Result<TyAndLayout<'tcx>, &'tcx LayoutError<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 35,
+            "end_line": 80,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1676,
+              "selected_line_ranges": [
+                "35-80"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the actual provider-backed query entry for `layout_of`, registered by `provide`, so it is the most direct surface-trigger in this file for the observed diagnostic note. It normalizes the type, may recurse by reissuing `tcx.layout_of(...)` for the normalized type, and then calls `layout_of_uncached`. Since the cycle is reported as being used when computing layout of the async closure body, the query wrapper itself is highly relevant as the entry/re-entry point."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs::coroutine_saved_local_eligibility@715-808",
+            "file": "compiler/rustc_ty_utils/src/layout.rs",
+            "item_type": "function",
+            "item_name": "coroutine_saved_local_eligibility",
+            "qualified_name": "coroutine_saved_local_eligibility",
+            "signature": "fn coroutine_saved_local_eligibility( info: &CoroutineLayout<'_>, ) -> (BitSet<CoroutineSavedLocal>, IndexVec<CoroutineSavedLocal, SavedLocalEligibility>) {",
+            "parent_signature": "",
+            "start_line": 715,
+            "end_line": 808,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3992,
+              "selected_line_ranges": [
+                "715-808"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This helper is tightly coupled to coroutine layout and determines how saved locals are assigned to variants or promoted into the prefix. For async closures with `.await`, saved locals and suspension-point state are exactly the structures whose layout must be computed. It is less likely than `coroutine_layout` itself because it does not issue queries directly, but it influences the shape of the coroutine layout that may trigger the problematic recursion."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/layout.rs::record_layout_for_printing@1014-1062",
+            "file": "compiler/rustc_ty_utils/src/layout.rs",
+            "item_type": "function",
+            "item_name": "record_layout_for_printing",
+            "qualified_name": "record_layout_for_printing",
+            "signature": "fn record_layout_for_printing<'tcx>(cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, layout: TyAndLayout<'tcx>) {",
+            "parent_signature": "",
+            "start_line": 1014,
+            "end_line": 1062,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1956,
+              "selected_line_ranges": [
+                "1014-1062"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Lower-probability but still relevant because it has explicit coroutine/closure branches and can call `variant_info_for_coroutine` when type-size recording is enabled. That said, the reproducer used no `-Zprint-type-sizes`, so this is unlikely to be active in the failing run. It is included as a distant candidate only because it is one of the few methods in the file with coroutine-specific handling of layouts."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "group_index": 3,
+        "candidate_count": 4,
+        "selection_count": 4,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::coroutine_by_move_body_def_id@85-233",
+            "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+            "item_type": "function",
+            "item_name": "coroutine_by_move_body_def_id",
+            "qualified_name": "coroutine_by_move_body_def_id",
+            "signature": "pub fn coroutine_by_move_body_def_id<'tcx>( tcx: TyCtxt<'tcx>, coroutine_def_id: LocalDefId, ) -> DefId {",
+            "parent_signature": "",
+            "start_line": 85,
+            "end_line": 233,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 6653,
+              "selected_line_ranges": [
+                "85-233"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::tcx@241-244",
+            "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+            "item_type": "method",
+            "item_name": "tcx",
+            "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::tcx",
+            "signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx> { fn tcx(&self) -> TyCtxt<'tcx> {",
+            "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+            "start_line": 241,
+            "end_line": 244,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 113,
+              "selected_line_ranges": [
+                "241-244"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_place@246-307",
+            "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+            "item_type": "method",
+            "item_name": "visit_place",
+            "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_place",
+            "signature": "fn visit_place( &mut self, place: &mut mir::Place<'tcx>, context: mir::visit::PlaceContext, location: mir::Location, ) {",
+            "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+            "start_line": 246,
+            "end_line": 307,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3241,
+              "selected_line_ranges": [
+                "246-307"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_local_decl@309-314",
+            "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+            "item_type": "method",
+            "item_name": "visit_local_decl",
+            "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_local_decl",
+            "signature": "fn visit_local_decl(&mut self, local: mir::Local, local_decl: &mut mir::LocalDecl<'tcx>) {",
+            "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+            "start_line": 309,
+            "end_line": 314,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 257,
+              "selected_line_ranges": [
+                "309-314"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "group_index": 4,
+        "candidate_count": 58,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs::impl<'tcx> MirPass<'tcx> for StateTransform::run_pass@1626-1799",
+            "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "item_type": "method",
+            "item_name": "run_pass",
+            "qualified_name": "impl<'tcx> MirPass<'tcx> for StateTransform::run_pass",
+            "signature": "impl<'tcx> MirPass<'tcx> for StateTransform { fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {",
+            "parent_signature": "impl<'tcx> MirPass<'tcx> for StateTransform",
+            "start_line": 1626,
+            "end_line": 1799,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 8005,
+              "selected_line_ranges": [
+                "1626-1799"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Top candidate because the failure is explicitly during optimized MIR for a nested async-closure body, and this is the main coroutine MIR transform entrypoint for async/await bodies. The reproducer is `async || async {}.await`, exactly the kind of body this pass rewrites. It orchestrates multiple steps that can affect query dependencies: replacing resume/return locals, computing coroutine layout, storing that layout into `body.coroutine`, creating the coroutine drop shim, and creating the resume/poll function. Since the diagnostic note says the cycle is used when computing layout of the async-closure body, this pass is the strongest place where MIR optimization, coroutine layout, and synthetic coroutine bodies interact."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs::create_coroutine_drop_shim@1220-1278",
+            "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "item_type": "function",
+            "item_name": "create_coroutine_drop_shim",
+            "qualified_name": "create_coroutine_drop_shim",
+            "signature": "fn create_coroutine_drop_shim<'tcx>( tcx: TyCtxt<'tcx>, transform: &TransformVisitor<'tcx>, coroutine_ty: Ty<'tcx>, body: &Body<'tcx>, drop_clean: BasicBlock, ) -> Body<'tcx> {",
+            "parent_signature": "",
+            "start_line": 1220,
+            "end_line": 1278,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 2198,
+              "selected_line_ranges": [
+                "1220-1278"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Strong candidate because it builds a synthetic MIR body derived from the coroutine body and then stores it as `body.coroutine.as_mut().unwrap().coroutine_drop` in `run_pass`. For a cycle on optimizing MIR of an async-closure body, constructing a companion drop body from the same body is a plausible re-entrancy path. This method clones the body, changes its source instance to drop glue, inserts switches, rewrites the coroutine state argument, and dumps MIR, making it a likely source of accidental self-dependence between the original optimized MIR and derived-body layout/optimization."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs::create_coroutine_resume_function@1377-1465",
+            "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "item_type": "function",
+            "item_name": "create_coroutine_resume_function",
+            "qualified_name": "create_coroutine_resume_function",
+            "signature": "fn create_coroutine_resume_function<'tcx>( tcx: TyCtxt<'tcx>, transform: TransformVisitor<'tcx>, body: &mut Body<'tcx>, can_return: bool, ) {",
+            "parent_signature": "",
+            "start_line": 1377,
+            "end_line": 1465,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3488,
+              "selected_line_ranges": [
+                "1377-1465"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Also highly relevant because the issue is on an async closure passed as `impl Fn() -> Fut`, and for async coroutines the callable behavior is represented through the generated resume/poll body. This function rewrites the coroutine body into the resume function, inserts switch dispatch over coroutine states, adjusts argument representation including pinning, removes dead blocks, and runs an extra MIR pass. If the optimized MIR query for the async-closure body re-enters through generation or later use of the resume/poll form, this is one of the most direct transformation sites."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs::compute_layout@1023-1129",
+            "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "item_type": "function",
+            "item_name": "compute_layout",
+            "qualified_name": "compute_layout",
+            "signature": "fn compute_layout<'tcx>( liveness: LivenessInfo, body: &Body<'tcx>, ) -> ( IndexVec<Local, Option<(Ty<'tcx>, VariantIdx, FieldIdx)>>, CoroutineLayout<'tcx>, IndexVec<BasicBlock, Option<BitSet<Local>>>, ) {",
+            "parent_signature": "",
+            "start_line": 1023,
+            "end_line": 1129,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 4535,
+              "selected_line_ranges": [
+                "1023-1129"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Direct match to the diagnostic note about 'computing layout of {async closure body ...}'. This function constructs the `CoroutineLayout` from liveness information, computes saved locals, variant fields, remapping, field names, and storage conflicts, and returns the layout later installed on the body. Even though the explicit query note refers to type layout rather than just MIR-level field arrangement, this is the key coroutine-side layout construction routine that could participate in or trigger the problematic dependency for nested async-closure bodies with `.await`."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/coroutine.rs::mir_coroutine_witnesses@1558-1589",
+            "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+            "item_type": "function",
+            "item_name": "mir_coroutine_witnesses",
+            "qualified_name": "mir_coroutine_witnesses",
+            "signature": "pub(crate) fn mir_coroutine_witnesses<'tcx>( tcx: TyCtxt<'tcx>, def_id: LocalDefId, ) -> Option<CoroutineLayout<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 1558,
+            "end_line": 1589,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1330,
+              "selected_line_ranges": [
+                "1558-1589"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Important bridge candidate because it independently computes coroutine layout/witness information from MIR by calling `tcx.mir_promoted(def_id)`, `locals_live_across_suspend_points`, and `compute_layout`. The bug note says the cycle is used when computing layout of the async-closure body; witness/layout queries for coroutine interiors are a plausible path from layout computation back into MIR of the same nested async-closure body. Its role as a query-facing accessor for coroutine layout makes it especially suspicious for cyclic interaction."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_transform/src/pass_manager.rs",
+        "group_index": 5,
+        "candidate_count": 16,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_transform/src/pass_manager.rs::run_passes_inner@110-185",
+            "file": "compiler/rustc_mir_transform/src/pass_manager.rs",
+            "item_type": "function",
+            "item_name": "run_passes_inner",
+            "qualified_name": "run_passes_inner",
+            "signature": "fn run_passes_inner<'tcx>( tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, passes: &[&dyn MirPass<'tcx>], phase_change: Option<MirPhase>, validate_each: bool, ) {",
+            "parent_signature": "",
+            "start_line": 110,
+            "end_line": 185,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 2392,
+              "selected_line_ranges": [
+                "110-185"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the core MIR optimization orchestration in the file: it iterates passes, invokes `pass.run_pass(tcx, body)`, handles phase transitions, and always validates again when entering `MirPhase::Runtime(RuntimePhase::Optimized)`. The observed failure is explicitly \"cycle detected when optimizing MIR\" for a nested async-closure body, so the method that actually drives per-body optimization work is the strongest surface-trigger candidate in this file."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/pass_manager.rs::run_passes@82-89",
+            "file": "compiler/rustc_mir_transform/src/pass_manager.rs",
+            "item_type": "function",
+            "item_name": "run_passes",
+            "qualified_name": "run_passes",
+            "signature": "pub fn run_passes<'tcx>( tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, passes: &[&dyn MirPass<'tcx>], phase_change: Option<MirPhase>, ) {",
+            "parent_signature": "",
+            "start_line": 82,
+            "end_line": 89,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 212,
+              "selected_line_ranges": [
+                "82-89"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the public validated entry point into the pass manager and directly forwards to `run_passes_inner(..., true)`. Since the bug manifests during MIR optimization rather than in an individual trivial wrapper method, this entry point is a plausible place where the problematic optimized-MIR pipeline for the async-closure body is initiated."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/pass_manager.rs::run_passes_no_validate@72-79",
+            "file": "compiler/rustc_mir_transform/src/pass_manager.rs",
+            "item_type": "function",
+            "item_name": "run_passes_no_validate",
+            "qualified_name": "run_passes_no_validate",
+            "signature": "pub fn run_passes_no_validate<'tcx>( tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, passes: &[&dyn MirPass<'tcx>], phase_change: Option<MirPhase>, ) {",
+            "parent_signature": "",
+            "start_line": 72,
+            "end_line": 79,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 225,
+              "selected_line_ranges": [
+                "72-79"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the sibling public entry point for running MIR passes and also feeds directly into `run_passes_inner`. Even though the reproducer reports a query cycle rather than a validation error, this function is still part of the optimization pipeline surface in this file and is more relevant than the simple adapter methods because it can be used to trigger optimization over the problematic nested closure body."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/pass_manager.rs::should_run_pass@91-108",
+            "file": "compiler/rustc_mir_transform/src/pass_manager.rs",
+            "item_type": "function",
+            "item_name": "should_run_pass",
+            "qualified_name": "should_run_pass",
+            "signature": "pub fn should_run_pass<'tcx, P>(tcx: TyCtxt<'tcx>, pass: &P) -> bool where P: MirPass<'tcx> + ?Sized, {",
+            "parent_signature": "",
+            "start_line": 91,
+            "end_line": 108,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 596,
+              "selected_line_ranges": [
+                "91-108"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This function decides whether a MIR pass runs at all, based on session options and pass enablement. For a regression labeled A-mir-opt involving optimization of an async closure, pass selection is part of the control flow determining which transform executes on the body and whether the cycle-triggering optimization path is entered."
+          },
+          {
+            "id": "compiler/rustc_mir_transform/src/pass_manager.rs::validate_body@187-189",
+            "file": "compiler/rustc_mir_transform/src/pass_manager.rs",
+            "item_type": "function",
+            "item_name": "validate_body",
+            "qualified_name": "validate_body",
+            "signature": "pub fn validate_body<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, when: String) {",
+            "parent_signature": "",
+            "start_line": 187,
+            "end_line": 189,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 163,
+              "selected_line_ranges": [
+                "187-189"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "While not the likely root cause, this function is one of the few methods here that re-enters MIR processing infrastructure after passes and after optimized phase changes. Because cycle diagnostics often surface when compiler infrastructure revisits the same body through checks or derived queries, `validate_body` is a more plausible participant than the trivial `name`/`is_enabled`/dump wrappers."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_ty_utils/src/abi.rs",
+        "group_index": 6,
+        "candidate_count": 9,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_ty_utils/src/abi.rs::fn_sig_for_fn_abi@31-289",
+            "file": "compiler/rustc_ty_utils/src/abi.rs",
+            "item_type": "function",
+            "item_name": "fn_sig_for_fn_abi",
+            "qualified_name": "fn_sig_for_fn_abi",
+            "signature": "fn fn_sig_for_fn_abi<'tcx>( tcx: TyCtxt<'tcx>, instance: ty::Instance<'tcx>, param_env: ty::ParamEnv<'tcx>, ) -> ty::PolyFnSig<'tcx> {",
+            "parent_signature": "",
+            "start_line": 31,
+            "end_line": 289,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 12138,
+              "selected_line_ranges": [
+                "31-289"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Top candidate in this file because the reproducer is specifically an async closure passed to `impl Fn() -> Fut`, and this function contains the async-closure/coroutine-specific signature construction paths (`ty::CoroutineClosure`, `ty::Coroutine`) used before computing a `FnAbi`. It directly manipulates closure environment types, coroutine kinds, and calls `sig.to_coroutine_given_kind_and_upvars(...)` plus `tcx.coroutine_for_closure(def_id)`, making it the strongest bridge between async-closure callable shape and the later layout computation mentioned in the cycle note."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/abi.rs::fn_abi_of_instance@338-357",
+            "file": "compiler/rustc_ty_utils/src/abi.rs",
+            "item_type": "function",
+            "item_name": "fn_abi_of_instance",
+            "qualified_name": "fn_abi_of_instance",
+            "signature": "fn fn_abi_of_instance<'tcx>( tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, (ty::Instance<'tcx>, &'tcx ty::List<Ty<'tcx>>)>, ) -> Result<&'tcx FnAbi<'tcx, Ty<'tcx>>, &'tcx FnAbiError<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 338,
+            "end_line": 357,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 665,
+              "selected_line_ranges": [
+                "338-357"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the query-provider entry that computes `FnAbi` for a concrete callable instance, exactly the kind of generated nested closure instance named in the diagnostic. It calls `fn_sig_for_fn_abi` and then `fn_abi_new_uncached` with a `LayoutCx`, so it is a direct surface/intermediate entry where ABI computation can request layout for the same async-closure body and participate in the observed optimize-MIR/layout cycle."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/abi.rs::fn_abi_adjust_for_abi@645-800",
+            "file": "compiler/rustc_ty_utils/src/abi.rs",
+            "item_type": "function",
+            "item_name": "fn_abi_adjust_for_abi",
+            "qualified_name": "fn_abi_adjust_for_abi",
+            "signature": "fn fn_abi_adjust_for_abi<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, fn_abi: &mut FnAbi<'tcx, Ty<'tcx>>, abi: SpecAbi, fn_def_id: Option<DefId>, ) -> Result<(), &'tcx FnAbiError<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 645,
+            "end_line": 800,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 7121,
+              "selected_line_ranges": [
+                "645-800"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Strong intermediate-layer candidate because it mutates the computed `FnAbi` based on ABI and inspects argument/return `layout.abi`, sizes, indirect/direct passing, and deduced param attrs. Since the error note explicitly mentions layout of the async-closure body, this function is one of the main places in the file where computed layouts are consumed and adjusted during ABI formation for callable items."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/abi.rs::fn_abi_of_fn_ptr@328-336",
+            "file": "compiler/rustc_ty_utils/src/abi.rs",
+            "item_type": "function",
+            "item_name": "fn_abi_of_fn_ptr",
+            "qualified_name": "fn_abi_of_fn_ptr",
+            "signature": "fn fn_abi_of_fn_ptr<'tcx>( tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, (ty::PolyFnSig<'tcx>, &'tcx ty::List<Ty<'tcx>>)>, ) -> Result<&'tcx FnAbi<'tcx, Ty<'tcx>>, &'tcx FnAbiError<'tcx>> {",
+            "parent_signature": "",
+            "start_line": 328,
+            "end_line": 336,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 370,
+              "selected_line_ranges": [
+                "328-336"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Less specific than `fn_abi_of_instance`, but still a direct provider entry into `fn_abi_new_uncached` with `LayoutCx`. If the async-closure call path is routed through a function-pointer-like ABI computation or shared machinery, this is a plausible participating entry point in the same layout/ABI dependency chain."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/abi.rs::make_thin_self_ptr@803-846",
+            "file": "compiler/rustc_ty_utils/src/abi.rs",
+            "item_type": "function",
+            "item_name": "make_thin_self_ptr",
+            "qualified_name": "make_thin_self_ptr",
+            "signature": "fn make_thin_self_ptr<'tcx>( cx: &(impl HasTyCtxt<'tcx> + HasParamEnv<'tcx>), layout: TyAndLayout<'tcx>, ) -> TyAndLayout<'tcx> {",
+            "parent_signature": "",
+            "start_line": 803,
+            "end_line": 846,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1872,
+              "selected_line_ranges": [
+                "803-846"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Useful supporting candidate because it performs special receiver-layout manipulation for callable/self pointer handling and explicitly calls `tcx.layout_of(...)`. While not async-closure-specific, it is one of the few methods here that directly re-queries layout and rewrites callable receiver representation, which could matter for compiler-generated closure/coroutine call shims involved in the reproducer."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "group_index": 7,
+        "candidate_count": 19,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs::impl<'tcx> Cx<'tcx>::make_mirror_unadjusted@234-801",
+            "file": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+            "item_type": "method",
+            "item_name": "make_mirror_unadjusted",
+            "qualified_name": "impl<'tcx> Cx<'tcx>::make_mirror_unadjusted",
+            "signature": "#[instrument(level = \"debug\", skip(self), ret)] fn make_mirror_unadjusted(&mut self, expr: &'tcx hir::Expr<'tcx>) -> Expr<'tcx> {",
+            "parent_signature": "impl<'tcx> Cx<'tcx>",
+            "start_line": 234,
+            "end_line": 801,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 27528,
+              "selected_line_ranges": [
+                "234-801"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Top upstream-source method in this file for the reproducer `orchestrate_memd_routing(async || async {}.await).await`. It is the main HIR-expression-to-THIR lowering routine and directly handles the key expression forms in the repro: ordinary calls, method-style calls, and the nested async/await-containing expression tree. Since the observed cycle names a deeply nested async-closure body and Stage3 already identified this file as the most relevant THIR expression lowering site, any malformed THIR structure seeding a later MIR/layout cycle is most likely introduced here."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs::impl<'tcx> Cx<'tcx>::mirror_expr_inner@39-75",
+            "file": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+            "item_type": "method",
+            "item_name": "mirror_expr_inner",
+            "qualified_name": "impl<'tcx> Cx<'tcx>::mirror_expr_inner",
+            "signature": "#[instrument(level = \"trace\", skip(self, hir_expr))] pub(super) fn mirror_expr_inner(&mut self, hir_expr: &'tcx hir::Expr<'tcx>) -> ExprId {",
+            "parent_signature": "impl<'tcx> Cx<'tcx>",
+            "start_line": 39,
+            "end_line": 75,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1267,
+              "selected_line_ranges": [
+                "39-75"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the central wrapper around expression lowering in the file: it calls `make_mirror_unadjusted`, then applies type-driven adjustments and wraps the result in a scoped THIR node. For async closures and `.await`, incorrect adjustment application or scope wrapping can change the final THIR shape consumed by MIR building. As the immediate orchestration point for every expression lowered from HIR, it is a strong file-local candidate."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs::impl<'tcx> Cx<'tcx>::method_callee@838-866",
+            "file": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+            "item_type": "method",
+            "item_name": "method_callee",
+            "qualified_name": "impl<'tcx> Cx<'tcx>::method_callee",
+            "signature": "fn method_callee( &mut self, expr: &hir::Expr<'_>, span: Span, overloaded_callee: Option<Ty<'tcx>>, ) -> Expr<'tcx> {",
+            "parent_signature": "impl<'tcx> Cx<'tcx>",
+            "start_line": 838,
+            "end_line": 866,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1178,
+              "selected_line_ranges": [
+                "838-866"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "The reproducer passes an async closure to a function expecting `impl Fn() -> Fut`, so closure call lowering through the `Fn`/`FnMut`/`FnOnce` machinery is highly relevant. This method resolves type-dependent method defs and constructs the callee THIR for method/trait calls; in `make_mirror_unadjusted`, call expressions implementing `Fn*` are explicitly rewritten through `method_callee`. That makes it a plausible source for bad callable/closure lowering feeding the later optimized-MIR/layout cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs::impl<'tcx> Cx<'tcx>::convert_var@958-979",
+            "file": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+            "item_type": "method",
+            "item_name": "convert_var",
+            "qualified_name": "impl<'tcx> Cx<'tcx>::convert_var",
+            "signature": "fn convert_var(&mut self, var_hir_id: hir::HirId) -> ExprKind<'tcx> {",
+            "parent_signature": "impl<'tcx> Cx<'tcx>",
+            "start_line": 958,
+            "end_line": 979,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 728,
+              "selected_line_ranges": [
+                "958-979"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Async closures are capture-heavy, and the issue is labeled A-async-closures with the failing item being nested closures. This method decides whether a referenced variable becomes `ExprKind::UpvarRef` or `ExprKind::VarRef`, directly shaping closure capture representation in THIR. If the cycle is seeded by incorrect treatment of captured state in nested async closures, this is the most direct file-local decision point."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs::impl<'tcx> Cx<'tcx>::capture_upvar@1088-1124",
+            "file": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+            "item_type": "method",
+            "item_name": "capture_upvar",
+            "qualified_name": "impl<'tcx> Cx<'tcx>::capture_upvar",
+            "signature": "fn capture_upvar( &mut self, closure_expr: &'tcx hir::Expr<'tcx>, captured_place: &'tcx ty::CapturedPlace<'tcx>, upvar_ty: Ty<'tcx>, ) -> Expr<'tcx> {",
+            "parent_signature": "impl<'tcx> Cx<'tcx>",
+            "start_line": 1088,
+            "end_line": 1124,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1487,
+              "selected_line_ranges": [
+                "1088-1124"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Another strong async-closure-specific candidate: it lowers captured places into by-value or by-reference THIR expressions with specific borrow kinds. Nested async closures commonly depend on precise capture semantics, and wrong borrow/capture lowering can easily produce self-referential coroutine state later visible as a MIR optimization/layout cycle. Within this file, this is the most targeted capture-construction routine."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_mir_build/src/build/mod.rs",
+        "group_index": 8,
+        "candidate_count": 27,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_mir_build/src/build/mod.rs::construct_fn@442-549",
+            "file": "compiler/rustc_mir_build/src/build/mod.rs",
+            "item_type": "function",
+            "item_name": "construct_fn",
+            "qualified_name": "construct_fn",
+            "signature": "fn construct_fn<'tcx>( tcx: TyCtxt<'tcx>, fn_def: LocalDefId, thir: &Thir<'tcx>, expr: ExprId, fn_sig: ty::FnSig<'tcx>, ) -> Body<'tcx> {",
+            "parent_signature": "",
+            "start_line": 442,
+            "end_line": 549,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 3614,
+              "selected_line_ranges": [
+                "442-549"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the strongest upstream MIR-construction entry for the reproducer's async closure body. The bug is triggered by nested async closures plus `.await`, and `construct_fn` decides how a body is classified (`ty::Coroutine`, `ty::Closure`, `ty::CoroutineClosure`, `ty::FnDef`), initializes `CoroutineInfo` for coroutine bodies, creates the `Builder`, and drives lowering of arguments and the body expression into MIR. If the problematic self-referential shape for an async-closure/coroutine body is introduced during MIR building before optimization, this is the most central method in this file where that would happen."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/mod.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::args_and_body@881-985",
+            "file": "compiler/rustc_mir_build/src/build/mod.rs",
+            "item_type": "method",
+            "item_name": "args_and_body",
+            "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::args_and_body",
+            "signature": "fn args_and_body( &mut self, mut block: BasicBlock, arguments: &IndexSlice<ParamId, Param<'tcx>>, argument_scope: region::Scope, expr_id: ExprId, ) -> BlockAnd<()> {",
+            "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+            "start_line": 881,
+            "end_line": 985,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 4500,
+              "selected_line_ranges": [
+                "881-985"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This method performs the actual lowering of parameters and then lowers the body expression with `self.expr_into_dest(Place::return_place(), block, expr_id)`. For an `async || async {}.await` reproducer, the nested closure/coroutine body and await expression are exactly the kind of body structure that would be materialized here. It is therefore a strong upstream-source candidate for malformed MIR or capture/body wiring that later causes an optimize-MIR/layout cycle."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/mod.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::insert_upvar_arg@813-879",
+            "file": "compiler/rustc_mir_build/src/build/mod.rs",
+            "item_type": "method",
+            "item_name": "insert_upvar_arg",
+            "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::insert_upvar_arg",
+            "signature": "fn insert_upvar_arg(&mut self) {",
+            "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+            "start_line": 813,
+            "end_line": 879,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 2780,
+              "selected_line_ranges": [
+                "813-879"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "The issue is labeled A-async-closures and involves a nested closure body. `insert_upvar_arg` is the most closure-specific method in this file: it inspects whether the environment is a `Closure`, `Coroutine`, or `CoroutineClosure`, fetches `closure_captures`, builds projections through the capture struct, and records upvar uses/debug info. Async closures and coroutine-closures are handled explicitly here, so incorrect capture-environment setup could plausibly seed a later cycle in MIR optimization or layout for the generated async closure body."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/mod.rs::mir_build@47-90",
+            "file": "compiler/rustc_mir_build/src/build/mod.rs",
+            "item_type": "function",
+            "item_name": "mir_build",
+            "qualified_name": "mir_build",
+            "signature": "pub(crate) fn mir_build<'tcx>(tcx: TyCtxtAt<'tcx>, def: LocalDefId) -> Body<'tcx> {",
+            "parent_signature": "",
+            "start_line": 47,
+            "end_line": 90,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1755,
+              "selected_line_ranges": [
+                "47-90"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the top-level MIR build query entry in the file. It requests THIR, performs early checks, chooses between `construct_fn` and `construct_const`, and returns the built body. Even though the observed failure surfaces later during MIR optimization, any query interaction involving building MIR for the nested async closure body necessarily flows through this method, making it a strong orchestration-level upstream candidate."
+          },
+          {
+            "id": "compiler/rustc_mir_build/src/build/mod.rs::construct_error@600-722",
+            "file": "compiler/rustc_mir_build/src/build/mod.rs",
+            "item_type": "function",
+            "item_name": "construct_error",
+            "qualified_name": "construct_error",
+            "signature": "fn construct_error(tcx: TyCtxt<'_>, def_id: LocalDefId, guar: ErrorGuaranteed) -> Body<'_> {",
+            "parent_signature": "",
+            "start_line": 600,
+            "end_line": 722,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 5002,
+              "selected_line_ranges": [
+                "600-722"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "While less likely than the normal-body builders, this method is notable because it has explicit special handling for `DefKind::Closure` and matches `ty::Closure`, `ty::Coroutine`, and `ty::CoroutineClosure`, constructing fallback MIR signatures and coroutine info. Given the regression centers on async closures/coroutine-closure typing, this is the other method in the file with concentrated closure/coroutine-body shape logic that could participate if an erroneous path or type classification is involved."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_ty_utils/src/instance.rs",
+        "group_index": 9,
+        "candidate_count": 3,
+        "selection_count": 3,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_ty_utils/src/instance.rs::resolve_instance_raw@18-92",
+            "file": "compiler/rustc_ty_utils/src/instance.rs",
+            "item_type": "function",
+            "item_name": "resolve_instance_raw",
+            "qualified_name": "resolve_instance_raw",
+            "signature": "fn resolve_instance_raw<'tcx>( tcx: TyCtxt<'tcx>, key: ty::ParamEnvAnd<'tcx, (DefId, GenericArgsRef<'tcx>)>, ) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {",
+            "parent_signature": "",
+            "start_line": 18,
+            "end_line": 92,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 2921,
+              "selected_line_ranges": [
+                "18-92"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/instance.rs::resolve_associated_item@94-379",
+            "file": "compiler/rustc_ty_utils/src/instance.rs",
+            "item_type": "function",
+            "item_name": "resolve_associated_item",
+            "qualified_name": "resolve_associated_item",
+            "signature": "fn resolve_associated_item<'tcx>( tcx: TyCtxt<'tcx>, trait_item_id: DefId, param_env: ty::ParamEnv<'tcx>, trait_id: DefId, rcvr_args: GenericArgsRef<'tcx>, ) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {",
+            "parent_signature": "",
+            "start_line": 94,
+            "end_line": 379,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 14125,
+              "selected_line_ranges": [
+                "94-379"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          },
+          {
+            "id": "compiler/rustc_ty_utils/src/instance.rs::provide@381-383",
+            "file": "compiler/rustc_ty_utils/src/instance.rs",
+            "item_type": "function",
+            "item_name": "provide",
+            "qualified_name": "provide",
+            "signature": "pub(crate) fn provide(providers: &mut Providers) {",
+            "parent_signature": "",
+            "start_line": 381,
+            "end_line": 383,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 119,
+              "selected_line_ranges": [
+                "381-383"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "All methods in this file fit within the candidate budget."
+          }
+        ]
+      },
+      {
+        "type": "file",
+        "id": "compiler/rustc_hir_analysis/src/collect.rs",
+        "group_index": 10,
+        "candidate_count": 59,
+        "selection_count": 5,
+        "selected_methods": [
+          {
+            "id": "compiler/rustc_hir_analysis/src/collect.rs::coroutine_for_closure@1831-1852",
+            "file": "compiler/rustc_hir_analysis/src/collect.rs",
+            "item_type": "function",
+            "item_name": "coroutine_for_closure",
+            "qualified_name": "coroutine_for_closure",
+            "signature": "fn coroutine_for_closure(tcx: TyCtxt<'_>, def_id: LocalDefId) -> DefId {",
+            "parent_signature": "",
+            "start_line": 1831,
+            "end_line": 1852,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 560,
+              "selected_line_ranges": [
+                "1831-1852"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Most directly aligned with the reproducer's async-closure-specific shape. The bug is labeled A-async-closures, and the reproducer uses `async || async {}.await`. This query provider explicitly maps a `CoroutineClosure` to the nested inner coroutine body by extracting the closure expression from the body, which is exactly the kind of generated-item relationship implicated by the diagnostic naming deeply nested closure/coroutine bodies. If the wrong generated def-id/body association is collected here, downstream MIR optimization and layout queries could recurse on the same async closure body."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/collect.rs::coroutine_kind@1817-1829",
+            "file": "compiler/rustc_hir_analysis/src/collect.rs",
+            "item_type": "function",
+            "item_name": "coroutine_kind",
+            "qualified_name": "coroutine_kind",
+            "signature": "fn coroutine_kind(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<hir::CoroutineKind> {",
+            "parent_signature": "",
+            "start_line": 1817,
+            "end_line": 1829,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 412,
+              "selected_line_ranges": [
+                "1817-1829"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the other async/coroutine query provider registered by `provide`, and it classifies closure expressions as coroutines via `ClosureKind::Coroutine`. Since the observed failure mentions layout of an async closure body and optimization of a nested closure, incorrect coroutine-kind classification would be a plausible upstream metadata source that poisons later MIR-building/optimization behavior."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/collect.rs::provide@59-90",
+            "file": "compiler/rustc_hir_analysis/src/collect.rs",
+            "item_type": "function",
+            "item_name": "provide",
+            "qualified_name": "provide",
+            "signature": "pub fn provide(providers: &mut Providers) {",
+            "parent_signature": "",
+            "start_line": 59,
+            "end_line": 90,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 1530,
+              "selected_line_ranges": [
+                "59-90"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the file's query registration surface and directly wires `coroutine_kind` and `coroutine_for_closure` into the provider table. Given the stage-3 rationale for `collect.rs` was as an upstream query-fed metadata source, the provider hookup is relevant because a regression in which query implementation is exposed for async closures could surface through these registrations. It is less specific than the coroutine methods themselves, but still a key surface within this file."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/collect.rs::impl<'tcx> Visitor<'tcx> for CollectItemTypesVisitor<'tcx>::visit_expr@319-328",
+            "file": "compiler/rustc_hir_analysis/src/collect.rs",
+            "item_type": "method",
+            "item_name": "visit_expr",
+            "qualified_name": "impl<'tcx> Visitor<'tcx> for CollectItemTypesVisitor<'tcx>::visit_expr",
+            "signature": "fn visit_expr(&mut self, expr: &'tcx hir::Expr<'tcx>) {",
+            "parent_signature": "impl<'tcx> Visitor<'tcx> for CollectItemTypesVisitor<'tcx>",
+            "start_line": 319,
+            "end_line": 328,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 489,
+              "selected_line_ranges": [
+                "319-328"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "Among the generic collection paths, this is the method that explicitly handles closure expressions. It ensures `generics_of` and `codegen_fn_attrs` for each closure def-id while intentionally avoiding `type_of` due to typeck dependencies. Because the reproducer centers on nested closures/async closures and the bug is a query cycle, this closure-specific precollection path is a plausible upstream place where generated closure metadata dependencies are established."
+          },
+          {
+            "id": "compiler/rustc_hir_analysis/src/collect.rs::lower_item@648-776",
+            "file": "compiler/rustc_hir_analysis/src/collect.rs",
+            "item_type": "function",
+            "item_name": "lower_item",
+            "qualified_name": "lower_item",
+            "signature": "#[instrument(level = \"debug\", skip_all)] fn lower_item(tcx: TyCtxt<'_>, item_id: hir::ItemId) {",
+            "parent_signature": "",
+            "start_line": 648,
+            "end_line": 776,
+            "body_view": {
+              "kind": "full",
+              "original_chars": 5071,
+              "selected_line_ranges": [
+                "648-776"
+              ],
+              "semantic_terms": []
+            },
+            "reason": "This is the main item-level collection driver that eagerly ensures queries like `generics_of`, `type_of`, `predicates_of`, `fn_sig`, and `impl_trait_header`. While not async-closure-specific, it is the broad upstream orchestration point in this file for query population. For a cycle later observed in MIR optimization/layout of generated async-closure bodies, incorrect or newly introduced eager query forcing here could contribute indirectly, especially for functions and impl items containing the reproducer expression."
+          }
+        ]
+      }
+    ],
+    "selected_merged_count": 47,
+    "selected_methods": [
+      {
+        "id": "compiler/rustc_mir_transform/src/lib.rs::inner_optimized_mir@634-676",
+        "file": "compiler/rustc_mir_transform/src/lib.rs",
+        "item_type": "function",
+        "item_name": "inner_optimized_mir",
+        "qualified_name": "inner_optimized_mir",
+        "signature": "fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {",
+        "parent_signature": "",
+        "start_line": 634,
+        "end_line": 676,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 2027,
+          "selected_line_ranges": [
+            "634-676"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/lib.rs] Top surface-trigger candidate. The diagnostic is explicitly \"cycle detected when optimizing MIR\", and this is the direct provider implementation for the `optimized_mir` query. It steals the post-analysis body, performs `mentioned_items`, checks trivial-unreachable cases, and then invokes `run_optimization_passes`. Any self-dependency or re-entrant query involving the nested async-closure body would most directly manifest here."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/lib.rs::optimized_mir@630-632",
+        "file": "compiler/rustc_mir_transform/src/lib.rs",
+        "item_type": "function",
+        "item_name": "optimized_mir",
+        "qualified_name": "optimized_mir",
+        "signature": "fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {",
+        "parent_signature": "",
+        "start_line": 630,
+        "end_line": 632,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 118,
+          "selected_line_ranges": [
+            "630-632"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/lib.rs] Thin but highly relevant query entrypoint for the exact failing query named by the diagnostic. Even though it only allocates the result of `inner_optimized_mir`, it is the registered `optimized_mir` provider and therefore the immediate surface method associated with the observed cycle on a specific async-closure body."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/lib.rs::run_optimization_passes@556-627",
+        "file": "compiler/rustc_mir_transform/src/lib.rs",
+        "item_type": "function",
+        "item_name": "run_optimization_passes",
+        "qualified_name": "run_optimization_passes",
+        "signature": "fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {",
+        "parent_signature": "",
+        "start_line": 556,
+        "end_line": 627,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3835,
+          "selected_line_ranges": [
+            "556-627"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/lib.rs] Strong orchestration candidate within the optimize-MIR phase. The issue is labeled A-mir-opt, and the reproducer fails only when optimizing MIR for a nested async closure (`async || async {}.await`). This method runs the full optimization pipeline, including `inline::Inline` and many MIR transforms that could request layouts or other queries for the same generated closure/coroutine body and trigger a cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/lib.rs::mir_drops_elaborated_and_const_checked@393-468",
+        "file": "compiler/rustc_mir_transform/src/lib.rs",
+        "item_type": "function",
+        "item_name": "mir_drops_elaborated_and_const_checked",
+        "qualified_name": "mir_drops_elaborated_and_const_checked",
+        "signature": "fn mir_drops_elaborated_and_const_checked(tcx: TyCtxt<'_>, def: LocalDefId) -> &Steal<Body<'_>> {",
+        "parent_signature": "",
+        "start_line": 393,
+        "end_line": 468,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3269,
+          "selected_line_ranges": [
+            "393-468"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/lib.rs] Important upstream dependency of `optimized_mir`. `inner_optimized_mir` steals this query result before optimization, and this method already forces related queries such as `mir_coroutine_witnesses`, `mir_borrowck`, and optionally `mir_inliner_callees`. Because the bug involves async closures/coroutine-like bodies and a later layout dependency, this method is a plausible upstream source of the state or query interaction that feeds the optimize-MIR cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/lib.rs::run_runtime_lowering_passes@515-537",
+        "file": "compiler/rustc_mir_transform/src/lib.rs",
+        "item_type": "function",
+        "item_name": "run_runtime_lowering_passes",
+        "qualified_name": "run_runtime_lowering_passes",
+        "signature": "fn run_runtime_lowering_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {",
+        "parent_signature": "",
+        "start_line": 515,
+        "end_line": 537,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1368,
+          "selected_line_ranges": [
+            "515-537"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/lib.rs] Relevant upstream transformation stage for the async-closure reproducer. Before optimization, this method runs `coroutine::StateTransform` alongside other lowering passes. Since the failure concerns a nested async-closure body with `.await`, the runtime lowering that converts coroutine-like MIR into the form later optimized is a strong place where problematic structure could be introduced before the cycle appears in `optimized_mir`."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::coroutine_layout@811-1012",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "coroutine_layout",
+        "qualified_name": "coroutine_layout",
+        "signature": "fn coroutine_layout<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, def_id: hir::def_id::DefId, args: GenericArgsRef<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 811,
+        "end_line": 1012,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 8748,
+          "selected_line_ranges": [
+            "811-1012"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/layout.rs] Best match in this file to the note that the cycle is used when computing layout of an async-closure body. Async closures lower to coroutine/future-like bodies, and this method specifically computes coroutine layout via `tcx.coroutine_layout(def_id, ...)`, then recursively computes layouts for saved locals and prefix/upvar fields with `cx.layout_of(...)`/`cx.spanned_layout_of(...)`. Because the bug is a nightly regression on nested `async || async {}.await` and the failing item is an async closure body during MIR optimization, this coroutine-specific layout construction is the most plausible place where layout computation re-enters a query path involving the same body."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::layout_of_uncached@105-685",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "layout_of_uncached",
+        "qualified_name": "layout_of_uncached",
+        "signature": "fn layout_of_uncached<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 105,
+        "end_line": 685,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 24029,
+          "selected_line_ranges": [
+            "105-685"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/layout.rs] This is the core uncached layout engine for all types in the file and is the direct intermediate layer beneath the `layout_of` query. Even without a query trace, the diagnostic explicitly points to layout computation, and this function contains the major type-kind dispatch that can route async-closure-body types into specialized handling such as coroutine layout. If the cycle is not in the wrapper but in how a particular type kind is expanded or recursively queried, this is the central method."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::layout_of@35-80",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "layout_of",
+        "qualified_name": "layout_of",
+        "signature": "fn layout_of<'tcx>( tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>, ) -> Result<TyAndLayout<'tcx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 35,
+        "end_line": 80,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1676,
+          "selected_line_ranges": [
+            "35-80"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/layout.rs] This is the actual provider-backed query entry for `layout_of`, registered by `provide`, so it is the most direct surface-trigger in this file for the observed diagnostic note. It normalizes the type, may recurse by reissuing `tcx.layout_of(...)` for the normalized type, and then calls `layout_of_uncached`. Since the cycle is reported as being used when computing layout of the async closure body, the query wrapper itself is highly relevant as the entry/re-entry point."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::coroutine_saved_local_eligibility@715-808",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "coroutine_saved_local_eligibility",
+        "qualified_name": "coroutine_saved_local_eligibility",
+        "signature": "fn coroutine_saved_local_eligibility( info: &CoroutineLayout<'_>, ) -> (BitSet<CoroutineSavedLocal>, IndexVec<CoroutineSavedLocal, SavedLocalEligibility>) {",
+        "parent_signature": "",
+        "start_line": 715,
+        "end_line": 808,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3992,
+          "selected_line_ranges": [
+            "715-808"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/layout.rs] This helper is tightly coupled to coroutine layout and determines how saved locals are assigned to variants or promoted into the prefix. For async closures with `.await`, saved locals and suspension-point state are exactly the structures whose layout must be computed. It is less likely than `coroutine_layout` itself because it does not issue queries directly, but it influences the shape of the coroutine layout that may trigger the problematic recursion."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::record_layout_for_printing@1014-1062",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "record_layout_for_printing",
+        "qualified_name": "record_layout_for_printing",
+        "signature": "fn record_layout_for_printing<'tcx>(cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, layout: TyAndLayout<'tcx>) {",
+        "parent_signature": "",
+        "start_line": 1014,
+        "end_line": 1062,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1956,
+          "selected_line_ranges": [
+            "1014-1062"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/layout.rs] Lower-probability but still relevant because it has explicit coroutine/closure branches and can call `variant_info_for_coroutine` when type-size recording is enabled. That said, the reproducer used no `-Zprint-type-sizes`, so this is unlikely to be active in the failing run. It is included as a distant candidate only because it is one of the few methods in the file with coroutine-specific handling of layouts."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::coroutine_by_move_body_def_id@85-233",
+        "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "item_type": "function",
+        "item_name": "coroutine_by_move_body_def_id",
+        "qualified_name": "coroutine_by_move_body_def_id",
+        "signature": "pub fn coroutine_by_move_body_def_id<'tcx>( tcx: TyCtxt<'tcx>, coroutine_def_id: LocalDefId, ) -> DefId {",
+        "parent_signature": "",
+        "start_line": 85,
+        "end_line": 233,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 6653,
+          "selected_line_ranges": [
+            "85-233"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine/by_move_body.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::tcx@241-244",
+        "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "item_type": "method",
+        "item_name": "tcx",
+        "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::tcx",
+        "signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx> { fn tcx(&self) -> TyCtxt<'tcx> {",
+        "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+        "start_line": 241,
+        "end_line": 244,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 113,
+          "selected_line_ranges": [
+            "241-244"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine/by_move_body.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_place@246-307",
+        "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "item_type": "method",
+        "item_name": "visit_place",
+        "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_place",
+        "signature": "fn visit_place( &mut self, place: &mut mir::Place<'tcx>, context: mir::visit::PlaceContext, location: mir::Location, ) {",
+        "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+        "start_line": 246,
+        "end_line": 307,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3241,
+          "selected_line_ranges": [
+            "246-307"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine/by_move_body.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs::impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_local_decl@309-314",
+        "file": "compiler/rustc_mir_transform/src/coroutine/by_move_body.rs",
+        "item_type": "method",
+        "item_name": "visit_local_decl",
+        "qualified_name": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>::visit_local_decl",
+        "signature": "fn visit_local_decl(&mut self, local: mir::Local, local_decl: &mut mir::LocalDecl<'tcx>) {",
+        "parent_signature": "impl<'tcx> MutVisitor<'tcx> for MakeByMoveBody<'tcx>",
+        "start_line": 309,
+        "end_line": 314,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 257,
+          "selected_line_ranges": [
+            "309-314"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine/by_move_body.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::impl<'tcx> MirPass<'tcx> for StateTransform::run_pass@1626-1799",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "method",
+        "item_name": "run_pass",
+        "qualified_name": "impl<'tcx> MirPass<'tcx> for StateTransform::run_pass",
+        "signature": "impl<'tcx> MirPass<'tcx> for StateTransform { fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {",
+        "parent_signature": "impl<'tcx> MirPass<'tcx> for StateTransform",
+        "start_line": 1626,
+        "end_line": 1799,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 8005,
+          "selected_line_ranges": [
+            "1626-1799"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine.rs] Top candidate because the failure is explicitly during optimized MIR for a nested async-closure body, and this is the main coroutine MIR transform entrypoint for async/await bodies. The reproducer is `async || async {}.await`, exactly the kind of body this pass rewrites. It orchestrates multiple steps that can affect query dependencies: replacing resume/return locals, computing coroutine layout, storing that layout into `body.coroutine`, creating the coroutine drop shim, and creating the resume/poll function. Since the diagnostic note says the cycle is used when computing layout of the async-closure body, this pass is the strongest place where MIR optimization, coroutine layout, and synthetic coroutine bodies interact."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::create_coroutine_drop_shim@1220-1278",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "function",
+        "item_name": "create_coroutine_drop_shim",
+        "qualified_name": "create_coroutine_drop_shim",
+        "signature": "fn create_coroutine_drop_shim<'tcx>( tcx: TyCtxt<'tcx>, transform: &TransformVisitor<'tcx>, coroutine_ty: Ty<'tcx>, body: &Body<'tcx>, drop_clean: BasicBlock, ) -> Body<'tcx> {",
+        "parent_signature": "",
+        "start_line": 1220,
+        "end_line": 1278,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 2198,
+          "selected_line_ranges": [
+            "1220-1278"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine.rs] Strong candidate because it builds a synthetic MIR body derived from the coroutine body and then stores it as `body.coroutine.as_mut().unwrap().coroutine_drop` in `run_pass`. For a cycle on optimizing MIR of an async-closure body, constructing a companion drop body from the same body is a plausible re-entrancy path. This method clones the body, changes its source instance to drop glue, inserts switches, rewrites the coroutine state argument, and dumps MIR, making it a likely source of accidental self-dependence between the original optimized MIR and derived-body layout/optimization."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::create_coroutine_resume_function@1377-1465",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "function",
+        "item_name": "create_coroutine_resume_function",
+        "qualified_name": "create_coroutine_resume_function",
+        "signature": "fn create_coroutine_resume_function<'tcx>( tcx: TyCtxt<'tcx>, transform: TransformVisitor<'tcx>, body: &mut Body<'tcx>, can_return: bool, ) {",
+        "parent_signature": "",
+        "start_line": 1377,
+        "end_line": 1465,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3488,
+          "selected_line_ranges": [
+            "1377-1465"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine.rs] Also highly relevant because the issue is on an async closure passed as `impl Fn() -> Fut`, and for async coroutines the callable behavior is represented through the generated resume/poll body. This function rewrites the coroutine body into the resume function, inserts switch dispatch over coroutine states, adjusts argument representation including pinning, removes dead blocks, and runs an extra MIR pass. If the optimized MIR query for the async-closure body re-enters through generation or later use of the resume/poll form, this is one of the most direct transformation sites."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::compute_layout@1023-1129",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "function",
+        "item_name": "compute_layout",
+        "qualified_name": "compute_layout",
+        "signature": "fn compute_layout<'tcx>( liveness: LivenessInfo, body: &Body<'tcx>, ) -> ( IndexVec<Local, Option<(Ty<'tcx>, VariantIdx, FieldIdx)>>, CoroutineLayout<'tcx>, IndexVec<BasicBlock, Option<BitSet<Local>>>, ) {",
+        "parent_signature": "",
+        "start_line": 1023,
+        "end_line": 1129,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 4535,
+          "selected_line_ranges": [
+            "1023-1129"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine.rs] Direct match to the diagnostic note about 'computing layout of {async closure body ...}'. This function constructs the `CoroutineLayout` from liveness information, computes saved locals, variant fields, remapping, field names, and storage conflicts, and returns the layout later installed on the body. Even though the explicit query note refers to type layout rather than just MIR-level field arrangement, this is the key coroutine-side layout construction routine that could participate in or trigger the problematic dependency for nested async-closure bodies with `.await`."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::mir_coroutine_witnesses@1558-1589",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "function",
+        "item_name": "mir_coroutine_witnesses",
+        "qualified_name": "mir_coroutine_witnesses",
+        "signature": "pub(crate) fn mir_coroutine_witnesses<'tcx>( tcx: TyCtxt<'tcx>, def_id: LocalDefId, ) -> Option<CoroutineLayout<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 1558,
+        "end_line": 1589,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1330,
+          "selected_line_ranges": [
+            "1558-1589"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/coroutine.rs] Important bridge candidate because it independently computes coroutine layout/witness information from MIR by calling `tcx.mir_promoted(def_id)`, `locals_live_across_suspend_points`, and `compute_layout`. The bug note says the cycle is used when computing layout of the async-closure body; witness/layout queries for coroutine interiors are a plausible path from layout computation back into MIR of the same nested async-closure body. Its role as a query-facing accessor for coroutine layout makes it especially suspicious for cyclic interaction."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/pass_manager.rs::run_passes_inner@110-185",
+        "file": "compiler/rustc_mir_transform/src/pass_manager.rs",
+        "item_type": "function",
+        "item_name": "run_passes_inner",
+        "qualified_name": "run_passes_inner",
+        "signature": "fn run_passes_inner<'tcx>( tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, passes: &[&dyn MirPass<'tcx>], phase_change: Option<MirPhase>, validate_each: bool, ) {",
+        "parent_signature": "",
+        "start_line": 110,
+        "end_line": 185,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 2392,
+          "selected_line_ranges": [
+            "110-185"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/pass_manager.rs] This is the core MIR optimization orchestration in the file: it iterates passes, invokes `pass.run_pass(tcx, body)`, handles phase transitions, and always validates again when entering `MirPhase::Runtime(RuntimePhase::Optimized)`. The observed failure is explicitly \"cycle detected when optimizing MIR\" for a nested async-closure body, so the method that actually drives per-body optimization work is the strongest surface-trigger candidate in this file."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/pass_manager.rs::run_passes@82-89",
+        "file": "compiler/rustc_mir_transform/src/pass_manager.rs",
+        "item_type": "function",
+        "item_name": "run_passes",
+        "qualified_name": "run_passes",
+        "signature": "pub fn run_passes<'tcx>( tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, passes: &[&dyn MirPass<'tcx>], phase_change: Option<MirPhase>, ) {",
+        "parent_signature": "",
+        "start_line": 82,
+        "end_line": 89,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 212,
+          "selected_line_ranges": [
+            "82-89"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/pass_manager.rs] This is the public validated entry point into the pass manager and directly forwards to `run_passes_inner(..., true)`. Since the bug manifests during MIR optimization rather than in an individual trivial wrapper method, this entry point is a plausible place where the problematic optimized-MIR pipeline for the async-closure body is initiated."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/pass_manager.rs::run_passes_no_validate@72-79",
+        "file": "compiler/rustc_mir_transform/src/pass_manager.rs",
+        "item_type": "function",
+        "item_name": "run_passes_no_validate",
+        "qualified_name": "run_passes_no_validate",
+        "signature": "pub fn run_passes_no_validate<'tcx>( tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, passes: &[&dyn MirPass<'tcx>], phase_change: Option<MirPhase>, ) {",
+        "parent_signature": "",
+        "start_line": 72,
+        "end_line": 79,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 225,
+          "selected_line_ranges": [
+            "72-79"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/pass_manager.rs] This is the sibling public entry point for running MIR passes and also feeds directly into `run_passes_inner`. Even though the reproducer reports a query cycle rather than a validation error, this function is still part of the optimization pipeline surface in this file and is more relevant than the simple adapter methods because it can be used to trigger optimization over the problematic nested closure body."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/pass_manager.rs::should_run_pass@91-108",
+        "file": "compiler/rustc_mir_transform/src/pass_manager.rs",
+        "item_type": "function",
+        "item_name": "should_run_pass",
+        "qualified_name": "should_run_pass",
+        "signature": "pub fn should_run_pass<'tcx, P>(tcx: TyCtxt<'tcx>, pass: &P) -> bool where P: MirPass<'tcx> + ?Sized, {",
+        "parent_signature": "",
+        "start_line": 91,
+        "end_line": 108,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 596,
+          "selected_line_ranges": [
+            "91-108"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/pass_manager.rs] This function decides whether a MIR pass runs at all, based on session options and pass enablement. For a regression labeled A-mir-opt involving optimization of an async closure, pass selection is part of the control flow determining which transform executes on the body and whether the cycle-triggering optimization path is entered."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/pass_manager.rs::validate_body@187-189",
+        "file": "compiler/rustc_mir_transform/src/pass_manager.rs",
+        "item_type": "function",
+        "item_name": "validate_body",
+        "qualified_name": "validate_body",
+        "signature": "pub fn validate_body<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>, when: String) {",
+        "parent_signature": "",
+        "start_line": 187,
+        "end_line": 189,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 163,
+          "selected_line_ranges": [
+            "187-189"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_transform/src/pass_manager.rs] While not the likely root cause, this function is one of the few methods here that re-enters MIR processing infrastructure after passes and after optimized phase changes. Because cycle diagnostics often surface when compiler infrastructure revisits the same body through checks or derived queries, `validate_body` is a more plausible participant than the trivial `name`/`is_enabled`/dump wrappers."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/abi.rs::fn_sig_for_fn_abi@31-289",
+        "file": "compiler/rustc_ty_utils/src/abi.rs",
+        "item_type": "function",
+        "item_name": "fn_sig_for_fn_abi",
+        "qualified_name": "fn_sig_for_fn_abi",
+        "signature": "fn fn_sig_for_fn_abi<'tcx>( tcx: TyCtxt<'tcx>, instance: ty::Instance<'tcx>, param_env: ty::ParamEnv<'tcx>, ) -> ty::PolyFnSig<'tcx> {",
+        "parent_signature": "",
+        "start_line": 31,
+        "end_line": 289,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 12138,
+          "selected_line_ranges": [
+            "31-289"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/abi.rs] Top candidate in this file because the reproducer is specifically an async closure passed to `impl Fn() -> Fut`, and this function contains the async-closure/coroutine-specific signature construction paths (`ty::CoroutineClosure`, `ty::Coroutine`) used before computing a `FnAbi`. It directly manipulates closure environment types, coroutine kinds, and calls `sig.to_coroutine_given_kind_and_upvars(...)` plus `tcx.coroutine_for_closure(def_id)`, making it the strongest bridge between async-closure callable shape and the later layout computation mentioned in the cycle note."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/abi.rs::fn_abi_of_instance@338-357",
+        "file": "compiler/rustc_ty_utils/src/abi.rs",
+        "item_type": "function",
+        "item_name": "fn_abi_of_instance",
+        "qualified_name": "fn_abi_of_instance",
+        "signature": "fn fn_abi_of_instance<'tcx>( tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, (ty::Instance<'tcx>, &'tcx ty::List<Ty<'tcx>>)>, ) -> Result<&'tcx FnAbi<'tcx, Ty<'tcx>>, &'tcx FnAbiError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 338,
+        "end_line": 357,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 665,
+          "selected_line_ranges": [
+            "338-357"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/abi.rs] This is the query-provider entry that computes `FnAbi` for a concrete callable instance, exactly the kind of generated nested closure instance named in the diagnostic. It calls `fn_sig_for_fn_abi` and then `fn_abi_new_uncached` with a `LayoutCx`, so it is a direct surface/intermediate entry where ABI computation can request layout for the same async-closure body and participate in the observed optimize-MIR/layout cycle."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/abi.rs::fn_abi_adjust_for_abi@645-800",
+        "file": "compiler/rustc_ty_utils/src/abi.rs",
+        "item_type": "function",
+        "item_name": "fn_abi_adjust_for_abi",
+        "qualified_name": "fn_abi_adjust_for_abi",
+        "signature": "fn fn_abi_adjust_for_abi<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, fn_abi: &mut FnAbi<'tcx, Ty<'tcx>>, abi: SpecAbi, fn_def_id: Option<DefId>, ) -> Result<(), &'tcx FnAbiError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 645,
+        "end_line": 800,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 7121,
+          "selected_line_ranges": [
+            "645-800"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/abi.rs] Strong intermediate-layer candidate because it mutates the computed `FnAbi` based on ABI and inspects argument/return `layout.abi`, sizes, indirect/direct passing, and deduced param attrs. Since the error note explicitly mentions layout of the async-closure body, this function is one of the main places in the file where computed layouts are consumed and adjusted during ABI formation for callable items."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/abi.rs::fn_abi_of_fn_ptr@328-336",
+        "file": "compiler/rustc_ty_utils/src/abi.rs",
+        "item_type": "function",
+        "item_name": "fn_abi_of_fn_ptr",
+        "qualified_name": "fn_abi_of_fn_ptr",
+        "signature": "fn fn_abi_of_fn_ptr<'tcx>( tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, (ty::PolyFnSig<'tcx>, &'tcx ty::List<Ty<'tcx>>)>, ) -> Result<&'tcx FnAbi<'tcx, Ty<'tcx>>, &'tcx FnAbiError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 328,
+        "end_line": 336,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 370,
+          "selected_line_ranges": [
+            "328-336"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/abi.rs] Less specific than `fn_abi_of_instance`, but still a direct provider entry into `fn_abi_new_uncached` with `LayoutCx`. If the async-closure call path is routed through a function-pointer-like ABI computation or shared machinery, this is a plausible participating entry point in the same layout/ABI dependency chain."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/abi.rs::make_thin_self_ptr@803-846",
+        "file": "compiler/rustc_ty_utils/src/abi.rs",
+        "item_type": "function",
+        "item_name": "make_thin_self_ptr",
+        "qualified_name": "make_thin_self_ptr",
+        "signature": "fn make_thin_self_ptr<'tcx>( cx: &(impl HasTyCtxt<'tcx> + HasParamEnv<'tcx>), layout: TyAndLayout<'tcx>, ) -> TyAndLayout<'tcx> {",
+        "parent_signature": "",
+        "start_line": 803,
+        "end_line": 846,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1872,
+          "selected_line_ranges": [
+            "803-846"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/abi.rs] Useful supporting candidate because it performs special receiver-layout manipulation for callable/self pointer handling and explicitly calls `tcx.layout_of(...)`. While not async-closure-specific, it is one of the few methods here that directly re-queries layout and rewrites callable receiver representation, which could matter for compiler-generated closure/coroutine call shims involved in the reproducer."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs::impl<'tcx> Cx<'tcx>::make_mirror_unadjusted@234-801",
+        "file": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "item_type": "method",
+        "item_name": "make_mirror_unadjusted",
+        "qualified_name": "impl<'tcx> Cx<'tcx>::make_mirror_unadjusted",
+        "signature": "#[instrument(level = \"debug\", skip(self), ret)] fn make_mirror_unadjusted(&mut self, expr: &'tcx hir::Expr<'tcx>) -> Expr<'tcx> {",
+        "parent_signature": "impl<'tcx> Cx<'tcx>",
+        "start_line": 234,
+        "end_line": 801,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 27528,
+          "selected_line_ranges": [
+            "234-801"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/thir/cx/expr.rs] Top upstream-source method in this file for the reproducer `orchestrate_memd_routing(async || async {}.await).await`. It is the main HIR-expression-to-THIR lowering routine and directly handles the key expression forms in the repro: ordinary calls, method-style calls, and the nested async/await-containing expression tree. Since the observed cycle names a deeply nested async-closure body and Stage3 already identified this file as the most relevant THIR expression lowering site, any malformed THIR structure seeding a later MIR/layout cycle is most likely introduced here."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs::impl<'tcx> Cx<'tcx>::mirror_expr_inner@39-75",
+        "file": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "item_type": "method",
+        "item_name": "mirror_expr_inner",
+        "qualified_name": "impl<'tcx> Cx<'tcx>::mirror_expr_inner",
+        "signature": "#[instrument(level = \"trace\", skip(self, hir_expr))] pub(super) fn mirror_expr_inner(&mut self, hir_expr: &'tcx hir::Expr<'tcx>) -> ExprId {",
+        "parent_signature": "impl<'tcx> Cx<'tcx>",
+        "start_line": 39,
+        "end_line": 75,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1267,
+          "selected_line_ranges": [
+            "39-75"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/thir/cx/expr.rs] This is the central wrapper around expression lowering in the file: it calls `make_mirror_unadjusted`, then applies type-driven adjustments and wraps the result in a scoped THIR node. For async closures and `.await`, incorrect adjustment application or scope wrapping can change the final THIR shape consumed by MIR building. As the immediate orchestration point for every expression lowered from HIR, it is a strong file-local candidate."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs::impl<'tcx> Cx<'tcx>::method_callee@838-866",
+        "file": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "item_type": "method",
+        "item_name": "method_callee",
+        "qualified_name": "impl<'tcx> Cx<'tcx>::method_callee",
+        "signature": "fn method_callee( &mut self, expr: &hir::Expr<'_>, span: Span, overloaded_callee: Option<Ty<'tcx>>, ) -> Expr<'tcx> {",
+        "parent_signature": "impl<'tcx> Cx<'tcx>",
+        "start_line": 838,
+        "end_line": 866,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1178,
+          "selected_line_ranges": [
+            "838-866"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/thir/cx/expr.rs] The reproducer passes an async closure to a function expecting `impl Fn() -> Fut`, so closure call lowering through the `Fn`/`FnMut`/`FnOnce` machinery is highly relevant. This method resolves type-dependent method defs and constructs the callee THIR for method/trait calls; in `make_mirror_unadjusted`, call expressions implementing `Fn*` are explicitly rewritten through `method_callee`. That makes it a plausible source for bad callable/closure lowering feeding the later optimized-MIR/layout cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs::impl<'tcx> Cx<'tcx>::convert_var@958-979",
+        "file": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "item_type": "method",
+        "item_name": "convert_var",
+        "qualified_name": "impl<'tcx> Cx<'tcx>::convert_var",
+        "signature": "fn convert_var(&mut self, var_hir_id: hir::HirId) -> ExprKind<'tcx> {",
+        "parent_signature": "impl<'tcx> Cx<'tcx>",
+        "start_line": 958,
+        "end_line": 979,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 728,
+          "selected_line_ranges": [
+            "958-979"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/thir/cx/expr.rs] Async closures are capture-heavy, and the issue is labeled A-async-closures with the failing item being nested closures. This method decides whether a referenced variable becomes `ExprKind::UpvarRef` or `ExprKind::VarRef`, directly shaping closure capture representation in THIR. If the cycle is seeded by incorrect treatment of captured state in nested async closures, this is the most direct file-local decision point."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/thir/cx/expr.rs::impl<'tcx> Cx<'tcx>::capture_upvar@1088-1124",
+        "file": "compiler/rustc_mir_build/src/thir/cx/expr.rs",
+        "item_type": "method",
+        "item_name": "capture_upvar",
+        "qualified_name": "impl<'tcx> Cx<'tcx>::capture_upvar",
+        "signature": "fn capture_upvar( &mut self, closure_expr: &'tcx hir::Expr<'tcx>, captured_place: &'tcx ty::CapturedPlace<'tcx>, upvar_ty: Ty<'tcx>, ) -> Expr<'tcx> {",
+        "parent_signature": "impl<'tcx> Cx<'tcx>",
+        "start_line": 1088,
+        "end_line": 1124,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1487,
+          "selected_line_ranges": [
+            "1088-1124"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/thir/cx/expr.rs] Another strong async-closure-specific candidate: it lowers captured places into by-value or by-reference THIR expressions with specific borrow kinds. Nested async closures commonly depend on precise capture semantics, and wrong borrow/capture lowering can easily produce self-referential coroutine state later visible as a MIR optimization/layout cycle. Within this file, this is the most targeted capture-construction routine."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/mod.rs::construct_fn@442-549",
+        "file": "compiler/rustc_mir_build/src/build/mod.rs",
+        "item_type": "function",
+        "item_name": "construct_fn",
+        "qualified_name": "construct_fn",
+        "signature": "fn construct_fn<'tcx>( tcx: TyCtxt<'tcx>, fn_def: LocalDefId, thir: &Thir<'tcx>, expr: ExprId, fn_sig: ty::FnSig<'tcx>, ) -> Body<'tcx> {",
+        "parent_signature": "",
+        "start_line": 442,
+        "end_line": 549,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3614,
+          "selected_line_ranges": [
+            "442-549"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/mod.rs] This is the strongest upstream MIR-construction entry for the reproducer's async closure body. The bug is triggered by nested async closures plus `.await`, and `construct_fn` decides how a body is classified (`ty::Coroutine`, `ty::Closure`, `ty::CoroutineClosure`, `ty::FnDef`), initializes `CoroutineInfo` for coroutine bodies, creates the `Builder`, and drives lowering of arguments and the body expression into MIR. If the problematic self-referential shape for an async-closure/coroutine body is introduced during MIR building before optimization, this is the most central method in this file where that would happen."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/mod.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::args_and_body@881-985",
+        "file": "compiler/rustc_mir_build/src/build/mod.rs",
+        "item_type": "method",
+        "item_name": "args_and_body",
+        "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::args_and_body",
+        "signature": "fn args_and_body( &mut self, mut block: BasicBlock, arguments: &IndexSlice<ParamId, Param<'tcx>>, argument_scope: region::Scope, expr_id: ExprId, ) -> BlockAnd<()> {",
+        "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+        "start_line": 881,
+        "end_line": 985,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 4500,
+          "selected_line_ranges": [
+            "881-985"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/mod.rs] This method performs the actual lowering of parameters and then lowers the body expression with `self.expr_into_dest(Place::return_place(), block, expr_id)`. For an `async || async {}.await` reproducer, the nested closure/coroutine body and await expression are exactly the kind of body structure that would be materialized here. It is therefore a strong upstream-source candidate for malformed MIR or capture/body wiring that later causes an optimize-MIR/layout cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/mod.rs::impl<'a, 'tcx> Builder<'a, 'tcx>::insert_upvar_arg@813-879",
+        "file": "compiler/rustc_mir_build/src/build/mod.rs",
+        "item_type": "method",
+        "item_name": "insert_upvar_arg",
+        "qualified_name": "impl<'a, 'tcx> Builder<'a, 'tcx>::insert_upvar_arg",
+        "signature": "fn insert_upvar_arg(&mut self) {",
+        "parent_signature": "impl<'a, 'tcx> Builder<'a, 'tcx>",
+        "start_line": 813,
+        "end_line": 879,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 2780,
+          "selected_line_ranges": [
+            "813-879"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/mod.rs] The issue is labeled A-async-closures and involves a nested closure body. `insert_upvar_arg` is the most closure-specific method in this file: it inspects whether the environment is a `Closure`, `Coroutine`, or `CoroutineClosure`, fetches `closure_captures`, builds projections through the capture struct, and records upvar uses/debug info. Async closures and coroutine-closures are handled explicitly here, so incorrect capture-environment setup could plausibly seed a later cycle in MIR optimization or layout for the generated async closure body."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/mod.rs::mir_build@47-90",
+        "file": "compiler/rustc_mir_build/src/build/mod.rs",
+        "item_type": "function",
+        "item_name": "mir_build",
+        "qualified_name": "mir_build",
+        "signature": "pub(crate) fn mir_build<'tcx>(tcx: TyCtxtAt<'tcx>, def: LocalDefId) -> Body<'tcx> {",
+        "parent_signature": "",
+        "start_line": 47,
+        "end_line": 90,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1755,
+          "selected_line_ranges": [
+            "47-90"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/mod.rs] This is the top-level MIR build query entry in the file. It requests THIR, performs early checks, chooses between `construct_fn` and `construct_const`, and returns the built body. Even though the observed failure surfaces later during MIR optimization, any query interaction involving building MIR for the nested async closure body necessarily flows through this method, making it a strong orchestration-level upstream candidate."
+      },
+      {
+        "id": "compiler/rustc_mir_build/src/build/mod.rs::construct_error@600-722",
+        "file": "compiler/rustc_mir_build/src/build/mod.rs",
+        "item_type": "function",
+        "item_name": "construct_error",
+        "qualified_name": "construct_error",
+        "signature": "fn construct_error(tcx: TyCtxt<'_>, def_id: LocalDefId, guar: ErrorGuaranteed) -> Body<'_> {",
+        "parent_signature": "",
+        "start_line": 600,
+        "end_line": 722,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 5002,
+          "selected_line_ranges": [
+            "600-722"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_mir_build/src/build/mod.rs] While less likely than the normal-body builders, this method is notable because it has explicit special handling for `DefKind::Closure` and matches `ty::Closure`, `ty::Coroutine`, and `ty::CoroutineClosure`, constructing fallback MIR signatures and coroutine info. Given the regression centers on async closures/coroutine-closure typing, this is the other method in the file with concentrated closure/coroutine-body shape logic that could participate if an erroneous path or type classification is involved."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/instance.rs::resolve_instance_raw@18-92",
+        "file": "compiler/rustc_ty_utils/src/instance.rs",
+        "item_type": "function",
+        "item_name": "resolve_instance_raw",
+        "qualified_name": "resolve_instance_raw",
+        "signature": "fn resolve_instance_raw<'tcx>( tcx: TyCtxt<'tcx>, key: ty::ParamEnvAnd<'tcx, (DefId, GenericArgsRef<'tcx>)>, ) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {",
+        "parent_signature": "",
+        "start_line": 18,
+        "end_line": 92,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 2921,
+          "selected_line_ranges": [
+            "18-92"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/instance.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/instance.rs::resolve_associated_item@94-379",
+        "file": "compiler/rustc_ty_utils/src/instance.rs",
+        "item_type": "function",
+        "item_name": "resolve_associated_item",
+        "qualified_name": "resolve_associated_item",
+        "signature": "fn resolve_associated_item<'tcx>( tcx: TyCtxt<'tcx>, trait_item_id: DefId, param_env: ty::ParamEnv<'tcx>, trait_id: DefId, rcvr_args: GenericArgsRef<'tcx>, ) -> Result<Option<Instance<'tcx>>, ErrorGuaranteed> {",
+        "parent_signature": "",
+        "start_line": 94,
+        "end_line": 379,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 14125,
+          "selected_line_ranges": [
+            "94-379"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/instance.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/instance.rs::provide@381-383",
+        "file": "compiler/rustc_ty_utils/src/instance.rs",
+        "item_type": "function",
+        "item_name": "provide",
+        "qualified_name": "provide",
+        "signature": "pub(crate) fn provide(providers: &mut Providers) {",
+        "parent_signature": "",
+        "start_line": 381,
+        "end_line": 383,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 119,
+          "selected_line_ranges": [
+            "381-383"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_ty_utils/src/instance.rs] All methods in this file fit within the candidate budget."
+      },
+      {
+        "id": "compiler/rustc_hir_analysis/src/collect.rs::coroutine_for_closure@1831-1852",
+        "file": "compiler/rustc_hir_analysis/src/collect.rs",
+        "item_type": "function",
+        "item_name": "coroutine_for_closure",
+        "qualified_name": "coroutine_for_closure",
+        "signature": "fn coroutine_for_closure(tcx: TyCtxt<'_>, def_id: LocalDefId) -> DefId {",
+        "parent_signature": "",
+        "start_line": 1831,
+        "end_line": 1852,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 560,
+          "selected_line_ranges": [
+            "1831-1852"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_hir_analysis/src/collect.rs] Most directly aligned with the reproducer's async-closure-specific shape. The bug is labeled A-async-closures, and the reproducer uses `async || async {}.await`. This query provider explicitly maps a `CoroutineClosure` to the nested inner coroutine body by extracting the closure expression from the body, which is exactly the kind of generated-item relationship implicated by the diagnostic naming deeply nested closure/coroutine bodies. If the wrong generated def-id/body association is collected here, downstream MIR optimization and layout queries could recurse on the same async closure body."
+      },
+      {
+        "id": "compiler/rustc_hir_analysis/src/collect.rs::coroutine_kind@1817-1829",
+        "file": "compiler/rustc_hir_analysis/src/collect.rs",
+        "item_type": "function",
+        "item_name": "coroutine_kind",
+        "qualified_name": "coroutine_kind",
+        "signature": "fn coroutine_kind(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<hir::CoroutineKind> {",
+        "parent_signature": "",
+        "start_line": 1817,
+        "end_line": 1829,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 412,
+          "selected_line_ranges": [
+            "1817-1829"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_hir_analysis/src/collect.rs] This is the other async/coroutine query provider registered by `provide`, and it classifies closure expressions as coroutines via `ClosureKind::Coroutine`. Since the observed failure mentions layout of an async closure body and optimization of a nested closure, incorrect coroutine-kind classification would be a plausible upstream metadata source that poisons later MIR-building/optimization behavior."
+      },
+      {
+        "id": "compiler/rustc_hir_analysis/src/collect.rs::provide@59-90",
+        "file": "compiler/rustc_hir_analysis/src/collect.rs",
+        "item_type": "function",
+        "item_name": "provide",
+        "qualified_name": "provide",
+        "signature": "pub fn provide(providers: &mut Providers) {",
+        "parent_signature": "",
+        "start_line": 59,
+        "end_line": 90,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1530,
+          "selected_line_ranges": [
+            "59-90"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_hir_analysis/src/collect.rs] This is the file's query registration surface and directly wires `coroutine_kind` and `coroutine_for_closure` into the provider table. Given the stage-3 rationale for `collect.rs` was as an upstream query-fed metadata source, the provider hookup is relevant because a regression in which query implementation is exposed for async closures could surface through these registrations. It is less specific than the coroutine methods themselves, but still a key surface within this file."
+      },
+      {
+        "id": "compiler/rustc_hir_analysis/src/collect.rs::impl<'tcx> Visitor<'tcx> for CollectItemTypesVisitor<'tcx>::visit_expr@319-328",
+        "file": "compiler/rustc_hir_analysis/src/collect.rs",
+        "item_type": "method",
+        "item_name": "visit_expr",
+        "qualified_name": "impl<'tcx> Visitor<'tcx> for CollectItemTypesVisitor<'tcx>::visit_expr",
+        "signature": "fn visit_expr(&mut self, expr: &'tcx hir::Expr<'tcx>) {",
+        "parent_signature": "impl<'tcx> Visitor<'tcx> for CollectItemTypesVisitor<'tcx>",
+        "start_line": 319,
+        "end_line": 328,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 489,
+          "selected_line_ranges": [
+            "319-328"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_hir_analysis/src/collect.rs] Among the generic collection paths, this is the method that explicitly handles closure expressions. It ensures `generics_of` and `codegen_fn_attrs` for each closure def-id while intentionally avoiding `type_of` due to typeck dependencies. Because the reproducer centers on nested closures/async closures and the bug is a query cycle, this closure-specific precollection path is a plausible upstream place where generated closure metadata dependencies are established."
+      },
+      {
+        "id": "compiler/rustc_hir_analysis/src/collect.rs::lower_item@648-776",
+        "file": "compiler/rustc_hir_analysis/src/collect.rs",
+        "item_type": "function",
+        "item_name": "lower_item",
+        "qualified_name": "lower_item",
+        "signature": "#[instrument(level = \"debug\", skip_all)] fn lower_item(tcx: TyCtxt<'_>, item_id: hir::ItemId) {",
+        "parent_signature": "",
+        "start_line": 648,
+        "end_line": 776,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 5071,
+          "selected_line_ranges": [
+            "648-776"
+          ],
+          "semantic_terms": []
+        },
+        "reason": "[compiler/rustc_hir_analysis/src/collect.rs] This is the main item-level collection driver that eagerly ensures queries like `generics_of`, `type_of`, `predicates_of`, `fn_sig`, and `impl_trait_header`. While not async-closure-specific, it is the broad upstream orchestration point in this file for query population. For a cycle later observed in MIR optimization/layout of generated async-closure bodies, incorrect or newly introduced eager query forcing here could contribute indirectly, especially for functions and impl items containing the reproducer expression."
+      }
+    ],
+    "ranked_methods": [
+      {
+        "id": "compiler/rustc_mir_transform/src/lib.rs::inner_optimized_mir@634-676",
+        "file": "compiler/rustc_mir_transform/src/lib.rs",
+        "item_type": "function",
+        "item_name": "inner_optimized_mir",
+        "qualified_name": "inner_optimized_mir",
+        "signature": "fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {",
+        "parent_signature": "",
+        "start_line": 634,
+        "end_line": 676,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 2027,
+          "selected_line_ranges": [
+            "634-676"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 1,
+        "reason": "This is the strongest surface-trigger match to the diagnostic: the error is explicitly a cycle while computing `optimized_mir` for a nested async-closure body. This method is the real `optimized_mir` provider implementation, steals `mir_drops_elaborated_and_const_checked`, runs `mentioned_items`, and then directly calls `run_optimization_passes`. Because the reported cycle immediately re-enters optimizing MIR for the same body, this is the most likely method on the observed self-dependency path."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::coroutine_layout@811-1012",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "coroutine_layout",
+        "qualified_name": "coroutine_layout",
+        "signature": "fn coroutine_layout<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, def_id: hir::def_id::DefId, args: GenericArgsRef<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 811,
+        "end_line": 1012,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 8748,
+          "selected_line_ranges": [
+            "811-1012"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 2,
+        "reason": "The only concrete note in the diagnostic is that the cycle is used when computing layout of an async-closure body. This method is the most specific layout-side implementation for that kind of type: it queries `tcx.coroutine_layout(def_id, ...)`, computes prefix and variant field layouts, and repeatedly calls `cx.layout_of(...)` / `cx.spanned_layout_of(...)` for coroutine-saved locals. Since async closures lower to coroutine-like bodies and the repro is `async || async {}.await`, this is the best intermediate-layer candidate for the layout half of the cycle."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::impl<'tcx> MirPass<'tcx> for StateTransform::run_pass@1626-1799",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "method",
+        "item_name": "run_pass",
+        "qualified_name": "impl<'tcx> MirPass<'tcx> for StateTransform::run_pass",
+        "signature": "impl<'tcx> MirPass<'tcx> for StateTransform { fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {",
+        "parent_signature": "impl<'tcx> MirPass<'tcx> for StateTransform",
+        "start_line": 1626,
+        "end_line": 1799,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 8005,
+          "selected_line_ranges": [
+            "1626-1799"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 3,
+        "reason": "This is the most relevant transformation-layer method for async closures with `.await`. It computes coroutine liveness/layout, stores `coroutine_layout` onto the body, creates the coroutine drop shim, and creates the resume/poll function. That makes it the densest interaction point between MIR transformation, coroutine layout, and synthetic derived bodies. For a nightly regression in async closures that becomes a MIR-optimization/layout cycle, this pass is highly suspicious."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/lib.rs::mir_drops_elaborated_and_const_checked@393-468",
+        "file": "compiler/rustc_mir_transform/src/lib.rs",
+        "item_type": "function",
+        "item_name": "mir_drops_elaborated_and_const_checked",
+        "qualified_name": "mir_drops_elaborated_and_const_checked",
+        "signature": "fn mir_drops_elaborated_and_const_checked(tcx: TyCtxt<'_>, def: LocalDefId) -> &Steal<Body<'_>> {",
+        "parent_signature": "",
+        "start_line": 393,
+        "end_line": 468,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3269,
+          "selected_line_ranges": [
+            "393-468"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 4,
+        "reason": "This is a strong upstream dependency of `inner_optimized_mir`, and unlike the thin `optimized_mir` wrapper it already forces coroutine-specific queries. In particular, it calls `tcx.ensure_with_value().mir_coroutine_witnesses(def)` for coroutines before stealing MIR, and then runs analysis-to-runtime lowering. Because the cycle note mentions layout of an async-closure body and this method is where coroutine witness/layout-related work is eagerly ensured before optimization, it is a plausible root re-entry point."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/coroutine.rs::mir_coroutine_witnesses@1558-1589",
+        "file": "compiler/rustc_mir_transform/src/coroutine.rs",
+        "item_type": "function",
+        "item_name": "mir_coroutine_witnesses",
+        "qualified_name": "mir_coroutine_witnesses",
+        "signature": "pub(crate) fn mir_coroutine_witnesses<'tcx>( tcx: TyCtxt<'tcx>, def_id: LocalDefId, ) -> Option<CoroutineLayout<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 1558,
+        "end_line": 1589,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1330,
+          "selected_line_ranges": [
+            "1558-1589"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 5,
+        "reason": "This method is a particularly strong bridge candidate between MIR and layout. It reads `mir_promoted`, computes locals live across suspend points, calls `compute_layout`, and then checks coroutine witness field types. Since `mir_drops_elaborated_and_const_checked` explicitly ensures this query for coroutines, and the error note says the cycle is used when computing layout of the async-closure body, this query-facing coroutine-layout accessor fits a likely cycle edge."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::layout_of@35-80",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "layout_of",
+        "qualified_name": "layout_of",
+        "signature": "fn layout_of<'tcx>( tcx: TyCtxt<'tcx>, query: ty::ParamEnvAnd<'tcx, Ty<'tcx>>, ) -> Result<TyAndLayout<'tcx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 35,
+        "end_line": 80,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 1676,
+          "selected_line_ranges": [
+            "35-80"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 6,
+        "reason": "This is the direct `layout_of` query provider, so it is the most likely layout query entry/re-entry point seen by the query system. It normalizes the type and can immediately recurse by calling `tcx.layout_of(...)` again for the normalized form before dispatching into `layout_of_uncached`. Because the diagnostic explicitly mentions layout computation rather than a later consumer, this wrapper is more important than generic downstream consumers."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/abi.rs::fn_sig_for_fn_abi@31-289",
+        "file": "compiler/rustc_ty_utils/src/abi.rs",
+        "item_type": "function",
+        "item_name": "fn_sig_for_fn_abi",
+        "qualified_name": "fn_sig_for_fn_abi",
+        "signature": "fn fn_sig_for_fn_abi<'tcx>( tcx: TyCtxt<'tcx>, instance: ty::Instance<'tcx>, param_env: ty::ParamEnv<'tcx>, ) -> ty::PolyFnSig<'tcx> {",
+        "parent_signature": "",
+        "start_line": 31,
+        "end_line": 289,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 12138,
+          "selected_line_ranges": [
+            "31-289"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 7,
+        "reason": "Among ABI-related candidates, this is the most async-closure-specific. It has dedicated `ty::CoroutineClosure` and `ty::Coroutine` branches, constructs callable signatures for coroutine-closures, and notably calls `tcx.coroutine_for_closure(def_id)` and `sig.to_coroutine_given_kind_and_upvars(...)`. Because the reproducer passes an async closure to `impl Fn() -> Fut`, ABI/signature computation for the generated callable body is a plausible route from optimization into layout of the same async-closure body."
+      },
+      {
+        "id": "compiler/rustc_hir_analysis/src/collect.rs::coroutine_for_closure@1831-1852",
+        "file": "compiler/rustc_hir_analysis/src/collect.rs",
+        "item_type": "function",
+        "item_name": "coroutine_for_closure",
+        "qualified_name": "coroutine_for_closure",
+        "signature": "fn coroutine_for_closure(tcx: TyCtxt<'_>, def_id: LocalDefId) -> DefId {",
+        "parent_signature": "",
+        "start_line": 1831,
+        "end_line": 1852,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 560,
+          "selected_line_ranges": [
+            "1831-1852"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 8,
+        "reason": "This is the strongest upstream metadata candidate. It explicitly maps a coroutine-closure def-id to the inner coroutine body by inspecting the closure body HIR and returning the nested coroutine closure def-id. That exact generated-item relationship is central to async-closure lowering, and an incorrect self-mapping or bad association here could create the kind of same-body re-entry implied by the diagnostic."
+      },
+      {
+        "id": "compiler/rustc_mir_transform/src/lib.rs::run_optimization_passes@556-627",
+        "file": "compiler/rustc_mir_transform/src/lib.rs",
+        "item_type": "function",
+        "item_name": "run_optimization_passes",
+        "qualified_name": "run_optimization_passes",
+        "signature": "fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {",
+        "parent_signature": "",
+        "start_line": 556,
+        "end_line": 627,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 3835,
+          "selected_line_ranges": [
+            "556-627"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 9,
+        "reason": "This is the main optimization pipeline driver reached from `inner_optimized_mir`. While it is broader and less specific than coroutine/layout methods, it is still highly relevant because the failure occurs specifically during MIR optimization and this method runs all runtime optimization passes over the body. If a pass on a nested async-closure body requests layout or a derived body/ABI that re-requests `optimized_mir` for the same item, the cycle would be exposed from here."
+      },
+      {
+        "id": "compiler/rustc_ty_utils/src/layout.rs::layout_of_uncached@105-685",
+        "file": "compiler/rustc_ty_utils/src/layout.rs",
+        "item_type": "function",
+        "item_name": "layout_of_uncached",
+        "qualified_name": "layout_of_uncached",
+        "signature": "fn layout_of_uncached<'tcx>( cx: &LayoutCx<'tcx, TyCtxt<'tcx>>, ty: Ty<'tcx>, ) -> Result<Layout<'tcx>, &'tcx LayoutError<'tcx>> {",
+        "parent_signature": "",
+        "start_line": 105,
+        "end_line": 685,
+        "body_view": {
+          "kind": "full",
+          "original_chars": 24029,
+          "selected_line_ranges": [
+            "105-685"
+          ],
+          "semantic_terms": []
+        },
+        "rank": 10,
+        "reason": "This is the core uncached layout engine beneath `layout_of` and is therefore an important intermediate implementation candidate. It is less specific than `coroutine_layout`, but if the bug is in type-kind dispatch or recursive handling before or around the coroutine-specific branch, this is where it would live. It ranks below `coroutine_layout` because the reproducer and diagnostic point much more directly at coroutine/async-closure layout than at generic layout logic."
+      }
+    ]
+  },
+  "efficiency": {
+    "total_wall_time_sec": 197.247,
+    "stage_times_sec": {
+      "checkout": 8.318,
+      "load_issue": 0.0,
+      "load_reproducer": 0.002,
+      "load_evidence": 0.0,
+      "enumerate_stage1_crates": 0.001,
+      "load_crate_docs": 0.002,
+      "stage1_llm": 7.119,
+      "stage2_llm": 13.665,
+      "stage3_file_doc_llm": 70.086,
+      "stage4_method_llm": 98.053
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 21,
+      "input_tokens": 302128,
+      "output_tokens": 12155,
+      "total_tokens": 314283,
+      "requests": [
+        {
+          "stage": "stage1_crate",
+          "latency_sec": 7.117,
+          "input_tokens": 18858,
+          "output_tokens": 366,
+          "total_tokens": 19224
+        },
+        {
+          "stage": "stage2_module",
+          "latency_sec": 13.537,
+          "input_tokens": 7306,
+          "output_tokens": 853,
+          "total_tokens": 8159
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 6.249,
+          "input_tokens": 4705,
+          "output_tokens": 461,
+          "total_tokens": 5166
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 7.565,
+          "input_tokens": 6143,
+          "output_tokens": 477,
+          "total_tokens": 6620
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 7.222,
+          "input_tokens": 4464,
+          "output_tokens": 462,
+          "total_tokens": 4926
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 6.791,
+          "input_tokens": 4506,
+          "output_tokens": 445,
+          "total_tokens": 4951
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 7.81,
+          "input_tokens": 4321,
+          "output_tokens": 551,
+          "total_tokens": 4872
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 5.584,
+          "input_tokens": 10759,
+          "output_tokens": 280,
+          "total_tokens": 11039
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 5.061,
+          "input_tokens": 5037,
+          "output_tokens": 277,
+          "total_tokens": 5314
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 5.793,
+          "input_tokens": 3881,
+          "output_tokens": 269,
+          "total_tokens": 4150
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 5.989,
+          "input_tokens": 4521,
+          "output_tokens": 301,
+          "total_tokens": 4822
+        },
+        {
+          "stage": "stage3_file_doc",
+          "latency_sec": 12.003,
+          "input_tokens": 7574,
+          "output_tokens": 885,
+          "total_tokens": 8459
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 9.266,
+          "input_tokens": 14203,
+          "output_tokens": 543,
+          "total_tokens": 14746
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 10.238,
+          "input_tokens": 14941,
+          "output_tokens": 680,
+          "total_tokens": 15621
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 12.005,
+          "input_tokens": 34967,
+          "output_tokens": 748,
+          "total_tokens": 35715
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 8.297,
+          "input_tokens": 9643,
+          "output_tokens": 552,
+          "total_tokens": 10195
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 8.494,
+          "input_tokens": 13897,
+          "output_tokens": 571,
+          "total_tokens": 14468
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 9.811,
+          "input_tokens": 17305,
+          "output_tokens": 683,
+          "total_tokens": 17988
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 11.759,
+          "input_tokens": 17443,
+          "output_tokens": 725,
+          "total_tokens": 18168
+        },
+        {
+          "stage": "stage4_method_file",
+          "latency_sec": 12.183,
+          "input_tokens": 34620,
+          "output_tokens": 616,
+          "total_tokens": 35236
+        },
+        {
+          "stage": "stage4_method_global",
+          "latency_sec": 15.948,
+          "input_tokens": 63034,
+          "output_tokens": 1410,
+          "total_tokens": 64444
+        }
+      ]
+    }
+  },
+  "diagnosis": {
+    "groundtruth_files": [
+      "compiler/rustc_mir_transform/src/validate.rs"
+    ],
+    "groundtruth_file_rank": null,
+    "file_top1_hit": false,
+    "file_top3_hit": false,
+    "file_top5_hit": false,
+    "file_top10_hit": false,
+    "method_groundtruth_count": 1,
+    "method_groundtruth_rank": null,
+    "method_top1_hit": false,
+    "method_top3_hit": false,
+    "method_top5_hit": false,
+    "method_top10_hit": false
+  }
+}

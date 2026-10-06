@@ -1,0 +1,250 @@
+{
+  "bug_id": "117789",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-10",
+    "resolved": "0f44eb32f1123ac93ab404d74c295263ce468343"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/coherence/orphan.rs",
+    "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+    "compiler/rustc_ast_passes/src/feature_gate.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_middle/src/ty/trait_def.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+    "compiler/rustc_middle/src/traits/mod.rs",
+    "compiler/rustc_trait_selection/src/traits/coherence.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Declares generic auto trait `Trait<P>`, exercising unstable custom `auto trait` support on nightly.",
+        "Provides an explicit impl `impl<P> Trait<P> for ()`, testing whether auto traits may be manually implemented for concrete types.",
+        "Uses a semicolon-only empty impl body, exercising parser and HIR handling of minimal impl syntax.",
+        "Declares auto trait `Bound: Copy`, testing supertrait bounds attached to custom auto traits.",
+        "Declares auto trait `LifetimeBound: 'static`, testing lifetime outlives bounds on custom auto traits.",
+        "Declares empty auto trait `MyTrait`, covering baseline custom auto trait declaration without bounds.",
+        "Compiles under edition 2021 with a pinned nightly toolchain, targeting compiler behavior rather than runtime execution.",
+        "`main` is empty, so the reproducer isolates trait-definition and trait-checking logic during compilation."
+      ],
+      "summary": "The reproducer is compile-only and focuses on nightly custom auto traits. It defines several `auto trait`s, including generic, supertrait-bounded, and lifetime-bounded forms, plus an explicit impl for `()` with an empty body. This exercises parsing, trait system validation, and compiler checks around unstable auto-trait declarations and implementations."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern is centered on unstable custom auto traits and their coherence/orphan-rule validation, not runtime code. The query stack shows the panic occurs in `orphan_check_impl` while checking the explicit impl `impl<P> Trait<P> for ()`, during coherence checking for trait `Trait`. The reproducer combines several intentionally invalid or feature-gated auto-trait forms (generic auto trait, explicit impl of an auto trait, supertrait-bounded auto trait, and lifetime-bounded auto trait), so the compiler should emit diagnostics only. Instead, it continues into coherence/orphan checking and panics. The common theme is incomplete error recovery or missing validity guards for malformed/unsupported auto-trait definitions and impls. In particular, a generic auto trait `Trait<P>` with an explicit impl for a foreign/fundamental type `()` appears to reach orphan checking in a state the compiler did not expect, likely because auto traits are assumed elsewhere to be nongeneric and structurally restricted. This suggests the production bug is in compiler validation/order-of-checking for custom auto traits: invalid trait items are not rejected early enough, allowing later coherence code to operate on unsupported trait metadata and ICE.",
+      "possible_causes": [
+        "Missing validation guard in coherence/orphan checking for explicit impls of invalid or unsupported custom auto traits, especially generic auto traits (`auto trait Trait<P>`).",
+        "`orphan_check_impl` likely assumes auto traits satisfy invariants (for example, nongeneric and with restricted semantics) that are violated by this erroneous definition, leading to an unexpected panic instead of a normal error.",
+        "The compiler may be continuing analysis after feature-gate/type-system errors on custom auto traits, without marking the trait/impl as poisoned or skipping coherence for errored items.",
+        "Defect in trait definition checking for `auto trait` bounds/generics: invalid auto-trait declarations are accepted far enough into HIR/Ty lowering that later coherence code sees inconsistent trait metadata.",
+        "Insufficient error recovery for empty semicolon-only impl bodies combined with auto-trait impl validation may contribute to malformed impl representation reaching orphan rules."
+      ],
+      "evidence": [
+        "Query stack pinpoints the ICE at `#0 [orphan_check_impl]` for `<impl at src/main.rs:10:1: 10:24>`, then `#1 [coherent_trait] coherence checking all impls of trait Trait`.",
+        "The impl being checked is `impl<P> Trait<P> for ()`, directly tying the crash to explicit impl/coherence handling rather than parsing of `main` or runtime behavior.",
+        "Compiler output says there were already 8 previous errors with explanations including E0567, E0568, and E0658, indicating the source is intentionally invalid and should have produced diagnostics rather than an ICE.",
+        "The reproducer specifically stresses unsupported custom auto-trait forms: generic auto trait, supertrait-bounded auto trait, lifetime-bounded auto trait, and explicit impl for an auto trait.",
+        "`main` is empty, so the only meaningful compilation activity is trait declaration/validation/coherence, matching the query stack.",
+        "The crash happens during analysis, after parsing/lowering, which is consistent with a missing early-rejection or skip-on-error path in production compiler trait/coherence code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1698,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/coherence/orphan.rs",
+        "reason": "The query stack pinpoints the ICE directly in `orphan_check_impl` while checking `impl<P> Trait<P> for ()`. This file contains the orphan-rule logic and special restrictions for auto traits, so it is the most likely place where invalid generic/errored auto-trait impls are not being rejected or skipped before assumptions are made."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/coherence/mod.rs",
+        "reason": "This is the coherence entry point that runs per-impl validation before orphan checking, including checks such as `enforce_trait_manually_implementable` and marker-trait restrictions. A bug here could allow an invalid custom auto-trait impl to proceed into orphan checking despite earlier hard errors, causing the downstream ICE."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/feature_gate.rs",
+        "reason": "The reproducer uses unstable and invalid custom auto-trait forms, and the compiler output already includes feature-gate errors. If feature gating is incomplete for generic auto traits, bounded auto traits, or explicit impls, invalid items may survive too far into analysis and trigger the orphan-check panic."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "AST validation is an early stage that should reject structurally invalid forms before lowering and coherence. Since the reproducer stresses unusual `auto trait` syntax combinations and an empty semicolon-only impl body, missing validation here could permit malformed trait/impl shapes to reach later stages."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "Well-formedness checking is a plausible place where invalid trait definitions or impl headers should be caught and poisoned before coherence runs. If generic auto traits or bounded auto traits are not marked as erroneous strongly enough here, later code may assume trait invariants that do not hold."
+      },
+      {
+        "path": "compiler/rustc_middle/src/ty/trait_def.rs",
+        "reason": "Auto-trait metadata and semantic flags are represented here. The ICE hypothesis involves coherence/orphan code assuming invariants about auto traits—such as restricted structure or nongeneric behavior—so inconsistent trait metadata originating from this layer could trigger a panic in orphan checking."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The reproducer includes supertrait and lifetime bounds on `auto trait`s, which are likely invalid but still need predicate construction and error recovery. If predicate collection for such traits builds inconsistent implicit/self predicates, coherence may later observe unsupported trait metadata."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "`orphan.rs` relies on trait-selection orphan/coherence machinery and related error classifications. If the lower-level orphan logic in trait selection mishandles generic parameters on invalid auto-trait impls, this module is a credible secondary source of the bad state that surfaces as an ICE."
+      },
+      {
+        "path": "compiler/rustc_middle/src/traits/mod.rs",
+        "reason": "This module defines shared trait-system data structures and coherence-related result types used by orphan checking. If an invalid auto-trait impl is represented inconsistently after earlier errors, the mismatch may stem from assumptions encoded in the shared trait machinery here."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/coherence.rs",
+        "reason": "Although the query names point more strongly to HIR-analysis orphan checking, this file contains the broader coherence/overlap logic for impl applicability. Since the reproducer is centered on coherence of an explicit auto-trait impl, related assumptions about impl headers and trait properties here remain plausible contributors."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 159.231,
+    "stage_times_sec": {
+      "checkout": 0.996,
+      "load_bug_context": 0.072,
+      "test_behavior_analysis": 5.364,
+      "test_failure_analysis": 11.394,
+      "load_file_candidates": 0.09,
+      "search_suspicious_files": 141.315
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 407458,
+      "output_tokens": 6451,
+      "total_tokens": 413909,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.364,
+          "input_tokens": 384,
+          "output_tokens": 252,
+          "total_tokens": 636
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 11.394,
+          "input_tokens": 2103,
+          "output_tokens": 662,
+          "total_tokens": 2765
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.575,
+          "input_tokens": 27767,
+          "output_tokens": 316,
+          "total_tokens": 28083
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.296,
+          "input_tokens": 27565,
+          "output_tokens": 291,
+          "total_tokens": 27856
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.346,
+          "input_tokens": 27368,
+          "output_tokens": 301,
+          "total_tokens": 27669
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.763,
+          "input_tokens": 27507,
+          "output_tokens": 311,
+          "total_tokens": 27818
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 10.597,
+          "input_tokens": 27434,
+          "output_tokens": 425,
+          "total_tokens": 27859
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.172,
+          "input_tokens": 27857,
+          "output_tokens": 346,
+          "total_tokens": 28203
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.899,
+          "input_tokens": 27646,
+          "output_tokens": 315,
+          "total_tokens": 27961
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 9.535,
+          "input_tokens": 27644,
+          "output_tokens": 363,
+          "total_tokens": 28007
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 9.617,
+          "input_tokens": 27653,
+          "output_tokens": 301,
+          "total_tokens": 27954
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.792,
+          "input_tokens": 27479,
+          "output_tokens": 322,
+          "total_tokens": 27801
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.881,
+          "input_tokens": 27862,
+          "output_tokens": 306,
+          "total_tokens": 28168
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 10.601,
+          "input_tokens": 27787,
+          "output_tokens": 266,
+          "total_tokens": 28053
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.171,
+          "input_tokens": 27806,
+          "output_tokens": 296,
+          "total_tokens": 28102
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.464,
+          "input_tokens": 27646,
+          "output_tokens": 293,
+          "total_tokens": 27939
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.957,
+          "input_tokens": 6562,
+          "output_tokens": 331,
+          "total_tokens": 6893
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 12.622,
+          "input_tokens": 11388,
+          "output_tokens": 754,
+          "total_tokens": 12142
+        }
+      ]
+    }
+  }
+}

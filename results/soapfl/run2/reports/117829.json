@@ -1,0 +1,638 @@
+{
+  "bug_id": "117829",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-11-12",
+    "resolved": "2c1b65ee1431f8d3fe2142e821eb13c623bbf8a0"
+  },
+  "final_top10": [
+    "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+    "compiler/rustc_trait_selection/src/traits/wf.rs",
+    "compiler/rustc_trait_selection/src/traits/project.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_infer/src/traits/project.rs",
+    "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+    "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+    "compiler/rustc_ast_passes/src/feature_gate.rs",
+    "compiler/rustc_ast_passes/src/ast_validation.rs",
+    "compiler/rustc_trait_selection/src/traits/select/mod.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Declares a custom auto trait `Z<'a, T: ?Sized>` with generic lifetime and possibly-unsized type parameter, exercising unstable auto-trait syntax on nightly Rust.",
+        "Adds a recursive where-clause `T: Z<'a, u16>`, forcing the trait solver to reason about self-referential trait obligations during definition checking.",
+        "Introduces an associated type `type W: ?Sized;`, combining auto traits with associated types and unsized associated-type bounds.",
+        "Uses a higher-ranked trait bound `for<'b> <T as Z<'b, u16>>::W: Clone`, requiring universal quantification over lifetimes in trait resolution.",
+        "Forms a projection `<T as Z<'b, u16>>::W`, exercising normalization/projection of associated types under HRTBs and auto-trait obligations.",
+        "Changes the trait’s second parameter from generic `T` to concrete `u16` inside bounds, stressing substitution and parameter environment construction.",
+        "Contains no implementations or uses in `main`, so the compiler failure is triggered purely by item well-formedness and trait-definition analysis.",
+        "Relies on nightly compiler behavior for checking complex trait predicates at definition time, likely exposing a solver or well-formedness bug."
+      ],
+      "summary": "The reproducer defines an unusual nightly-only auto trait mixing lifetimes, unsized parameters, associated types, recursive predicates, and an HRTB-projected `Clone` bound. No runtime code is needed; rustc fails while validating the trait declaration itself. It primarily exercises trait well-formedness, projection normalization, higher-ranked reasoning, and recursive obligation handling in the trait solver."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during item well-formedness checking of the trait declaration itself, not during code generation or use-site type checking. The reproducer combines several solver-stressing features in one trait header: an auto trait, generic lifetime/type parameters, a self-referential where-clause (`T: Z<'a, u16>`), an associated type, and an HRTB projection bound (`for<'b> <T as Z<'b, u16>>::W: Clone`). The query stack shows the panic occurs in `check_well_formed` while checking `Z`, which strongly suggests a compiler defect in trait-definition WF validation or predicate elaboration. The common pattern is recursive trait obligations plus projection normalization under a binder. Because auto traits are highly restricted, the compiler is already producing user-facing errors, but it should not panic while analyzing these invalid/unstable combinations. A likely root issue is that the WF/trait solver path mishandles projection predicates involving associated types of an auto trait under higher-ranked binders, especially when the trait also recursively constrains its own type parameter with a different substituted argument (`u16`). This may cause improper parameter-environment construction, missing rejection before projection, or an internal assumption violation in obligation resolution/elaboration for recursive predicates.",
+      "possible_causes": [
+        "Bug in well-formedness checking for trait definitions (`check_well_formed`) when processing recursive where-clauses on the trait being defined, leading to unguarded self-referential obligations.",
+        "Compiler defect in trait solver / obligation elaboration for higher-ranked projection predicates like `for<'b> <T as Z<'b, u16>>::W: Clone`, especially when the projected trait is the same trait currently under definition.",
+        "Incorrect handling of associated type projections on auto traits: the compiler likely reaches normalization/projection code paths that assume a regular trait or a previously validated associated item set, causing an internal inconsistency instead of graceful error reporting.",
+        "Parameter environment or substitution bug when replacing the trait's generic parameter `T` with concrete `u16` inside recursive bounds, causing malformed obligations or binder mismatches during WF checking.",
+        "Failure to short-circuit invalid auto-trait constructs before deeper trait solving; the compiler continues into projection/HRTB normalization on an already-invalid auto trait definition and hits an ICE.",
+        "Binder/lifetime handling bug in projection normalization under `for<'b>` during definition-time checking, possibly confusing late-bound lifetimes in `<T as Z<'b, u16>>::W` with the outer `'a` environment.",
+        "Cycle handling defect in recursive obligation resolution: the recursive bound `T: Z<'a, u16>` together with projection on `Z<'b, u16>` may form a cycle that is not detected or not downgraded to a normal diagnostic."
+      ],
+      "evidence": [
+        "Query stack explicitly says the panic happens in `#0 [check_well_formed] checking that 'Z' is well-formed`, so the problem lies in compiler analysis of the trait item definition.",
+        "The reproducer has no impls and `main` is empty, so the crash is triggered solely by trait declaration analysis, ruling out codegen or borrow checking.",
+        "The trait header mixes recursive obligations, associated type projection, and HRTB (`for<'b>`)—a classic stress pattern for trait solving and normalization.",
+        "The bound `for<'b> <T as Z<'b, u16>>::W: Clone` forces projection of an associated type from the very trait currently being checked, under a binder, which is a high-risk internal path.",
+        "The recursive where-clause `T: Z<'a, u16>` references the same trait with altered generic arguments, increasing the chance of cycle-detection or substitution bugs.",
+        "Compiler output mentions several ordinary user errors, yet rustc still panics afterward; this indicates missing error recovery / invalid-state handling in production compiler code rather than a problem in the reproducer.",
+        "The reproducer uses `auto trait` plus an associated type, which is an invalid combination semantically, but invalid input should be rejected cleanly, not ICE; this suggests a bug in diagnostics gating or later-phase assumptions."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1699,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/wfcheck.rs",
+        "reason": "The query stack explicitly reports the panic in `check_well_formed` while checking trait `Z`. This file drives item/type well-formedness checking, builds obligations for trait headers, normalizes bounds, and is the most direct location where an invalid auto trait with recursive predicates and HRTB projection could be mishandled and ICE instead of being rejected cleanly."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/wf.rs",
+        "reason": "The reproducer stresses WF obligation generation for a trait definition containing recursive self-referential bounds, associated type projection, and `for<'b>` binders. This file computes the actual WF obligations and is a likely place for cycle handling, recursive obligation generation, or missing short-circuiting on invalid trait constructs to go wrong."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/project.rs",
+        "reason": "The bound `for<'b> <T as Z<'b, u16>>::W: Clone` forces associated-type projection on the same trait being defined, under an HRTB. Projection normalization and recursive projection handling live here, making it highly suspicious for an ICE involving projection of an associated type from an auto trait under binders."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "This file computes the generic predicates for traits and injects implicit trait predicates. Since the crash happens during analysis of the trait declaration itself, malformed or over-eager predicate construction for the recursive where-clause and implicit `Self: Trait`-style assumptions could feed bad obligations into WF checking."
+      },
+      {
+        "path": "compiler/rustc_infer/src/traits/project.rs",
+        "reason": "If the panic arises while normalizing or caching the projected associated type during WF checking, the inference-layer projection support is a plausible culprit. The reproducer combines projection, recursion, and partially-invalid trait structure, which can expose bad assumptions in projection caching or normalization state management."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/higher_ranked/mod.rs",
+        "reason": "The reproducer’s `for<'b>` bound requires higher-ranked instantiation and comparison of binder-contained projections. A binder/lifetime handling bug in higher-ranked inference could cause internal inconsistencies when WF checking tries to reason about `<T as Z<'b, u16>>::W` under universal quantification."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/item_bounds.rs",
+        "reason": "The trait declares an associated type `W` and places bounds involving projections of that associated type. This file handles item and associated-type bounds collection/normalization, so it is a plausible place for bad remapping or normalization when the associated item belongs to an invalid auto trait definition."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/feature_gate.rs",
+        "reason": "The code uses nightly-only `auto trait` syntax in an invalid combination with generics and associated items, and rustc already emits ordinary feature/semantic errors before ICEing. A failure to fully gate or reject these constructs early could allow later phases to see unsupported shapes and crash, so feature gating is a secondary suspect."
+      },
+      {
+        "path": "compiler/rustc_ast_passes/src/ast_validation.rs",
+        "reason": "Auto traits have strong syntactic/structural restrictions. If AST validation fails to reject forbidden combinations like associated types or problematic bounds in an auto trait, later HIR/type analysis may encounter unsupported states and ICE. Less direct than WF code, but still a credible upstream source."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/select/mod.rs",
+        "reason": "Recursive trait obligations on `Z<'a, u16>` and `Z<'b, u16>` may form cycles during selection/elaboration while WF checking is proving the trait header predicates. If the ICE comes from unhandled recursive selection or cycle detection rather than direct projection code, the main selection engine is a plausible location."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 387.498,
+    "stage_times_sec": {
+      "checkout": 1.38,
+      "load_bug_context": 0.094,
+      "test_behavior_analysis": 6.617,
+      "test_failure_analysis": 15.585,
+      "load_file_candidates": 224.233,
+      "search_suspicious_files": 139.591
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 73,
+      "input_tokens": 453296,
+      "output_tokens": 19183,
+      "total_tokens": 472479,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.616,
+          "input_tokens": 378,
+          "output_tokens": 336,
+          "total_tokens": 714
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 15.584,
+          "input_tokens": 2275,
+          "output_tokens": 852,
+          "total_tokens": 3127
+        },
+        {
+          "stage": "file_summary:compiler_rustc_ast_pretty_src_pprust_state_delimited_rs",
+          "latency_sec": 4.645,
+          "input_tokens": 514,
+          "output_tokens": 220,
+          "total_tokens": 734
+        },
+        {
+          "stage": "file_summary:compiler_rustc_ast_pretty_src_pprust_state_delimited_rs_repair",
+          "latency_sec": 3.884,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_borrowck_src_constraint_generation_rs",
+          "latency_sec": 4.619,
+          "input_tokens": 1302,
+          "output_tokens": 220,
+          "total_tokens": 1522
+        },
+        {
+          "stage": "file_summary:compiler_rustc_borrowck_src_constraint_generation_rs_repair",
+          "latency_sec": 3.065,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_borrowck_src_invalidation_rs",
+          "latency_sec": 4.423,
+          "input_tokens": 1243,
+          "output_tokens": 220,
+          "total_tokens": 1463
+        },
+        {
+          "stage": "file_summary:compiler_rustc_borrowck_src_invalidation_rs_repair",
+          "latency_sec": 2.95,
+          "input_tokens": 255,
+          "output_tokens": 214,
+          "total_tokens": 469
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_example_issue_91827_extern_types_rs",
+          "latency_sec": 5.298,
+          "input_tokens": 677,
+          "output_tokens": 220,
+          "total_tokens": 897
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_cranelift_example_issue_91827_extern_types_rs_repair",
+          "latency_sec": 3.04,
+          "input_tokens": 255,
+          "output_tokens": 206,
+          "total_tokens": 461
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_ssa_src_glue_rs",
+          "latency_sec": 4.037,
+          "input_tokens": 1270,
+          "output_tokens": 220,
+          "total_tokens": 1490
+        },
+        {
+          "stage": "file_summary:compiler_rustc_codegen_ssa_src_glue_rs_repair",
+          "latency_sec": 2.878,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_promote_consts_rs",
+          "latency_sec": 4.548,
+          "input_tokens": 1321,
+          "output_tokens": 220,
+          "total_tokens": 1541
+        },
+        {
+          "stage": "file_summary:compiler_rustc_const_eval_src_transform_promote_consts_rs_repair",
+          "latency_sec": 4.409,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_combine_rs",
+          "latency_sec": 4.672,
+          "input_tokens": 1361,
+          "output_tokens": 220,
+          "total_tokens": 1581
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_combine_rs_repair",
+          "latency_sec": 3.904,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_equate_rs",
+          "latency_sec": 5.409,
+          "input_tokens": 1403,
+          "output_tokens": 220,
+          "total_tokens": 1623
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_equate_rs_repair",
+          "latency_sec": 5.821,
+          "input_tokens": 249,
+          "output_tokens": 219,
+          "total_tokens": 468
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_generalize_rs",
+          "latency_sec": 4.523,
+          "input_tokens": 1457,
+          "output_tokens": 220,
+          "total_tokens": 1677
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_generalize_rs_repair",
+          "latency_sec": 2.878,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_glb_rs",
+          "latency_sec": 4.121,
+          "input_tokens": 1544,
+          "output_tokens": 220,
+          "total_tokens": 1764
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_glb_rs_repair",
+          "latency_sec": 6.15,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_higher_ranked_mod_rs",
+          "latency_sec": 4.764,
+          "input_tokens": 1286,
+          "output_tokens": 220,
+          "total_tokens": 1506
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_higher_ranked_mod_rs_repair",
+          "latency_sec": 3.409,
+          "input_tokens": 255,
+          "output_tokens": 217,
+          "total_tokens": 472
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_lattice_rs",
+          "latency_sec": 3.684,
+          "input_tokens": 1365,
+          "output_tokens": 220,
+          "total_tokens": 1585
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_lattice_rs_repair",
+          "latency_sec": 3.412,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_lub_rs",
+          "latency_sec": 4.767,
+          "input_tokens": 1540,
+          "output_tokens": 220,
+          "total_tokens": 1760
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_lub_rs_repair",
+          "latency_sec": 2.818,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_nll_relate_mod_rs",
+          "latency_sec": 3.982,
+          "input_tokens": 1342,
+          "output_tokens": 220,
+          "total_tokens": 1562
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_nll_relate_mod_rs_repair",
+          "latency_sec": 3.0,
+          "input_tokens": 255,
+          "output_tokens": 219,
+          "total_tokens": 474
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_sub_rs",
+          "latency_sec": 4.48,
+          "input_tokens": 1407,
+          "output_tokens": 220,
+          "total_tokens": 1627
+        },
+        {
+          "stage": "file_summary:compiler_rustc_infer_src_infer_sub_rs_repair",
+          "latency_sec": 3.345,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_macros_src_newtype_rs",
+          "latency_sec": 4.134,
+          "input_tokens": 1189,
+          "output_tokens": 220,
+          "total_tokens": 1409
+        },
+        {
+          "stage": "file_summary:compiler_rustc_macros_src_newtype_rs_repair",
+          "latency_sec": 3.451,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_mir_spanview_rs",
+          "latency_sec": 4.328,
+          "input_tokens": 1427,
+          "output_tokens": 220,
+          "total_tokens": 1647
+        },
+        {
+          "stage": "file_summary:compiler_rustc_middle_src_mir_spanview_rs_repair",
+          "latency_sec": 4.141,
+          "input_tokens": 255,
+          "output_tokens": 211,
+          "total_tokens": 466
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_build_src_thir_pattern_deconstruct_pat_rs",
+          "latency_sec": 4.463,
+          "input_tokens": 1377,
+          "output_tokens": 220,
+          "total_tokens": 1597
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_build_src_thir_pattern_deconstruct_pat_rs_repair",
+          "latency_sec": 3.32,
+          "input_tokens": 255,
+          "output_tokens": 216,
+          "total_tokens": 471
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_build_src_thir_pattern_usefulness_rs",
+          "latency_sec": 5.068,
+          "input_tokens": 1330,
+          "output_tokens": 220,
+          "total_tokens": 1550
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_build_src_thir_pattern_usefulness_rs_repair",
+          "latency_sec": 3.77,
+          "input_tokens": 255,
+          "output_tokens": 220,
+          "total_tokens": 475
+        },
+        {
+          "stage": "file_summary:compiler_rustc_mir_transform_src_coverage_test_macros_src_lib_rs",
+          "latency_sec": 4.65,
+          "input_tokens": 282,
+          "output_tokens": 179,
+          "total_tokens": 461
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_targets_asmjs_unknown_emscripten_rs",
+          "latency_sec": 4.012,
+          "input_tokens": 313,
+          "output_tokens": 220,
+          "total_tokens": 533
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_targets_asmjs_unknown_emscripten_rs_repair",
+          "latency_sec": 3.778,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_targets_i386_unknown_linux_gnu_rs",
+          "latency_sec": 4.266,
+          "input_tokens": 294,
+          "output_tokens": 204,
+          "total_tokens": 498
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_targets_i486_unknown_linux_gnu_rs",
+          "latency_sec": 3.943,
+          "input_tokens": 294,
+          "output_tokens": 211,
+          "total_tokens": 505
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_targets_x86_64_sun_solaris_rs",
+          "latency_sec": 3.664,
+          "input_tokens": 468,
+          "output_tokens": 220,
+          "total_tokens": 688
+        },
+        {
+          "stage": "file_summary:compiler_rustc_target_src_spec_targets_x86_64_sun_solaris_rs_repair",
+          "latency_sec": 3.564,
+          "input_tokens": 255,
+          "output_tokens": 223,
+          "total_tokens": 478
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_canonicalize_rs",
+          "latency_sec": 4.37,
+          "input_tokens": 1232,
+          "output_tokens": 220,
+          "total_tokens": 1452
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_canonicalize_rs_repair",
+          "latency_sec": 3.527,
+          "input_tokens": 255,
+          "output_tokens": 209,
+          "total_tokens": 464
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_project_goals_inherent_projection_rs",
+          "latency_sec": 4.896,
+          "input_tokens": 729,
+          "output_tokens": 220,
+          "total_tokens": 949
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_project_goals_inherent_projection_rs_repair",
+          "latency_sec": 3.354,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_project_goals_mod_rs",
+          "latency_sec": 4.566,
+          "input_tokens": 1185,
+          "output_tokens": 220,
+          "total_tokens": 1405
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_project_goals_mod_rs_repair",
+          "latency_sec": 2.887,
+          "input_tokens": 255,
+          "output_tokens": 215,
+          "total_tokens": 470
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_project_goals_opaques_rs",
+          "latency_sec": 4.829,
+          "input_tokens": 1095,
+          "output_tokens": 220,
+          "total_tokens": 1315
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_project_goals_opaques_rs_repair",
+          "latency_sec": 3.214,
+          "input_tokens": 255,
+          "output_tokens": 207,
+          "total_tokens": 462
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_project_goals_weak_types_rs",
+          "latency_sec": 3.719,
+          "input_tokens": 574,
+          "output_tokens": 220,
+          "total_tokens": 794
+        },
+        {
+          "stage": "file_summary:compiler_rustc_trait_selection_src_solve_project_goals_weak_types_rs_repair",
+          "latency_sec": 4.75,
+          "input_tokens": 255,
+          "output_tokens": 222,
+          "total_tokens": 477
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 8.016,
+          "input_tokens": 28134,
+          "output_tokens": 335,
+          "total_tokens": 28469
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 8.452,
+          "input_tokens": 28013,
+          "output_tokens": 331,
+          "total_tokens": 28344
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 8.909,
+          "input_tokens": 27655,
+          "output_tokens": 322,
+          "total_tokens": 27977
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 9.392,
+          "input_tokens": 27872,
+          "output_tokens": 334,
+          "total_tokens": 28206
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.455,
+          "input_tokens": 27807,
+          "output_tokens": 320,
+          "total_tokens": 28127
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.675,
+          "input_tokens": 28217,
+          "output_tokens": 339,
+          "total_tokens": 28556
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.375,
+          "input_tokens": 28014,
+          "output_tokens": 351,
+          "total_tokens": 28365
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 10.492,
+          "input_tokens": 28009,
+          "output_tokens": 366,
+          "total_tokens": 28375
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.806,
+          "input_tokens": 28018,
+          "output_tokens": 323,
+          "total_tokens": 28341
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.276,
+          "input_tokens": 27864,
+          "output_tokens": 430,
+          "total_tokens": 28294
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 7.504,
+          "input_tokens": 28212,
+          "output_tokens": 392,
+          "total_tokens": 28604
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 7.28,
+          "input_tokens": 28152,
+          "output_tokens": 275,
+          "total_tokens": 28427
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 7.317,
+          "input_tokens": 28182,
+          "output_tokens": 262,
+          "total_tokens": 28444
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 9.279,
+          "input_tokens": 28003,
+          "output_tokens": 412,
+          "total_tokens": 28415
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 8.243,
+          "input_tokens": 7147,
+          "output_tokens": 411,
+          "total_tokens": 7558
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.089,
+          "input_tokens": 13899,
+          "output_tokens": 820,
+          "total_tokens": 14719
+        }
+      ]
+    }
+  }
+}

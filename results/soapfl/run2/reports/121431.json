@@ -1,0 +1,250 @@
+{
+  "bug_id": "121431",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2024-02-22",
+    "resolved": "3406ada96f8e16e49e947a91db3eba0db45245fa"
+  },
+  "final_top10": [
+    "compiler/rustc_passes/src/entry.rs",
+    "compiler/rustc_middle/src/hir/map/mod.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs",
+    "compiler/rustc_ast_lowering/src/item.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+    "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+    "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+    "compiler/rustc_resolve/src/late.rs",
+    "compiler/rustc_ty_utils/src/consts.rs",
+    "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Declares `bug<T>() -> impl CallbackMarker<...>` using an opaque `impl Trait` return type constrained by an associated type equality.",
+        "References an undeclared trait `CallbackMarker`, so type checking must still analyze the return-position opaque type and its bounds.",
+        "Sets associated type `Item` to an array `[(); N]`, forcing compile-time evaluation of the const generic length expression.",
+        "Uses an inline block as the array length expression, exercising block expressions inside const generic contexts.",
+        "Inside that const block, creates a closure `|_: &mut ()| x;`, introducing closure type checking during const evaluation.",
+        "The closure body references undefined variable `x`, exercising name resolution and error reporting within a const-context closure.",
+        "The block then evaluates to `4`, so the intended array type is `[(); 4]` despite the earlier invalid closure statement.",
+        "The function body is empty, so the compiler must diagnose missing return expression alongside the malformed opaque return constraints."
+      ],
+      "summary": "The reproducer stresses rustc’s handling of return-position `impl Trait` with an associated type bound whose value is an array sized by a const block. That block contains a closure referencing an undefined variable, combining const-generic evaluation, closure/type checking, and name resolution in an unusual position. It also leaves the trait undefined and the function body empty, forcing multiple compiler diagnostics to interact."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an ICE during early-to-mid semantic analysis while rustc is still processing HIR/attributes/entry-point discovery, even though the user code already contains ordinary front-end errors (undefined trait and undefined variable). The reproducer combines several unusual constructs in one type position: a return-position opaque type (`impl Trait`), an associated type equality bound (`Item = ...`), an array type whose length is a const block, and a closure inside that const block that itself contains an unresolved name. This suggests rustc is incorrectly traversing or lowering invalid HIR from a const-generic expression embedded inside an RPIT/associated-type constraint, instead of preserving error nodes and continuing gracefully. The common pattern is that erroneous expressions inside const blocks in type-level contexts are being analyzed as if they were fully valid during crate analysis, causing an internal invariant violation or unhandled case in HIR/typeck/const-handling code.",
+      "possible_causes": [
+        "A bug in HIR lowering or HIR validation for const-block expressions used as array lengths inside associated type bindings of return-position `impl Trait`, especially when the const block contains statement expressions like closures.",
+        "Missing error-recovery in name resolution/type checking for closures nested inside const generic expressions in type position; the unresolved `x` may leave an invalid HIR/type state that later compiler passes assume cannot occur.",
+        "An unhandled compiler case when collecting or analyzing opaque return type bounds (`impl CallbackMarker<Item = ...>`) if the associated type value contains a const expression with prior resolution/type errors.",
+        "Incorrect interaction between const-evaluatable checking / anon-const handling and closure expressions: closures are not generally valid for compile-time evaluation, and rustc may be attempting to process such a closure in an array-length const block without guarding against earlier errors.",
+        "A defect in analysis-phase traversal of malformed HIR owners or attributes, where ICE occurs after ordinary diagnostics because the compiler does not properly mark the erroneous const/opaque-type subtree as tainted and later queries assume well-formedness."
+      ],
+      "evidence": [
+        "Query stack ends in `hir_crate` -> `hir_attrs` -> `entry_fn` -> `analysis`, indicating the compiler panics during analysis of crate HIR rather than during code generation or runtime const-eval.",
+        "Compiler reports ordinary user-facing errors E0405 and E0425, so rustc already detected undefined trait `CallbackMarker` and undefined variable `x`, but still later crashed instead of recovering cleanly.",
+        "The reproducer places a const block inside an array length in a type-level associated type equality: `Item = [(); { |_: &mut ()| x; 4 }]`, an uncommon combination of RPIT + assoc type binding + anon const + closure.",
+        "The closure `|_: &mut ()| x;` appears inside the const block solely as a statement before the final value `4`, meaning the array length should still syntactically resolve to `4`; this stresses error handling for side expressions inside const blocks rather than normal const evaluation.",
+        "Because the function return type is `impl Trait`, rustc must collect opaque type information and its bounds even though the function body is empty, increasing the chance of a bug in bound collection or HIR walking over malformed type-level const expressions.",
+        "The crash occurs despite the program being obviously ill-typed, which is consistent with a compiler defect in diagnostic recovery or invariant checking in production compiler code, not a logical issue in the reproducer itself."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1742,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_passes/src/entry.rs",
+        "reason": "The query stack ends at `hir_attrs` during `entry_fn` discovery, making the entry-point scan the most immediate crash site. This pass walks HIR items and fetches attributes; malformed or insufficiently recovered HIR around the erroneous function signature may trigger the ICE here."
+      },
+      {
+        "path": "compiler/rustc_middle/src/hir/map/mod.rs",
+        "reason": "`hir_attrs` and entry-point discovery rely on HIR map navigation. An ICE during crate-HIR/owner-attribute lookup suggests a possible bad parent/owner mapping or unexpected node shape when traversing the function containing RPIT, anon const, and closure-in-const syntax."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "The reproducer’s key stressor is a closure inside a const block used as an array length in type position. This file lowers both closures and const-related expressions into HIR, so a lowering bug could create malformed HIR that later crashes during generic crate traversal."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/item.rs",
+        "reason": "The problematic construct appears in a function signature with return-position `impl Trait` and associated type binding. Item lowering is responsible for assembling the HIR owner and signature structure; a bug here could corrupt owner attributes or nested anon-const ownership seen later by `hir_attrs`."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of.rs",
+        "reason": "Anonymous consts in array lengths are typed here, and the reproducer embeds an invalid closure and unresolved name inside such an anon const. If early collection mishandles the erroneous parentage or type of that anon const, it could leave inconsistent HIR/query state exposed during analysis."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/type_of/opaque.rs",
+        "reason": "The return type is an opaque `impl Trait` with an associated type equality containing the anon const. This file specifically handles opaque-type collection, so it is a strong candidate for mishandling malformed bounds or nested anon-const expressions during RPIT analysis."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/astconv/mod.rs",
+        "reason": "Associated type bindings like `Item = [(); {...}]` are converted here from HIR syntax into `ty` representations. The unusual combination of RPIT + assoc binding + anon const + closure error could expose missing recovery in type conversion."
+      },
+      {
+        "path": "compiler/rustc_resolve/src/late.rs",
+        "reason": "The closure body references unresolved `x`, and the compiler reports E0425 before later crashing. Late resolution handles names inside exprs, closures, and anon consts, so it may be leaving an invalid partially resolved state for this nested const-generic context."
+      },
+      {
+        "path": "compiler/rustc_ty_utils/src/consts.rs",
+        "reason": "This file builds abstract consts for anonymous const expressions used in types. A closure statement inside the const block is highly unusual for abstract-const formation, and missing rejection/recovery here could propagate bad state into later analysis."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/const_evaluatable.rs",
+        "reason": "The array length forces const-evaluatable handling of an unevaluated anon const in type position. Even though the crash appears earlier, this logic is closely tied to problematic const generic expressions and may be involved in triggering analysis of malformed anon-const contents."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 155.532,
+    "stage_times_sec": {
+      "checkout": 0.227,
+      "load_bug_context": 0.072,
+      "test_behavior_analysis": 5.52,
+      "test_failure_analysis": 13.528,
+      "load_file_candidates": 0.09,
+      "search_suspicious_files": 136.094
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 18,
+      "input_tokens": 420181,
+      "output_tokens": 6756,
+      "total_tokens": 426937,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.52,
+          "input_tokens": 338,
+          "output_tokens": 284,
+          "total_tokens": 622
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.528,
+          "input_tokens": 2158,
+          "output_tokens": 716,
+          "total_tokens": 2874
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.338,
+          "input_tokens": 27813,
+          "output_tokens": 293,
+          "total_tokens": 28106
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.814,
+          "input_tokens": 27817,
+          "output_tokens": 317,
+          "total_tokens": 28134
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.818,
+          "input_tokens": 27336,
+          "output_tokens": 301,
+          "total_tokens": 27637
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 8.081,
+          "input_tokens": 27573,
+          "output_tokens": 361,
+          "total_tokens": 27934
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 9.576,
+          "input_tokens": 27557,
+          "output_tokens": 440,
+          "total_tokens": 27997
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 7.904,
+          "input_tokens": 27958,
+          "output_tokens": 350,
+          "total_tokens": 28308
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 7.835,
+          "input_tokens": 27683,
+          "output_tokens": 356,
+          "total_tokens": 28039
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 11.606,
+          "input_tokens": 27707,
+          "output_tokens": 354,
+          "total_tokens": 28061
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.943,
+          "input_tokens": 27794,
+          "output_tokens": 386,
+          "total_tokens": 28180
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 8.491,
+          "input_tokens": 27608,
+          "output_tokens": 335,
+          "total_tokens": 27943
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.806,
+          "input_tokens": 27924,
+          "output_tokens": 377,
+          "total_tokens": 28301
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 6.67,
+          "input_tokens": 27843,
+          "output_tokens": 268,
+          "total_tokens": 28111
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.484,
+          "input_tokens": 27967,
+          "output_tokens": 268,
+          "total_tokens": 28235
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 6.253,
+          "input_tokens": 27728,
+          "output_tokens": 293,
+          "total_tokens": 28021
+        },
+        {
+          "stage": "search_suspicious_files_chunk_15",
+          "latency_sec": 7.653,
+          "input_tokens": 15830,
+          "output_tokens": 343,
+          "total_tokens": 16173
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.79,
+          "input_tokens": 13547,
+          "output_tokens": 714,
+          "total_tokens": 14261
+        }
+      ]
+    }
+  }
+}

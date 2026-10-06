@@ -1,0 +1,246 @@
+{
+  "bug_id": "116079",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2023-09-21",
+    "resolved": "3223b0b5e8dadda3f76c3fd1a8d6c5addc09599e"
+  },
+  "final_top10": [
+    "compiler/rustc_mir_build/src/build/matches/mod.rs",
+    "compiler/rustc_mir_transform/src/generator.rs",
+    "compiler/rustc_mir_build/src/build/scope.rs",
+    "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+    "compiler/rustc_const_eval/src/transform/validate.rs",
+    "compiler/rustc_mir_build/src/build/expr/into.rs",
+    "compiler/rustc_hir_typeck/src/generator_interior/mod.rs",
+    "compiler/rustc_hir_analysis/src/check/region.rs",
+    "compiler/rustc_middle/src/middle/region.rs",
+    "compiler/rustc_hir_typeck/src/_match.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Enables nightly-only `if_let_guard`, allowing `if let` pattern guards inside a `match` arm.",
+        "Declares `static mut A`, exercising unsafe access to mutable global state and pattern-matching on a static value.",
+        "Defines `async fn fun`, so the body is lowered into a generator-based future by the compiler.",
+        "Performs `match A` inside `unsafe`, forcing borrow/checking and pattern analysis on a mutable static during async lowering.",
+        "Uses a guard arm `i if let Some(1) = ...`, testing match-guard semantics with an unused arm binding.",
+        "Places `async { Some(1) }.await` inside the guard, exercising await points within `if let` guards.",
+        "Combines guard evaluation with async suspension, stressing MIR/HIR lowering, control-flow construction, and temporary management.",
+        "Includes wildcard arms before and after the guarded arm, testing arm ordering, reachability, and exhaustive-match analysis."
+      ],
+      "summary": "The reproducer mixes unstable `if let` match guards, `async`/`.await`, and unsafe matching on a `static mut`. It specifically stresses compiler lowering and analysis when an awaited async expression appears inside a match guard, while the match scrutinee is a mutable global accessed in unsafe code."
+    },
+    "test_failure_analysis": {
+      "analysis": "The failure pattern points to an internal compiler error during MIR analysis rather than a frontend parsing or type-checking issue. The reproducer combines several unusual features in one place: an `async fn` (generator lowering), a `match` on `static mut` inside `unsafe`, and an unstable `if let` guard whose condition contains an `.await`. This means the compiler must lower a guarded match arm into MIR while also splitting control flow around an await suspension point. The stack trace shows the panic happens in `mir_drops_elaborated_and_const_checked`, with `-Z validate-mir` and `-Z drop-tracking-mir=yes` enabled, which strongly suggests malformed MIR or invalid drop/live-range state produced before or during drop elaboration/const-checking. A likely commonality is that the guarded arm introduces temporaries/bindings that cross a suspension point in a place where the compiler does not correctly model scopes, reachability, or drops. The unused binding `i`, wildcard arms around the guarded arm, and matching on `static mut A` further stress arm-local bindings and scrutinee handling. Overall, the bug is most plausibly in MIR construction/transform for async match guards with await, especially around guard scopes, temporary lifetime/drop generation, or validation of unreachable/guarded control-flow edges.",
+      "possible_causes": [
+        "Bug in MIR lowering for `if let` match guards inside `async fn`, where an `.await` in the guard creates invalid control-flow or scope information for the guarded arm.",
+        "Incorrect drop elaboration for temporaries or pattern-guard bindings that live across an await point, leading to malformed `mir_drops_elaborated_and_const_checked` state.",
+        "Compiler defect in generator/async transformation when lowering guarded `match` expressions, especially if guard evaluation is split across suspension points.",
+        "Improper handling of scrutinee/arm borrows for `match` on `static mut` combined with guarded async evaluation, causing invalid MIR liveness or storage statements.",
+        "Reachability/scope bug for wildcard arms surrounding a guarded arm, where the compiler mismodels arm ordering or cleanup paths after introducing async guard suspension.",
+        "MIR validation or drop-tracking bug specific to unstable `if_let_guard` when nested with awaited async blocks, exposing an invariant violation in produced MIR."
+      ],
+      "evidence": [
+        "The reproducer only becomes interesting by combining `if let` guard semantics with `.await` inside the guard, which is an uncommon lowering path.",
+        "`async fn fun` forces generator-based lowering, so all locals/temporaries in the match and guard must be transformed into suspend-safe MIR.",
+        "The panic occurs during `mir_drops_elaborated_and_const_checked`, indicating the compiler got far enough to build MIR and then failed while elaborating drops/validating it.",
+        "Compiler flags include `-Z validate-mir` and `-Z drop-tracking-mir=yes`, which often surface invalid MIR produced by earlier lowering/transform defects.",
+        "The code matches on `static mut A` inside `unsafe`, stressing special-case handling of mutable static access and scrutinee lifetime/borrow modeling.",
+        "The guarded arm binds `i` but does not use it, which can expose bugs in arm-local binding scope or cleanup generation.",
+        "Wildcard arms before and after the guarded arm stress match-arm CFG construction, reachability, and cleanup edges around guard success/failure.",
+        "The error is an ICE with no user-facing semantic error, which is consistent with a compiler invariant violation in MIR generation/transformation rather than invalid source code."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1668,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_mir_build/src/build/matches/mod.rs",
+        "reason": "Most suspicious because the reproducer centers on lowering a `match` with an unstable `if let` guard that itself contains `.await`. This file owns MIR construction for matches, guards, arm bindings, and guard control-flow, so it is the likeliest place to generate malformed MIR scopes/edges for an async guard."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/generator.rs",
+        "reason": "`async fn` is lowered to a generator/state machine, and the crash occurs later during MIR drop elaboration/validation. If locals or temporaries created for the match guard are incorrectly modeled across a suspension point, generator transformation is a prime source of invalid MIR or wrong saved-local/drop behavior."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/scope.rs",
+        "reason": "The failure plausibly involves incorrect temporary or binding lifetimes across guard evaluation and `await`. This file manages MIR lexical scopes and scheduled drops, making it highly suspect for mis-scoped temporaries or cleanup paths in guarded async matches."
+      },
+      {
+        "path": "compiler/rustc_mir_transform/src/elaborate_drops.rs",
+        "reason": "The stack trace explicitly mentions `mir_drops_elaborated_and_const_checked`, and the symptom matches a bug in drop elaboration when provisional drops from guard temporaries/bindings interact with suspension points. This pass may be tripping over or mishandling malformed cleanup/drop state."
+      },
+      {
+        "path": "compiler/rustc_const_eval/src/transform/validate.rs",
+        "reason": "`-Z validate-mir` is enabled, and this file implements MIR structural/type validation. Even if earlier passes produced the bad MIR, this validator is a plausible panic site or invariant checker exposing the bug, especially for malformed CFG around guarded `await`."
+      },
+      {
+        "path": "compiler/rustc_mir_build/src/build/expr/into.rs",
+        "reason": "This file lowers expressions into MIR destinations and specially handles control-flow-heavy expressions including `match`. Since the problematic construct is an awaited async expression nested inside a match guard, expression lowering here may contribute invalid temporaries or block structure."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/generator_interior/mod.rs",
+        "reason": "Await inside a guard means generator-interior analysis must decide what lives across suspension. If guard locals/temporaries or scrutinee-related values are misclassified, later generator/drop passes can receive inconsistent information and ICE."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/check/region.rs",
+        "reason": "Region/scope-tree construction is relevant because match guards and temporaries have subtle lifetime boundaries, and `await` inside the guard stresses those boundaries further. A wrong terminating scope or temporary lifetime could propagate into invalid MIR/drop behavior."
+      },
+      {
+        "path": "compiler/rustc_middle/src/middle/region.rs",
+        "reason": "This file defines the scope model used for temporary and destruction lifetimes. Given the likely issue around guard scopes plus suspension, an inconsistency in region-scope modeling could underlie incorrect MIR scope/drop generation."
+      },
+      {
+        "path": "compiler/rustc_hir_typeck/src/_match.rs",
+        "reason": "Less likely than MIR-building, but still relevant because match-arm and guard typing/structure originate here. The unusual combination of `if let` guard plus awaited async expression may expose a mismatch between typeck assumptions and later lowering of guarded arms."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 145.375,
+    "stage_times_sec": {
+      "checkout": 1.376,
+      "load_bug_context": 0.033,
+      "test_behavior_analysis": 5.235,
+      "test_failure_analysis": 12.94,
+      "load_file_candidates": 0.173,
+      "search_suspicious_files": 125.618
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 17,
+      "input_tokens": 396433,
+      "output_tokens": 6541,
+      "total_tokens": 402974,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 5.235,
+          "input_tokens": 416,
+          "output_tokens": 263,
+          "total_tokens": 679
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 12.939,
+          "input_tokens": 1974,
+          "output_tokens": 721,
+          "total_tokens": 2695
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 7.087,
+          "input_tokens": 27402,
+          "output_tokens": 342,
+          "total_tokens": 27744
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.872,
+          "input_tokens": 27654,
+          "output_tokens": 301,
+          "total_tokens": 27955
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.556,
+          "input_tokens": 27041,
+          "output_tokens": 309,
+          "total_tokens": 27350
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.856,
+          "input_tokens": 27539,
+          "output_tokens": 388,
+          "total_tokens": 27927
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 8.066,
+          "input_tokens": 27363,
+          "output_tokens": 346,
+          "total_tokens": 27709
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 8.891,
+          "input_tokens": 27765,
+          "output_tokens": 361,
+          "total_tokens": 28126
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 8.598,
+          "input_tokens": 27563,
+          "output_tokens": 339,
+          "total_tokens": 27902
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 8.635,
+          "input_tokens": 27569,
+          "output_tokens": 375,
+          "total_tokens": 27944
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 7.256,
+          "input_tokens": 27564,
+          "output_tokens": 352,
+          "total_tokens": 27916
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 9.809,
+          "input_tokens": 27319,
+          "output_tokens": 335,
+          "total_tokens": 27654
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.09,
+          "input_tokens": 27668,
+          "output_tokens": 356,
+          "total_tokens": 28024
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.181,
+          "input_tokens": 27596,
+          "output_tokens": 332,
+          "total_tokens": 27928
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 8.202,
+          "input_tokens": 27849,
+          "output_tokens": 368,
+          "total_tokens": 28217
+        },
+        {
+          "stage": "search_suspicious_files_chunk_14",
+          "latency_sec": 7.622,
+          "input_tokens": 25055,
+          "output_tokens": 354,
+          "total_tokens": 25409
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 11.867,
+          "input_tokens": 11096,
+          "output_tokens": 699,
+          "total_tokens": 11795
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,237 @@
+{
+  "bug_id": "105251",
+  "method_level_enabled": false,
+  "checkout": {
+    "requested": "nightly-2022-12-03",
+    "resolved": "32e613bbaafee1bcabba48a2257b838f8d1c03d3"
+  },
+  "final_top10": [
+    "compiler/rustc_middle/src/ty/opaque_types.rs",
+    "compiler/rustc_infer/src/infer/opaque_types.rs",
+    "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+    "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+    "compiler/rustc_infer/src/infer/outlives/env.rs",
+    "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+    "compiler/rustc_trait_selection/src/traits/outlives_bounds.rs",
+    "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+    "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+    "compiler/rustc_ast_lowering/src/expr.rs"
+  ],
+  "final_method_top10": [],
+  "final_method_items": [],
+  "fault_comprehension": {
+    "test_behavior_analysis": {
+      "behavior_items": [
+        "Defines `test<'s: 's>` with a reflexive outlives bound, exercising lifetime parsing and normalization of redundant `'s: 's` constraints.",
+        "Takes `&'s str` and returns `impl Future`, using opaque return types together with explicit lifetime parameters.",
+        "Uses `async move` in a non-async function, forcing lowering into a compiler-generated future state machine.",
+        "Captures the borrowed parameter `s` inside the async block, testing lifetime capture of references across opaque async futures.",
+        "The async body stores `s` in `_s` and returns unit, so the future output is an inferred concrete `()` type.",
+        "The signature nests opaque types: outer `impl Future<Output = impl Sized>`, exercising nested `impl Trait` handling.",
+        "`impl Sized` for the future output is trivially satisfied by `()`, testing opaque type inference under trait bounds.",
+        "`main` is empty, so compilation focuses purely on type checking, lifetime solving, and async/`impl Trait` lowering behavior."
+      ],
+      "summary": "The reproducer is a compile-only test for rustc’s handling of lifetimes, async lowering, and nested opaque return types. It defines a function with a redundant self-outlives lifetime bound, returns an `async move` future as `impl Future`, and hides the future’s unit output behind another `impl Sized`. The key exercised behavior is how rustc captures a borrowed reference inside an async-generated future while resolving nested `impl Trait` and lifetime constraints."
+    },
+    "test_failure_analysis": {
+      "analysis": "The reproducer is centered on the interaction of three compiler features: explicit lifetime bounds (`'s: 's`), async lowering (`async move` creating a generator/future that captures `&'s str`), and nested opaque types (`impl Future<Output = impl Sized>`). All observed behavior points to successful compilation, which means the interesting compiler path is not ordinary parsing but type checking and opaque type/lifetime resolution. The common pattern is that the function signature creates an outer opaque future whose hidden type is the async-generated future, while the future’s `Output` is itself another opaque type inferred to `()`. Because the async block captures `s`, the compiler must correctly propagate the lifetime `'s` into the generated future and avoid over-constraining or mis-normalizing the nested opaque output. The redundant reflexive outlives bound `'s: 's` is a likely trigger because it exercises region-bound canonicalization and may expose bugs where self-outlives predicates are mishandled during opaque type capture, region solving, or async hidden-type inference. A plausible compiler defect would therefore lie in rustc’s handling of nested `impl Trait` combined with async lowering and lifetime capture, especially in code that computes hidden types, required captured lifetimes, or normalizes region predicates for opaque types.",
+      "possible_causes": [
+        "A defect in opaque type inference for nested `impl Trait`, where the compiler incorrectly computes the hidden type or required bounds for `impl Future<Output = impl Sized>` when the outer hidden type is an async-generated future and the inner hidden type is inferred as `()`.",
+        "A bug in async lowering or generator witness construction that mishandles captured reference lifetimes (`&'s str`) inside `async move`, causing incorrect propagation of `'s` into the opaque future type.",
+        "Incorrect normalization/elaboration of reflexive lifetime predicates such as `'s: 's`, especially when combined with opaque return types, leading to faulty region constraints or accidental rejection/ICE in trait/type checking.",
+        "A defect in lifetime capture analysis for return-position `impl Trait` in functions returning async futures, where the compiler may over-capture, under-capture, or mis-record which generic lifetimes must be part of the opaque type’s hidden type.",
+        "A bug in region solving around nested opaque types, where the outer RPIT and inner opaque output interact poorly with the async future’s inferred output and captured borrow, potentially due to incorrect constraint generation or leak checking.",
+        "An issue in HIR-to-Ty lowering or opaque type registration for nested opaque return types in async contexts, where the compiler may confuse the outer future opaque type with the inner output opaque type or fail to preserve lifetime relationships across both layers."
+      ],
+      "evidence": [
+        "The function uses a reflexive bound `'s: 's`, which is semantically redundant but exercises compiler normalization/elaboration of lifetime predicates.",
+        "The parameter `s: &'s str` is captured by `async move`, so the generated future’s hidden type must carry and validate lifetime `'s` correctly.",
+        "The return type is nested opaque: `impl Future<Output = impl Sized>`, directly stressing rustc’s RPIT/opaque type machinery at two levels.",
+        "The async body returns unit (`()`), so the inner `impl Sized` hidden type is trivial; if failure occurs, it is more likely in compiler bookkeeping for opaque type inference than in user-level trait satisfaction.",
+        "`main` is empty and the crate is compile-only, isolating the exercised paths to parsing, type checking, async lowering, region solving, and opaque type handling rather than runtime behavior.",
+        "Successful compilation with only a dead-code warning indicates the reproducer specifically targets a previously fragile compiler edge case rather than invalid source, pointing to production-compiler logic in async/opaque/lifetime interaction."
+      ]
+    }
+  },
+  "file_level": {
+    "candidate_file_count": 1553,
+    "selected_files": [
+      {
+        "path": "compiler/rustc_middle/src/ty/opaque_types.rs",
+        "reason": "Most suspicious because this reproducer stresses return-position opaque types with nested `impl Trait` plus an explicit lifetime bound. This file contains the generic-argument remapping logic for opaque types, including careful handling of regions/lifetimes when translating from the function’s generics into the opaque type’s own generics. A bug here could easily mis-handle the captured `'s` from `&'s str` inside the async-generated future, especially with the redundant `'s: 's` predicate and the nested outer/inner opaque types."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/opaque_types.rs",
+        "reason": "Very likely involved because the failure mode described is fundamentally about opaque type inference: the outer hidden type is an async future and the inner hidden type is inferred as `()`. This file is responsible for tracking and resolving opaque types during inference, so nested RPIT plus async capture is exactly the kind of scenario where hidden-type bookkeeping or compatibility checks can go wrong."
+      },
+      {
+        "path": "compiler/rustc_borrowck/src/region_infer/opaque_types.rs",
+        "reason": "Strong candidate because the reproducer specifically depends on correct lifetime propagation into opaque hidden types after region inference. This file rewrites region variables in inferred hidden types and opaque arguments into named regions, which is precisely where a captured `&'s str` inside an async future combined with nested `impl Trait` and a reflexive outlives bound could be mishandled."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/predicates_of.rs",
+        "reason": "The explicit `'s: 's` bound makes predicate collection and elaboration relevant. This file computes the effective generic predicates for the function, including inferred outlives predicates. If reflexive outlives predicates are not normalized or combined correctly before later opaque/async processing, it could trigger the observed edge case."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/env.rs",
+        "reason": "Plausible because this code gathers explicit and implied outlives facts into the inference environment. A redundant self-outlives predicate like `'s: 's` is exactly the sort of thing that may expose normalization or environment-construction bugs, especially when those facts are later used to validate captured lifetimes of opaque async futures."
+      },
+      {
+        "path": "compiler/rustc_infer/src/infer/outlives/obligations.rs",
+        "reason": "Relevant because the reproducer’s key interaction is between type outlives obligations, captured reference lifetimes, and opaque async return types. This file lowers `T: 'a` style obligations into region constraints and verification checks, so an incorrect decomposition involving the async future hidden type or inner opaque output could cause the bug."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/outlives_bounds.rs",
+        "reason": "A good candidate since implied outlives reasoning often feeds lifetime capture for RPIT/async scenarios. The function signature and borrowed capture may require the compiler to derive and re-instantiate outlives bounds correctly; nested opaque types plus a reflexive bound are a credible stress case for this logic."
+      },
+      {
+        "path": "compiler/rustc_trait_selection/src/traits/query/type_op/implied_outlives_bounds.rs",
+        "reason": "Also suspicious because implied outlives bounds are central to determining what lifetime relationships may be assumed from well-formed types. The input type here involves `&'s str`, async desugaring, and opaque returns; if this query computes or canonicalizes those bounds incorrectly, it could explain the edge-case failure."
+      },
+      {
+        "path": "compiler/rustc_hir_analysis/src/collect/lifetimes.rs",
+        "reason": "Worth including because the reproducer explicitly uses a named lifetime parameter with a reflexive bound and then captures that lifetime through async lowering. This file classifies and binds lifetimes in item signatures, so any subtle mishandling of `'s` as early/late/free or in binder context could propagate into later opaque-type and async analysis."
+      },
+      {
+        "path": "compiler/rustc_ast_lowering/src/expr.rs",
+        "reason": "Lower priority but still plausible because the async block is central to the reproducer. This file performs AST-to-HIR lowering and async desugaring setup, so if the generated HIR for `async move` in the presence of nested `impl Trait` return types or captured lifetimes is malformed, downstream opaque-type inference could fail."
+      }
+    ]
+  },
+  "method_level": {
+    "enabled": false,
+    "reviewed_methods": []
+  },
+  "efficiency": {
+    "total_wall_time_sec": 137.162,
+    "stage_times_sec": {
+      "checkout": 4.663,
+      "load_bug_context": 0.186,
+      "test_behavior_analysis": 6.246,
+      "test_failure_analysis": 13.505,
+      "load_file_candidates": 0.094,
+      "search_suspicious_files": 112.467
+    },
+    "llm_usage": {
+      "model": "gpt-5.4",
+      "request_count": 16,
+      "input_tokens": 356914,
+      "output_tokens": 6546,
+      "total_tokens": 363460,
+      "requests": [
+        {
+          "stage": "test_behavior_analysis",
+          "latency_sec": 6.246,
+          "input_tokens": 362,
+          "output_tokens": 313,
+          "total_tokens": 675
+        },
+        {
+          "stage": "test_failure_analysis",
+          "latency_sec": 13.505,
+          "input_tokens": 1003,
+          "output_tokens": 769,
+          "total_tokens": 1772
+        },
+        {
+          "stage": "search_suspicious_files_chunk_1",
+          "latency_sec": 9.977,
+          "input_tokens": 26512,
+          "output_tokens": 444,
+          "total_tokens": 26956
+        },
+        {
+          "stage": "search_suspicious_files_chunk_2",
+          "latency_sec": 7.774,
+          "input_tokens": 26455,
+          "output_tokens": 331,
+          "total_tokens": 26786
+        },
+        {
+          "stage": "search_suspicious_files_chunk_3",
+          "latency_sec": 7.743,
+          "input_tokens": 26340,
+          "output_tokens": 394,
+          "total_tokens": 26734
+        },
+        {
+          "stage": "search_suspicious_files_chunk_4",
+          "latency_sec": 7.166,
+          "input_tokens": 26577,
+          "output_tokens": 322,
+          "total_tokens": 26899
+        },
+        {
+          "stage": "search_suspicious_files_chunk_5",
+          "latency_sec": 7.812,
+          "input_tokens": 26614,
+          "output_tokens": 350,
+          "total_tokens": 26964
+        },
+        {
+          "stage": "search_suspicious_files_chunk_6",
+          "latency_sec": 6.523,
+          "input_tokens": 26767,
+          "output_tokens": 351,
+          "total_tokens": 27118
+        },
+        {
+          "stage": "search_suspicious_files_chunk_7",
+          "latency_sec": 6.422,
+          "input_tokens": 26648,
+          "output_tokens": 361,
+          "total_tokens": 27009
+        },
+        {
+          "stage": "search_suspicious_files_chunk_8",
+          "latency_sec": 7.373,
+          "input_tokens": 26571,
+          "output_tokens": 345,
+          "total_tokens": 26916
+        },
+        {
+          "stage": "search_suspicious_files_chunk_9",
+          "latency_sec": 6.335,
+          "input_tokens": 26713,
+          "output_tokens": 280,
+          "total_tokens": 26993
+        },
+        {
+          "stage": "search_suspicious_files_chunk_10",
+          "latency_sec": 7.771,
+          "input_tokens": 25241,
+          "output_tokens": 342,
+          "total_tokens": 25583
+        },
+        {
+          "stage": "search_suspicious_files_chunk_11",
+          "latency_sec": 8.207,
+          "input_tokens": 26777,
+          "output_tokens": 350,
+          "total_tokens": 27127
+        },
+        {
+          "stage": "search_suspicious_files_chunk_12",
+          "latency_sec": 8.746,
+          "input_tokens": 26810,
+          "output_tokens": 331,
+          "total_tokens": 27141
+        },
+        {
+          "stage": "search_suspicious_files_chunk_13",
+          "latency_sec": 6.685,
+          "input_tokens": 24898,
+          "output_tokens": 343,
+          "total_tokens": 25241
+        },
+        {
+          "stage": "search_suspicious_files_final",
+          "latency_sec": 13.903,
+          "input_tokens": 12626,
+          "output_tokens": 920,
+          "total_tokens": 13546
+        }
+      ]
+    }
+  }
+}
