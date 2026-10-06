@@ -15,8 +15,6 @@
 | `results/`, `ablation_study/` | Main experiment and ablation results. |
 | `baselines/`, `gcc-cbi/` | Baseline implementations and GCC transfer experiments. |
 
-Paper figures are not included in this repository.
-
 The evaluation dataset contains 160 rustc bugs: 94 internal compiler errors, 46 completeness bugs, and 20 soundness bugs. It is derived from the dataset in *An Empirical Study of Bugs in the rustc Compiler*.
 
 ## Quick Start
